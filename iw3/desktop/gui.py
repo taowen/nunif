@@ -14,9 +14,16 @@ import wx.lib.agw.persist as persist
 import wx.lib.stattext as stattext
 from wx.lib.buttons import GenBitmapButton
 from wx.lib.intctrl import IntCtrl
+import wx.glcanvas
 import torch
 import numpy as np
 from PIL import Image
+try:
+    from OpenGL.GL import *
+    from OpenGL.arrays import vbo
+    HAS_OPENGL = True
+except ImportError:
+    HAS_OPENGL = False
 from nunif.utils.git import get_current_branch
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
@@ -96,25 +103,79 @@ class FullScreenViewer(wx.Frame):
         self.parent = parent
         self.SetBackgroundColour(wx.Colour(0, 0, 0))
         
-        # Create panel to display the image
-        self.panel = wx.Panel(self)
-        self.panel.SetBackgroundColour(wx.Colour(0, 0, 0))
+        if not HAS_OPENGL:
+            wx.MessageBox("OpenGL not available. Install PyOpenGL to use local viewer.", 
+                         "Error", wx.OK | wx.ICON_ERROR)
+            self.Destroy()
+            return
+        
+        # Create OpenGL canvas
+        attribList = [
+            wx.glcanvas.WX_GL_RGBA,
+            wx.glcanvas.WX_GL_DOUBLEBUFFER,
+            wx.glcanvas.WX_GL_DEPTH_SIZE, 16,
+            0
+        ]
+        self.canvas = wx.glcanvas.GLCanvas(self, attribList=attribList)
+        self.context = wx.glcanvas.GLContext(self.canvas)
         
         # Sizer
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.panel, 1, wx.EXPAND)
+        sizer.Add(self.canvas, 1, wx.EXPAND)
         self.SetSizer(sizer)
         
         # Bind events
         self.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
-        self.panel.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
-        self.panel.Bind(wx.EVT_PAINT, self.on_paint)
+        self.canvas.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.canvas.Bind(wx.EVT_PAINT, self.on_paint)
+        self.canvas.Bind(wx.EVT_SIZE, self.on_size)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.Bind(EVT_LOCAL_FRAME, self.on_local_frame)
         
         self.current_frame = None
+        self.texture_id = None
+        self.gl_initialized = False
+        self.frame_width = 0
+        self.frame_height = 0
+        
         self.ShowFullScreen(True)
-        self.panel.SetFocus()
+        self.canvas.SetFocus()
+        
+    def init_gl(self):
+        """Initialize OpenGL settings and shaders"""
+        if self.gl_initialized:
+            return
+            
+        self.canvas.SetCurrent(self.context)
+        
+        # Enable texturing
+        glEnable(GL_TEXTURE_2D)
+        glDisable(GL_DEPTH_TEST)
+        
+        # Set up viewport
+        size = self.canvas.GetSize()
+        glViewport(0, 0, size.width, size.height)
+        
+        # Set up orthographic projection
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, 1, 0, 1, -1, 1)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        
+        # Generate texture
+        self.texture_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        
+        # Set clear color to black
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        
+        self.gl_initialized = True
         
     def on_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -122,37 +183,80 @@ class FullScreenViewer(wx.Frame):
         event.Skip()
         
     def on_close(self, event):
+        if self.texture_id is not None:
+            self.canvas.SetCurrent(self.context)
+            glDeleteTextures([self.texture_id])
+            self.texture_id = None
         self.parent.on_close_local_viewer()
         self.Destroy()
         
+    def on_size(self, event):
+        if self.gl_initialized:
+            self.canvas.SetCurrent(self.context)
+            size = self.canvas.GetSize()
+            glViewport(0, 0, size.width, size.height)
+            self.canvas.Refresh()
+        event.Skip()
+        
     def on_paint(self, event):
-        if self.current_frame is not None:
-            dc = wx.PaintDC(self.panel)
-            dc.Clear()
+        if not self.gl_initialized:
+            self.init_gl()
             
-            # Get panel size
-            panel_size = self.panel.GetSize()
+        self.canvas.SetCurrent(self.context)
+        self.render_frame()
+        self.canvas.SwapBuffers()
+        
+    def render_frame(self):
+        """Render the current frame using OpenGL"""
+        glClear(GL_COLOR_BUFFER_BIT)
+        
+        if self.current_frame is None or self.texture_id is None:
+            return
             
-            # Scale image to fit panel while maintaining aspect ratio
-            img_width, img_height = self.current_frame.GetSize()
-            panel_width, panel_height = panel_size
+        # Update texture with current frame data
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, self.frame_width, self.frame_height, 
+                     0, GL_RGB, GL_UNSIGNED_BYTE, self.current_frame)
+        
+        # Calculate aspect ratios for proper scaling
+        canvas_size = self.canvas.GetSize()
+        if canvas_size.width <= 0 or canvas_size.height <= 0:
+            return
             
-            if panel_width > 0 and panel_height > 0 and img_width > 0 and img_height > 0:
-                scale_x = panel_width / img_width
-                scale_y = panel_height / img_height
-                scale = min(scale_x, scale_y)
-                
-                new_width = int(img_width * scale)
-                new_height = int(img_height * scale)
-                
-                # Center the image
-                x = (panel_width - new_width) // 2
-                y = (panel_height - new_height) // 2
-                
-                # Scale and draw the image
-                scaled_img = self.current_frame.Scale(new_width, new_height, wx.IMAGE_QUALITY_HIGH)
-                bitmap = wx.Bitmap(scaled_img)
-                dc.DrawBitmap(bitmap, x, y)
+        canvas_aspect = canvas_size.width / canvas_size.height
+        frame_aspect = self.frame_width / self.frame_height if self.frame_height > 0 else 1.0
+        
+        if canvas_aspect > frame_aspect:
+            # Canvas is wider than frame
+            height = 1.0
+            width = frame_aspect / canvas_aspect
+            x_offset = (1.0 - width) / 2.0
+            y_offset = 0.0
+        else:
+            # Canvas is taller than frame
+            width = 1.0
+            height = canvas_aspect / frame_aspect
+            x_offset = 0.0
+            y_offset = (1.0 - height) / 2.0
+        
+        # Render textured quad
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glColor3f(1.0, 1.0, 1.0)
+        
+        glBegin(GL_QUADS)
+        glTexCoord2f(0.0, 1.0)  # Note: OpenGL texture coordinates are flipped vertically
+        glVertex2f(x_offset, y_offset)
+        
+        glTexCoord2f(1.0, 1.0)
+        glVertex2f(x_offset + width, y_offset)
+        
+        glTexCoord2f(1.0, 0.0)
+        glVertex2f(x_offset + width, y_offset + height)
+        
+        glTexCoord2f(0.0, 0.0)
+        glVertex2f(x_offset, y_offset + height)
+        glEnd()
     
     def update_frame(self, frame_tensor):
         """Update the displayed frame from tensor data"""
@@ -173,14 +277,12 @@ class FullScreenViewer(wx.Frame):
                 print(f"Invalid frame shape: {frame_array.shape}")
                 return
                 
-            # Convert to wx.Image
-            height, width = frame_array.shape[:2]
-            wx_image = wx.Image(width, height, frame_array.tobytes())
-            
-            self.current_frame = wx_image
+            # Store frame data and dimensions
+            self.frame_height, self.frame_width = frame_array.shape[:2]
+            self.current_frame = frame_array
             
             # Use CallAfter to ensure thread safety
-            wx.CallAfter(self.panel.Refresh)
+            wx.CallAfter(self.canvas.Refresh)
             
         except Exception as e:
             print(f"Error updating frame: {e}")
