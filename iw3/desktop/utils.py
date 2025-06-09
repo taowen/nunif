@@ -272,10 +272,16 @@ def iw3_desktop_main(args, init_wxapp=True):
                 tick = time.perf_counter()
                 frame = screenshot_thread.get_frame()
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
+                
+                # Send to streaming server
                 if args.gpu_jpeg:
                     server.set_frame_data(to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
                 else:
                     server.set_frame_data(lambda: to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
+
+                # Send to local viewer if available
+                if args.state["fps_event"] is not None and hasattr(args.state["fps_event"], 'send_local_frame'):
+                    args.state["fps_event"].send_local_frame(sbs)
 
                 if count % (args.stream_fps * 30) == 0:
                     gc_collect()

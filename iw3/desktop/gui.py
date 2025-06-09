@@ -15,6 +15,8 @@ import wx.lib.stattext as stattext
 from wx.lib.buttons import GenBitmapButton
 from wx.lib.intctrl import IntCtrl
 import torch
+import numpy as np
+from PIL import Image
 from nunif.utils.git import get_current_branch
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
@@ -56,6 +58,10 @@ HAS_WINDOWS_CAPTURE = importlib.util.find_spec("windows_capture")
 myEVT_FPS = wx.NewEventType()
 EVT_FPS = wx.PyEventBinder(myEVT_FPS, 0)
 
+# Add new event types for local viewer
+myEVT_LOCAL_FRAME = wx.NewEventType()
+EVT_LOCAL_FRAME = wx.PyEventBinder(myEVT_LOCAL_FRAME, 0)
+
 
 class FPSEvent(wx.PyCommandEvent):
     def __init__(self, etype, eid, estimated_fps=None, screenshot_fps=None, streaming_fps=None,
@@ -71,9 +77,126 @@ class FPSEvent(wx.PyCommandEvent):
         return (self.estimated_fps, self.screenshot_fps, self.streaming_fps, self.screen_size, self.url)
 
 
+class LocalFrameEvent(wx.PyCommandEvent):
+    def __init__(self, etype, eid, frame_data=None):
+        super(LocalFrameEvent, self).__init__(etype, eid)
+        self.frame_data = frame_data
+
+    def GetFrame(self):
+        return self.frame_data
+
+
+class FullScreenViewer(wx.Frame):
+    def __init__(self, parent):
+        super(FullScreenViewer, self).__init__(
+            parent, 
+            title="Local Viewer",
+            style=wx.FRAME_NO_TASKBAR | wx.STAY_ON_TOP
+        )
+        self.parent = parent
+        self.SetBackgroundColour(wx.Colour(0, 0, 0))
+        
+        # Create panel to display the image
+        self.panel = wx.Panel(self)
+        self.panel.SetBackgroundColour(wx.Colour(0, 0, 0))
+        
+        # Sizer
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.panel, 1, wx.EXPAND)
+        self.SetSizer(sizer)
+        
+        # Bind events
+        self.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.panel.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.panel.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+        self.Bind(EVT_LOCAL_FRAME, self.on_local_frame)
+        
+        self.current_frame = None
+        self.ShowFullScreen(True)
+        self.panel.SetFocus()
+        
+    def on_key_down(self, event):
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self.Close()
+        event.Skip()
+        
+    def on_close(self, event):
+        self.parent.on_close_local_viewer()
+        self.Destroy()
+        
+    def on_paint(self, event):
+        if self.current_frame is not None:
+            dc = wx.PaintDC(self.panel)
+            dc.Clear()
+            
+            # Get panel size
+            panel_size = self.panel.GetSize()
+            
+            # Scale image to fit panel while maintaining aspect ratio
+            img_width, img_height = self.current_frame.GetSize()
+            panel_width, panel_height = panel_size
+            
+            if panel_width > 0 and panel_height > 0 and img_width > 0 and img_height > 0:
+                scale_x = panel_width / img_width
+                scale_y = panel_height / img_height
+                scale = min(scale_x, scale_y)
+                
+                new_width = int(img_width * scale)
+                new_height = int(img_height * scale)
+                
+                # Center the image
+                x = (panel_width - new_width) // 2
+                y = (panel_height - new_height) // 2
+                
+                # Scale and draw the image
+                scaled_img = self.current_frame.Scale(new_width, new_height, wx.IMAGE_QUALITY_HIGH)
+                bitmap = wx.Bitmap(scaled_img)
+                dc.DrawBitmap(bitmap, x, y)
+    
+    def update_frame(self, frame_tensor):
+        """Update the displayed frame from tensor data"""
+        try:
+            # Convert tensor to numpy array
+            if frame_tensor.device.type != 'cpu':
+                frame_array = frame_tensor.cpu().numpy()
+            else:
+                frame_array = frame_tensor.numpy()
+                
+            # Convert from CHW to HWC and scale to 0-255
+            if len(frame_array.shape) == 3 and frame_array.shape[0] == 3:
+                frame_array = np.transpose(frame_array, (1, 2, 0))
+            frame_array = (frame_array * 255).astype(np.uint8)
+            
+            # Ensure we have the right shape (height, width, 3)
+            if len(frame_array.shape) != 3 or frame_array.shape[2] != 3:
+                print(f"Invalid frame shape: {frame_array.shape}")
+                return
+                
+            # Convert to wx.Image
+            height, width = frame_array.shape[:2]
+            wx_image = wx.Image(width, height, frame_array.tobytes())
+            
+            self.current_frame = wx_image
+            
+            # Use CallAfter to ensure thread safety
+            wx.CallAfter(self.panel.Refresh)
+            
+        except Exception as e:
+            print(f"Error updating frame: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def on_local_frame(self, event):
+        frame_data = event.GetFrame()
+        if frame_data is not None:
+            self.update_frame(frame_data)
+
+
 class FPSGUI():
     def __init__(self, parent, **kwargs):
         self.parent = parent
+        self.local_viewer = None
 
     def set_url(self, url):
         wx.PostEvent(self.parent, FPSEvent(myEVT_FPS, -1, None, None, None, None, url))
@@ -81,6 +204,16 @@ class FPSGUI():
     def update(self, estimated_fps, screenshot_fps, streaming_fps, screen_size):
         wx.PostEvent(self.parent, FPSEvent(myEVT_FPS, -1, estimated_fps, screenshot_fps, streaming_fps,
                                            screen_size, None))
+
+    def set_local_viewer(self, viewer):
+        self.local_viewer = viewer
+
+    def send_local_frame(self, frame):
+        if self.local_viewer:
+            try:
+                wx.PostEvent(self.local_viewer, LocalFrameEvent(myEVT_LOCAL_FRAME, -1, frame))
+            except Exception as e:
+                print(f"Error sending frame to local viewer: {e}")
 
 
 class IW3DesktopApp(wx.App):
@@ -124,6 +257,7 @@ class MainFrame(wx.Frame):
         self.processing = False
         self.args = None
         self.args_lock = threading.Lock()
+        self.local_viewer = None
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
@@ -451,12 +585,17 @@ class MainFrame(wx.Frame):
         self.btn_url.SetToolTip(T("Open in Browser"))
         self.btn_start = wx.Button(self.pnl_process, label=T("Start"))
         self.btn_cancel = wx.Button(self.pnl_process, label=T("Shutdown"))
+        
+        # Add local viewer button
+        self.btn_local_viewer = wx.Button(self.pnl_process, label=T("Local Viewer"))
+        self.btn_local_viewer.Hide()  # Initially hidden
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.Add(self.btn_start, (0, 0), flag=wx.EXPAND)
         layout.Add(self.btn_cancel, (0, 1), flag=wx.EXPAND)
-        layout.Add(self.txt_url, (0, 2), flag=wx.EXPAND)
-        layout.Add(self.btn_url, (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_local_viewer, (0, 2), flag=wx.EXPAND)  # Add local viewer button
+        layout.Add(self.txt_url, (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_url, (0, 4), flag=wx.EXPAND)
         self.pnl_process.SetSizer(layout)
 
         # language panel
@@ -517,6 +656,7 @@ class MainFrame(wx.Frame):
         self.btn_url.Bind(wx.EVT_BUTTON, self.on_click_btn_url)
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
+        self.btn_local_viewer.Bind(wx.EVT_BUTTON, self.on_click_btn_local_viewer)
 
         self.Bind(EVT_FPS, self.on_fps)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -848,6 +988,7 @@ class MainFrame(wx.Frame):
         self.btn_start.Disable()
         self.btn_cancel.Enable()
         self.btn_url.Enable()
+        self.btn_local_viewer.Show()  # Show local viewer button
         self.pnl_preset.Hide()
         self.grp_stereo.Hide()
         self.grp_processor.Hide()
@@ -886,8 +1027,15 @@ class MainFrame(wx.Frame):
         self.processing = False
         self.btn_cancel.Disable()
         self.btn_start.Enable()
+        self.btn_local_viewer.Hide()  # Hide local viewer button
         self.txt_url.SetValue("")
         self.btn_url.Disable()
+        
+        # Close local viewer if open
+        if self.local_viewer:
+            self.local_viewer.Close()
+            self.local_viewer = None
+            
         self.pnl_preset.Show()
         self.grp_stereo.Show()
         self.grp_processor.Show()
@@ -1030,6 +1178,18 @@ class MainFrame(wx.Frame):
             self.btn_reload_window_name.Hide()
 
         self.GetSizer().Layout()
+
+    def on_click_btn_local_viewer(self, event):
+        if self.local_viewer is None:
+            self.local_viewer = FullScreenViewer(self)
+            # Set the local viewer in FPSGUI
+            if self.args and self.args.state.get("fps_event"):
+                self.args.state["fps_event"].set_local_viewer(self.local_viewer)
+
+    def on_close_local_viewer(self):
+        self.local_viewer = None
+        if self.args and self.args.state.get("fps_event"):
+            self.args.state["fps_event"].set_local_viewer(None)
 
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
