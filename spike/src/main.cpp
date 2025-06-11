@@ -3,6 +3,8 @@
 #include <vector>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <algorithm>
+#include <numeric>
 
 #include <NvInfer.h>
 #include <NvInferVersion.h>
@@ -76,21 +78,10 @@ static bool loadEngine(const std::string& engine_path, TensorRTEngine& engine_da
     
     // Get tensor information
     int num_bindings = engine_data.engine->getNbIOTensors();
-    std::cout << "Number of IO tensors: " << num_bindings << std::endl;
     
     for (int i = 0; i < num_bindings; ++i) {
         const char* tensor_name = engine_data.engine->getIOTensorName(i);
         auto tensor_mode = engine_data.engine->getTensorIOMode(tensor_name);
-        auto tensor_dims = engine_data.engine->getTensorShape(tensor_name);
-        
-        std::cout << "Tensor " << i << ": " << tensor_name;
-        std::cout << " Mode: " << (tensor_mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
-        std::cout << " Shape: [";
-        for (int j = 0; j < tensor_dims.nbDims; ++j) {
-            std::cout << tensor_dims.d[j];
-            if (j < tensor_dims.nbDims - 1) std::cout << ", ";
-        }
-        std::cout << "]" << std::endl;
         
         if (tensor_mode == nvinfer1::TensorIOMode::kINPUT) {
             engine_data.input_tensor_name = tensor_name;
@@ -105,8 +96,6 @@ static bool loadEngine(const std::string& engine_path, TensorRTEngine& engine_da
     }
     
     std::cout << "Engine loaded successfully!" << std::endl;
-    std::cout << "Input tensor: " << engine_data.input_tensor_name << std::endl;
-    std::cout << "Output tensor: " << engine_data.output_tensor_name << std::endl;
     
     return true;
 }
@@ -177,9 +166,22 @@ static cv::Mat postprocessOutput(const std::vector<float>& output_data, int widt
     // Invert for compatibility (DistillAnyDepth outputs inverted depth)
     depth_map = -depth_map;
     
+    // Normalize depth values to positive range [0, 1] before converting to 16-bit
+    double min_val, max_val;
+    cv::minMaxLoc(depth_map, &min_val, &max_val);
+    
+    cv::Mat depth_normalized;
+    if (max_val > min_val) {
+        // Normalize to [0, 1] range
+        depth_normalized = (depth_map - min_val) / (max_val - min_val);
+    } else {
+        // Handle case where all values are the same
+        depth_normalized = cv::Mat::zeros(depth_map.size(), CV_32FC1);
+    }
+    
     // Scale to 16-bit range for visualization
     cv::Mat depth_16;
-    depth_map.convertTo(depth_16, CV_16UC1, 256.0);
+    depth_normalized.convertTo(depth_16, CV_16UC1, 65535.0);
     
     return depth_16;
 }
@@ -233,7 +235,22 @@ static cv::Mat runInference(TensorRTEngine& engine_data, const cv::Mat& input_im
     input_shape.d[2] = actual_height;
     input_shape.d[3] = actual_width;
     
-    engine_data.context->setInputShape(input_name, input_shape);
+    bool shape_set = engine_data.context->setInputShape(input_name, input_shape);
+    if (!shape_set) {
+        std::cerr << "Failed to set input shape!" << std::endl;
+        return cv::Mat();
+    }
+    
+    // Validate that all tensor shapes are valid
+    if (!engine_data.context->allInputDimensionsSpecified()) {
+        std::cerr << "Not all input dimensions are specified!" << std::endl;
+        return cv::Mat();
+    }
+    
+    if (!engine_data.context->allInputShapesSpecified()) {
+        std::cerr << "Not all input shapes are specified!" << std::endl;
+        return cv::Mat();
+    }
     
     // Get output shape after setting input shape
     auto output_dims = engine_data.context->getTensorShape(output_name);
@@ -249,9 +266,6 @@ static cv::Mat runInference(TensorRTEngine& engine_data, const cv::Mat& input_im
         std::cerr << "Unexpected output tensor dimensions: " << output_dims.nbDims << std::endl;
         return cv::Mat();
     }
-    
-    std::cout << "Actual input shape: " << actual_width << "x" << actual_height << std::endl;
-    std::cout << "Actual output shape: " << actual_output_width << "x" << actual_output_height << std::endl;
     
     // Calculate buffer sizes
     size_t actual_input_size = 3 * actual_height * actual_width * sizeof(float);
@@ -273,9 +287,22 @@ static cv::Mat runInference(TensorRTEngine& engine_data, const cv::Mat& input_im
     // Convert to CHW format
     std::vector<float> input_data = imageToChwFormat(preprocessed);
     
+    // Validate input data
+    if (input_data.size() != 3 * actual_height * actual_width) {
+        std::cerr << "Input data size mismatch!" << std::endl;
+        return cv::Mat();
+    }
+    
     // Copy input to GPU
     cudaMemcpy(engine_data.gpu_input_buffer, input_data.data(), 
                input_data.size() * sizeof(float), cudaMemcpyHostToDevice);
+    
+    // Check for CUDA errors
+    cudaError_t cuda_error = cudaGetLastError();
+    if (cuda_error != cudaSuccess) {
+        std::cerr << "CUDA error after input copy: " << cudaGetErrorString(cuda_error) << std::endl;
+        return cv::Mat();
+    }
     
     // Set tensor addresses
     engine_data.context->setTensorAddress(input_name, engine_data.gpu_input_buffer);
@@ -286,6 +313,15 @@ static cv::Mat runInference(TensorRTEngine& engine_data, const cv::Mat& input_im
     cudaStreamCreate(&stream);
     bool success = engine_data.context->enqueueV3(stream);
     cudaStreamSynchronize(stream);
+    
+    // Check for CUDA errors after inference
+    cuda_error = cudaGetLastError();
+    if (cuda_error != cudaSuccess) {
+        std::cerr << "CUDA error after inference: " << cudaGetErrorString(cuda_error) << std::endl;
+        cudaStreamDestroy(stream);
+        return cv::Mat();
+    }
+    
     cudaStreamDestroy(stream);
     
     if (!success) {
@@ -297,6 +333,13 @@ static cv::Mat runInference(TensorRTEngine& engine_data, const cv::Mat& input_im
     std::vector<float> output_data(actual_output_height * actual_output_width);
     cudaMemcpy(output_data.data(), engine_data.gpu_output_buffer, 
                output_data.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // Check for CUDA errors after output copy
+    cuda_error = cudaGetLastError();
+    if (cuda_error != cudaSuccess) {
+        std::cerr << "CUDA error after output copy: " << cudaGetErrorString(cuda_error) << std::endl;
+        return cv::Mat();
+    }
     
     // Postprocess
     return postprocessOutput(output_data, actual_output_width, actual_output_height);
