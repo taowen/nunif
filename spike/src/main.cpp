@@ -4,15 +4,12 @@
 #include <memory>
 #include <opencv2/opencv.hpp>
 
-#ifdef TENSORRT_AVAILABLE
 #include <NvInfer.h>
 #include <NvInferVersion.h>
 #include <cuda_runtime.h>
-#endif
 
 class DistillAnyDepthTensorRT {
 private:
-#ifdef TENSORRT_AVAILABLE
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
@@ -23,7 +20,9 @@ private:
     int input_width, input_height;
     int output_width, output_height;
     size_t input_size, output_size;
-#endif
+    
+    std::string input_tensor_name;
+    std::string output_tensor_name;
     
     class Logger : public nvinfer1::ILogger {
     public:
@@ -38,14 +37,11 @@ public:
     DistillAnyDepthTensorRT() : gpu_input_buffer(nullptr), gpu_output_buffer(nullptr) {}
     
     ~DistillAnyDepthTensorRT() {
-#ifdef TENSORRT_AVAILABLE
         if (gpu_input_buffer) cudaFree(gpu_input_buffer);
         if (gpu_output_buffer) cudaFree(gpu_output_buffer);
-#endif
     }
     
     bool loadEngine(const std::string& engine_path) {
-#ifdef TENSORRT_AVAILABLE
         std::ifstream file(engine_path, std::ios::binary);
         if (!file.good()) {
             std::cerr << "Failed to open engine file: " << engine_path << std::endl;
@@ -80,14 +76,66 @@ public:
             return false;
         }
         
-        // Get input/output dimensions
-        auto input_dims = engine->getBindingDimensions(0);
-        auto output_dims = engine->getBindingDimensions(1);
+        // Debug: Print all tensor information
+        int num_bindings = engine->getNbIOTensors();
+        std::cout << "Number of IO tensors: " << num_bindings << std::endl;
         
-        input_height = input_dims.d[2];
-        input_width = input_dims.d[3];
-        output_height = output_dims.d[2];
-        output_width = output_dims.d[3];
+        for (int i = 0; i < num_bindings; ++i) {
+            const char* tensor_name = engine->getIOTensorName(i);
+            auto tensor_mode = engine->getTensorIOMode(tensor_name);
+            auto tensor_dims = engine->getTensorShape(tensor_name);
+            
+            std::cout << "Tensor " << i << ": " << tensor_name;
+            std::cout << " Mode: " << (tensor_mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
+            std::cout << " Shape: [";
+            for (int j = 0; j < tensor_dims.nbDims; ++j) {
+                std::cout << tensor_dims.d[j];
+                if (j < tensor_dims.nbDims - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+        }
+        
+        // Get input/output dimensions properly
+        const char* input_name = nullptr;
+        const char* output_name = nullptr;
+        
+        for (int i = 0; i < num_bindings; ++i) {
+            const char* tensor_name = engine->getIOTensorName(i);
+            auto tensor_mode = engine->getTensorIOMode(tensor_name);
+            
+            if (tensor_mode == nvinfer1::TensorIOMode::kINPUT) {
+                input_name = tensor_name;
+                input_tensor_name = tensor_name;
+            } else {
+                output_name = tensor_name;
+                output_tensor_name = tensor_name;
+            }
+        }
+        
+        if (!input_name || !output_name) {
+            std::cerr << "Failed to find input/output tensors" << std::endl;
+            return false;
+        }
+        
+        auto input_dims = engine->getTensorShape(input_name);
+        auto output_dims = engine->getTensorShape(output_name);
+        
+        // Handle dynamic shapes - use default values if dimensions are -1
+        input_height = input_dims.d[2] > 0 ? input_dims.d[2] : 518;  // Default size
+        input_width = input_dims.d[3] > 0 ? input_dims.d[3] : 518;   // Default size
+        
+        // Output tensor shape depends on number of dimensions
+        if (output_dims.nbDims == 4) {
+            output_height = output_dims.d[2] > 0 ? output_dims.d[2] : 392;
+            output_width = output_dims.d[3] > 0 ? output_dims.d[3] : 392;
+        } else if (output_dims.nbDims == 3) {
+            // Shape is [1, H, W] 
+            output_height = output_dims.d[1] > 0 ? output_dims.d[1] : 392;
+            output_width = output_dims.d[2] > 0 ? output_dims.d[2] : 392;
+        } else {
+            std::cerr << "Unexpected output tensor shape" << std::endl;
+            return false;
+        }
         
         input_size = 3 * input_height * input_width * sizeof(float);
         output_size = 1 * output_height * output_width * sizeof(float);
@@ -97,14 +145,10 @@ public:
         cudaMalloc(&gpu_output_buffer, output_size);
         
         std::cout << "Engine loaded successfully!" << std::endl;
-        std::cout << "Input size: " << input_width << "x" << input_height << std::endl;
-        std::cout << "Output size: " << output_width << "x" << output_height << std::endl;
+        std::cout << "Input tensor: " << input_tensor_name << " - " << input_width << "x" << input_height << std::endl;
+        std::cout << "Output tensor: " << output_tensor_name << " - " << output_width << "x" << output_height << std::endl;
         
         return true;
-#else
-        std::cerr << "TensorRT not available" << std::endl;
-        return false;
-#endif
     }
     
     cv::Mat preprocess(const cv::Mat& input_image, int lower_bound = 392) {
@@ -167,7 +211,6 @@ public:
     }
     
     cv::Mat infer(const cv::Mat& input_image) {
-#ifdef TENSORRT_AVAILABLE
         if (!context) {
             std::cerr << "Engine not loaded" << std::endl;
             return cv::Mat();
@@ -176,54 +219,113 @@ public:
         // Preprocess
         cv::Mat preprocessed = preprocess(input_image);
         
+        // Set dynamic input shape if needed
+        int actual_height = preprocessed.rows;
+        int actual_width = preprocessed.cols;
+        
+        // Use stored tensor names
+        const char* input_name = input_tensor_name.c_str();
+        const char* output_name = output_tensor_name.c_str();
+        
+        // Set input shape for dynamic models
+        nvinfer1::Dims input_shape;
+        input_shape.nbDims = 4;
+        input_shape.d[0] = 1;  // batch size
+        input_shape.d[1] = 3;  // channels
+        input_shape.d[2] = actual_height;
+        input_shape.d[3] = actual_width;
+        
+        context->setInputShape(input_name, input_shape);
+        
+        // Get output shape after setting input shape
+        auto output_dims = context->getTensorShape(output_name);
+        int actual_output_height, actual_output_width;
+        
+        if (output_dims.nbDims == 4) {
+            actual_output_height = output_dims.d[2];
+            actual_output_width = output_dims.d[3];
+        } else if (output_dims.nbDims == 3) {
+            // Shape is [1, H, W]
+            actual_output_height = output_dims.d[1];
+            actual_output_width = output_dims.d[2];
+        } else {
+            std::cerr << "Unexpected output tensor dimensions: " << output_dims.nbDims << std::endl;
+            return cv::Mat();
+        }
+        
+        std::cout << "Actual input shape: " << actual_width << "x" << actual_height << std::endl;
+        std::cout << "Actual output shape: " << actual_output_width << "x" << actual_output_height << std::endl;
+        
+        // Reallocate GPU memory if needed
+        size_t actual_input_size = 3 * actual_height * actual_width * sizeof(float);
+        size_t actual_output_size = actual_output_height * actual_output_width * sizeof(float);
+        
+        if (actual_input_size > input_size) {
+            cudaFree(gpu_input_buffer);
+            cudaMalloc(&gpu_input_buffer, actual_input_size);
+            input_size = actual_input_size;
+        }
+        
+        if (actual_output_size > output_size) {
+            cudaFree(gpu_output_buffer);
+            cudaMalloc(&gpu_output_buffer, actual_output_size);
+            output_size = actual_output_size;
+        }
+        
         // Convert to CHW format
         std::vector<cv::Mat> channels(3);
         cv::split(preprocessed, channels);
         
         std::vector<float> input_data;
-        input_data.reserve(3 * preprocessed.rows * preprocessed.cols);
+        input_data.reserve(3 * actual_height * actual_width);
         
         for (int c = 0; c < 3; ++c) {
             cv::Mat channel = channels[c];
             channel = channel.reshape(1, 1); // Flatten
-            std::vector<float> channel_data = channel.isContinuous() ? 
-                channel : channel.clone();
-            float* ptr = (float*)channel_data.data();
-            input_data.insert(input_data.end(), ptr, ptr + channel.total());
+            std::vector<float> channel_data;
+            if (channel.isContinuous()) {
+                float* ptr = (float*)channel.data;
+                channel_data.assign(ptr, ptr + channel.total());
+            } else {
+                channel = channel.clone();
+                float* ptr = (float*)channel.data;
+                channel_data.assign(ptr, ptr + channel.total());
+            }
+            input_data.insert(input_data.end(), channel_data.begin(), channel_data.end());
         }
         
         // Copy input to GPU
         cudaMemcpy(gpu_input_buffer, input_data.data(), 
                    input_data.size() * sizeof(float), cudaMemcpyHostToDevice);
         
-        // Setup bindings
-        void* bindings[] = {gpu_input_buffer, gpu_output_buffer};
+        // Set tensor addresses for the new TensorRT API
+        context->setTensorAddress(input_name, gpu_input_buffer);
+        context->setTensorAddress(output_name, gpu_output_buffer);
         
-        // Execute inference
-        bool success = context->executeV2(bindings);
+        // Execute inference using enqueueV3 (recommended for newer TensorRT)
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        bool success = context->enqueueV3(stream);
+        cudaStreamSynchronize(stream);
+        cudaStreamDestroy(stream);
         if (!success) {
             std::cerr << "Inference failed" << std::endl;
             return cv::Mat();
         }
         
         // Copy output back to CPU
-        std::vector<float> output_data(output_height * output_width);
+        std::vector<float> output_data(actual_output_height * actual_output_width);
         cudaMemcpy(output_data.data(), gpu_output_buffer, 
                    output_data.size() * sizeof(float), cudaMemcpyDeviceToHost);
         
         // Postprocess
-        return postprocess(output_data, output_width, output_height);
-#else
-        std::cerr << "TensorRT not available" << std::endl;
-        return cv::Mat();
-#endif
+        return postprocess(output_data, actual_output_width, actual_output_height);
     }
 };
 
 int main() {
     std::cout << "Distill Any Depth TensorRT Implementation" << std::endl;
     
-#ifdef TENSORRT_AVAILABLE
     DistillAnyDepthTensorRT model;
     
     // Load TensorRT engine (you need to convert the model to TensorRT first)
@@ -237,7 +339,7 @@ int main() {
     }
     
     // Test with an image
-    std::string image_path = "test_image.jpg";
+    std::string image_path = "miku_128.png";
     cv::Mat input_image = cv::imread(image_path);
     
     if (input_image.empty()) {
@@ -254,10 +356,6 @@ int main() {
     } else {
         std::cerr << "Inference failed" << std::endl;
     }
-    
-#else
-    std::cout << "TensorRT not available. Please compile with TensorRT support." << std::endl;
-#endif
     
     return 0;
 }

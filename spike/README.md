@@ -3,3 +3,4 @@
 * TensorRT-10.11.0.33.Windows.win10.cuda-12.9.zip
 * cmake-4.0.2-windows-x86_64.exe
 * visual studio community (for the compiler)
+* opencv-4.11.0-windows.exe
