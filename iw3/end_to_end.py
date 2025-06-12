@@ -4,90 +4,15 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TF
 from PIL import Image
 import argparse
-import numpy as np
 from packaging import version as packaging_version
 import torch.nn as nn
 import copy
-import types
-import math
 
 import logging
 
 PYTORCH2 = packaging_version.parse(torch.__version__).major >= 2
+logger = logging.getLogger("nunif")
 
-def _setup():
-    logger = logging.getLogger("nunif")
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s:%(name)s: [%(levelname)8s] %(message)s"))
-
-    debug = os.getenv("DEBUG")
-    if debug is not None and debug.isdigit():
-        debug = int(debug)
-    if bool(debug):
-        handler.setLevel(logging.DEBUG)
-        logger.setLevel(level=logging.DEBUG)
-    else:
-        handler.setLevel(logging.INFO)
-        logger.setLevel(level=logging.INFO)
-
-    logger.addHandler(handler)
-    logger.propagate = False
-
-    return logger
-
-logger = _setup()
-
-
-class DataParallelWrapper(nn.DataParallel):
-    # ref: https://discuss.pytorch.org/t/making-a-wrapper-around-nn-dataparallel-to-access-module-attributes-is-safe/79124
-    def __init__(self, module, device_ids=None):
-        super().__init__(module, device_ids=device_ids)
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
-        
-
-
-class Model(nn.Module):
-    name = "nunif.Model"
-
-    def __init__(self, kwargs):
-        super(Model, self).__init__()
-        self.kwargs = {}
-        self.updated_at = None
-        self.register_kwargs(kwargs)
-
-    def get_device(self):
-        return next(self.parameters()).device
-
-    def register_kwargs(self, kwargs):
-        for name, value in kwargs.items():
-            if name not in {"self", "__class__"}:
-                self.kwargs[name] = value
-
-    def get_kwargs(self):
-        return self.kwargs
-
-    def __repr__(self):
-        return (f"name: {self.name}\nkwargs: {self.kwargs}\n" +
-                super(Model, self).__repr__())
-
-    def to_inference_model(self):
-        net = copy.deepcopy(self)
-        net.eval()
-        return net
-
-    def to_script_module(self):
-        net = self.to_inference_model()
-        return torch.jit.script(net)
-
-    def export_onnx(self, f, **kwargs):
-        raise NotImplementedError()
 
 def create_device_name(device_id):
     if isinstance(device_id, (list, tuple)):
@@ -105,14 +30,6 @@ def create_device_name(device_id):
 
 def create_device(device_id):
     return torch.device(create_device_name(device_id))
-
-def data_parallel_model(model, device_ids):
-    if len(device_ids) > 1 and not isinstance(model, nn.DataParallel):
-        model = DataParallelWrapper(model, device_ids=device_ids)
-        return model
-    else:
-        return model
-
 
 # 添加缺失的模块实现
 def pixel_shuffle(x, downscale_factor):
@@ -371,11 +288,11 @@ class WABlock(nn.Module):
 
 OFFSET = 32
 
-class RowFlowV3(Model):
+class RowFlowV3(nn.Module):
     name = "sbs.row_flow_v3"
 
     def __init__(self):
-        super(RowFlowV3, self).__init__(locals())
+        super().__init__()
         self.downscaling_factor = (1, 8)
         self.mod = 4 * 3
         pack = self.downscaling_factor[0] * self.downscaling_factor[1]
@@ -393,6 +310,11 @@ class RowFlowV3(Model):
         self.register_buffer("delta_scale", torch.tensor(1.0 / 127.0))
         self.delta_output = False
         self.symmetric = False
+
+    def to_script_module(self):
+        net = copy.deepcopy(self)
+        net.eval()
+        return torch.jit.script(net)
 
     def _forward(self, x):
         input_height, input_width = x.shape[2:]
@@ -674,25 +596,18 @@ def load_stereo_model(device):
         
         assert ("nunif_model" in data)
         
-        # 创建模型
+        # 创建模型并直接移动到设备
         side_model = RowFlowV3()
-        if len([device_id]) > 1:
-            side_model = data_parallel_model(side_model, device_ids=[device_id])
-        else:
-            device_obj = create_device(device_id)
-            side_model = side_model.to(device_obj)
+        device_obj = create_device(device_id)
+        side_model = side_model.to(device_obj)
         
         # 加载状态字典
-        if isinstance(side_model, nn.DataParallel):
-            side_model.module.load_state_dict(data["state_dict"], strict=True)
-        else:
-            side_model.load_state_dict(data["state_dict"], strict=True)
+        side_model.load_state_dict(data["state_dict"], strict=True)
         if "updated_at" in data:
             side_model.updated_at = data["updated_at"]
         data.pop("state_dict")
         
-        device_obj = create_device(device_id)
-        side_model = side_model.to(device_obj).eval()
+        side_model = side_model.eval()
             
         # 设置模型属性
         side_model.symmetric = True
