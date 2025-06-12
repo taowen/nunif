@@ -114,35 +114,6 @@ def data_parallel_model(model, device_ids):
         return model
 
 
-class I2IBaseModel(Model):
-    name = "nunif.i2i_base_model"
-
-    def __init__(self, kwargs, scale, offset, in_channels=None, in_size=None, blend_size=None,
-                 default_tile_size=256, default_batch_size=4):
-        super(I2IBaseModel, self).__init__(kwargs)
-        self.i2i_scale = scale
-        self.i2i_offset = offset
-        self.i2i_in_channels = in_channels
-        self.i2i_in_size = in_size
-        self.i2i_blend_size = blend_size
-        self.i2i_default_tile_size = default_tile_size
-        self.i2i_default_batch_size = default_batch_size
-
-    def export_onnx(self, f, **kwargs):
-        shape = [1, self.i2i_in_channels, self.i2i_default_tile_size, self.i2i_default_tile_size]
-        x = torch.rand(shape, dtype=torch.float32)
-        model = self.to_inference_model()
-        torch.onnx.export(
-            model,
-            x,
-            f,
-            input_names=["x"],
-            output_names=["y"],
-            dynamic_axes={'x': {0: 'batch_size', 2: "input_height", 3: "input_width"},
-                          'y': {0: 'batch_size', 2: "height", 3: "width"}},
-            **kwargs
-        )
-
 # 添加缺失的模块实现
 def pixel_shuffle(x, downscale_factor):
     """Pixel shuffle implementation"""
@@ -400,11 +371,11 @@ class WABlock(nn.Module):
 
 OFFSET = 32
 
-class RowFlowV3(I2IBaseModel):
+class RowFlowV3(Model):
     name = "sbs.row_flow_v3"
 
     def __init__(self):
-        super(RowFlowV3, self).__init__(locals(), scale=1, offset=OFFSET, in_channels=8, blend_size=4)
+        super(RowFlowV3, self).__init__(locals())
         self.downscaling_factor = (1, 8)
         self.mod = 4 * 3
         pack = self.downscaling_factor[0] * self.downscaling_factor[1]
@@ -792,21 +763,10 @@ def process_single_image(input_path, output_dir="./output", divergence=2.0, conv
     rgb_batch = rgb_tensor.unsqueeze(0)  # 添加batch维度
     depth_batch = depth.unsqueeze(0)     # 添加batch维度
     
-    if stereo_model is not None:
-        # 使用神经网络模型
-        left_eye, right_eye = apply_divergence_symmetric(
-            stereo_model, rgb_batch, depth_batch, divergence, convergence
-        )
-    else:
-        # 使用简单的网格采样方法作为后备
-        print("Using simple grid sampling as fallback...")
-        shift_size = divergence * 0.01
-        index_shift = depth_batch * shift_size - (shift_size * convergence)
-        delta = torch.cat([index_shift, torch.zeros_like(index_shift)], dim=1)
-        grid = make_grid(1, rgb_tensor.shape[2], rgb_tensor.shape[1], device)
-        
-        left_eye = backward_warp(rgb_batch, grid, -delta, 1)
-        right_eye = backward_warp(rgb_batch, grid, delta, 1)
+    # 使用神经网络模型
+    left_eye, right_eye = apply_divergence_symmetric(
+        stereo_model, rgb_batch, depth_batch, divergence, convergence
+    )
     
     # 移除batch维度
     left_eye = left_eye.squeeze(0)
