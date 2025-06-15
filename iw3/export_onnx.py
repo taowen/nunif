@@ -4,19 +4,41 @@ import os
 from os import path
 from nunif.utils.ui import HiddenPrints, TorchHubDir
 
-
+# README:
+# venv/Scripts/Activate
+# python -m iw3.export_onnx
 
 
 HUB_MODEL_DIR = path.join(path.dirname(__file__), "pretrained_models", "hub")
 
-def export_distill_any_depth_to_onnx():
-    # Load the model (similar to how it's done in your depth_anything_model.py)
-    encoder = "v2_vits"  # or "v2_vitb", "v2_vitl" for different sizes
+def export_distill_any_depth_to_onnx(model_size='s', input_size=392):
+    """
+    Export Distill Any Depth model to ONNX format
+    Args:
+        model_size: 's' for small, 'b' for base, 'l' for large
+        input_size: input image size (must be multiple of 14)
+    """
+    # Map model size to encoder type
+    size_to_encoder = {
+        's': 'v2_vits',
+        'b': 'v2_vitb',
+        'l': 'v2_vitl'
+    }
+    encoder = size_to_encoder[model_size]
     
+    print(f"Exporting Distill Any Depth {model_size.upper()} model...")
+    
+    # Ensure input size is multiple of 14
+    if input_size % 14 != 0:
+        input_size = input_size + (14 - input_size % 14)
+        print(f"Adjusted input size to {input_size} to be multiple of 14")
+    
+    # Load the model
     if not os.getenv("IW3_DEBUG"):
-        model = torch.hub.load("nagadomi/Depth-Anything_iw3:main",
-                               "DistillAnyDepth", encoder=encoder,
-                               verbose=False, trust_repo=True)
+        with HiddenPrints():
+            model = torch.hub.load("nagadomi/Depth-Anything_iw3:main",
+                                   "DistillAnyDepth", encoder=encoder,
+                                   verbose=False, trust_repo=True)
     else:
         model = torch.hub.load("../Depth-Anything_iw3",
                                "DistillAnyDepth", encoder=encoder, source="local",
@@ -24,15 +46,17 @@ def export_distill_any_depth_to_onnx():
     
     model.eval()
     
-    # Create dummy input (adjust size as needed)
-    # The model expects input size to be multiple of 14
-    dummy_input = torch.randn(1, 3, 392, 392)
+    # Create dummy input
+    dummy_input = torch.randn(1, 3, input_size, input_size)
+    
+    # Output filename
+    output_file = path.join(HUB_MODEL_DIR, f"distill_any_depth_{model_size}.onnx")
     
     # Export to ONNX
     torch.onnx.export(
         model,
         dummy_input,
-        f"{HUB_MODEL_DIR}\distill_any_depth.onnx",
+        output_file,
         export_params=True,
         opset_version=18,
         do_constant_folding=True,
@@ -43,8 +67,9 @@ def export_distill_any_depth_to_onnx():
             'output': {0: 'batch_size', 2: 'height', 3: 'width'}
         }
     )
-    print("ONNX model exported to distill_any_depth.onnx")
+    print(f"ONNX model exported to {output_file}")
 
 if __name__ == "__main__":
     with TorchHubDir(HUB_MODEL_DIR):
-        export_distill_any_depth_to_onnx()
+        # Export small model with default input size
+        export_distill_any_depth_to_onnx('s')

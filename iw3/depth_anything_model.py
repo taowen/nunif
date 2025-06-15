@@ -314,6 +314,6 @@ def _test_model():
 
 
 if __name__ == "__main__":
-    # _test()
-    _bench()
+    _test()
+    # _bench()
     # _test_model()
