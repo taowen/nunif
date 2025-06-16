@@ -8,7 +8,7 @@
 import torch
 import numpy as np
 import tensorrt as trt
-from iw3.export_onnx import export_distill_any_depth_to_onnx, HUB_MODEL_DIR
+from iw3.export_onnx import export_distill_any_depth_to_onnx, HUB_MODEL_DIR, DistillAnyDepthWithDilation
 from nunif.utils.ui import TorchHubDir
 from os import path
 import os
@@ -175,11 +175,11 @@ def test_tensorrt_model(model_size='s', input_size=392):
     # Load PyTorch model
     size_to_encoder = {'s': 'v2_vits', 'b': 'v2_vitb', 'l': 'v2_vitl'}
     encoder = size_to_encoder[model_size]
-    
     model = torch.hub.load("nagadomi/Depth-Anything_iw3:main",
                           "DistillAnyDepth", encoder=encoder,
                           verbose=False, trust_repo=True)
     model.eval()
+    model = DistillAnyDepthWithDilation(model, edge_dilation=2)
     
     # Create test input
     test_input = torch.randn(1, 3, input_size, input_size)
