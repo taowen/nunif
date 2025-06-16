@@ -3,6 +3,7 @@ import torch.onnx
 import os
 from os import path
 from nunif.utils.ui import HiddenPrints, TorchHubDir
+from iw3.dilation import dilate_edge  # 新增导入
 
 # README:
 # venv/Scripts/Activate
@@ -11,12 +12,27 @@ from nunif.utils.ui import HiddenPrints, TorchHubDir
 
 HUB_MODEL_DIR = path.join(path.dirname(__file__), "pretrained_models", "hub")
 
-def export_distill_any_depth_to_onnx(model_size='s', input_size=392):
+class DistillAnyDepthWithDilation(torch.nn.Module):
+    def __init__(self, base_model, edge_dilation=2):
+        super().__init__()
+        self.base_model = base_model
+        self.edge_dilation = edge_dilation
+
+    def forward(self, x):
+        out = self.base_model(x)
+        # out: (B, H, W) or (B, 1, H, W)
+        if out.ndim == 3:
+            out = out.unsqueeze(1)
+        out = dilate_edge(out, self.edge_dilation)
+        return out
+
+def export_distill_any_depth_to_onnx(model_size='s', input_size=392, edge_dilation=2):  # 新增 edge_dilation 参数
     """
-    Export Distill Any Depth model to ONNX format
+    Export Distill Any Depth model to ONNX format, with optional edge dilation.
     Args:
         model_size: 's' for small, 'b' for base, 'l' for large
         input_size: input image size (must be multiple of 14)
+        edge_dilation: number of dilation iterations (int)
     """
     # Map model size to encoder type
     size_to_encoder = {
@@ -46,6 +62,9 @@ def export_distill_any_depth_to_onnx(model_size='s', input_size=392):
     
     model.eval()
     
+    # 包装模型
+    model = DistillAnyDepthWithDilation(model, edge_dilation=edge_dilation)
+
     # Create dummy input
     dummy_input = torch.randn(1, 3, input_size, input_size)
     
@@ -71,5 +90,5 @@ def export_distill_any_depth_to_onnx(model_size='s', input_size=392):
 
 if __name__ == "__main__":
     with TorchHubDir(HUB_MODEL_DIR):
-        # Export small model with default input size
-        export_distill_any_depth_to_onnx('s')
+        # Export small model with default input size and dilation
+        export_distill_any_depth_to_onnx('s', edge_dilation=2)

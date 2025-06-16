@@ -4,8 +4,9 @@ import numpy as np
 from iw3.export_onnx import export_distill_any_depth_to_onnx, HUB_MODEL_DIR
 from nunif.utils.ui import TorchHubDir
 from os import path
+from iw3.dilation import dilate_edge
 
-def test_onnx_model(model_size='s', input_size=392):
+def test_onnx_model(model_size='s', input_size=392, edge_dilation=2):
     """
     Test ONNX model output against PyTorch model output
     """
@@ -15,7 +16,7 @@ def test_onnx_model(model_size='s', input_size=392):
     onnx_path = path.join(HUB_MODEL_DIR, f"distill_any_depth_{model_size}.onnx")
     if not path.exists(onnx_path):
         with TorchHubDir(HUB_MODEL_DIR):
-            export_distill_any_depth_to_onnx(model_size, input_size)
+            export_distill_any_depth_to_onnx(model_size, input_size, edge_dilation=edge_dilation)
     
     # Load PyTorch model
     size_to_encoder = {
@@ -35,7 +36,11 @@ def test_onnx_model(model_size='s', input_size=392):
     
     # Get PyTorch output
     with torch.no_grad():
-        torch_output = model(test_input).numpy()
+        torch_output = model(test_input)
+        if torch_output.ndim == 3:
+            torch_output = torch_output.unsqueeze(1)
+        torch_output = dilate_edge(torch_output, edge_dilation)
+        torch_output = torch_output.numpy()
     
     # Get ONNX output
     ort_session = onnxruntime.InferenceSession(onnx_path)
@@ -58,4 +63,4 @@ def test_onnx_model(model_size='s', input_size=392):
 if __name__ == "__main__":
     # Test small model
     with TorchHubDir(HUB_MODEL_DIR):
-        test_onnx_model('s') 
+        test_onnx_model('s', edge_dilation=2) 
