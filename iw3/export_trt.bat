@@ -1,1 +1,1 @@
-trtexec --onnx=pretrained_models\hub\distill_any_depth_s.onnx --saveEngine=pretrained_models\hub\distill_any_depth_s.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:1x3x392x392 --maxShapes=input:1x3x1024x1024
+trtexec --onnx=pretrained_models\hub\end2end_stereo_s.onnx --saveEngine=pretrained_models\hub\end2end_stereo_s.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:1x3x392x392 --maxShapes=input:1x3x1024x1024
