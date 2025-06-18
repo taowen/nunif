@@ -1,30 +1,39 @@
 import torch
-import onnxruntime
+import onnxruntime as ort
 import numpy as np
 from nunif.utils import video as VU
 from os import path
 import sys
 from PIL import Image
+import torch.nn.functional as F
+
+ort.set_default_logger_severity(0)
 
 def run_onnx_stereo_video(
-    input_video, output_video, onnx_path, device="cpu", input_size=392
+    input_video, output_video, onnx_path
 ):
-    ort_session = onnxruntime.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    ort_session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
 
     def process_frame(frame):
         if frame is None:
             return None  # Handle flush call at end of video processing
         # Convert VideoFrame to numpy array, then to PIL Image, resize, then back to numpy
-        img = Image.fromarray(frame.to_ndarray(format="rgb24"))
-        img = img.resize((input_size, input_size), Image.BICUBIC)
-        frame_resized = np.array(img)
-        x = torch.from_numpy(frame_resized).permute(2, 0, 1).float() / 255.0  # CHW, float32, 0-1
+        x = torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1).float() / 255.0  # CHW, float32, 0-1
         x = x.unsqueeze(0).numpy()  # BCHW, numpy
         ort_inputs = {ort_session.get_inputs()[0].name: x}
         left, right = ort_session.run(None, ort_inputs)
         left = torch.from_numpy(left[0])
         right = torch.from_numpy(right[0])
+
+        # === 新增：resize left/right 到输入帧分辨率 ===
+        input_h, input_w = frame.height, frame.width
+        # left/right: CHW, 0-1
+        left = F.interpolate(left.unsqueeze(0), size=(input_h, input_w), mode="bicubic", align_corners=True).squeeze(0)
+        right = F.interpolate(right.unsqueeze(0), size=(input_h, input_w), mode="bicubic", align_corners=True).squeeze(0)
+        # === end ===
+
         sbs = torch.cat([left, right], dim=2)  # CHW, W*2
+        sbs = torch.clamp(sbs, 0., 1.)  # 保证范围
         return VU.to_frame(sbs)
 
     def config_callback(stream):
@@ -51,4 +60,4 @@ if __name__ == "__main__":
     input_video = sys.argv[1]
     output_video = sys.argv[2]
     onnx_path = path.join(HUB_MODEL_DIR, f"end2end_stereo_s.onnx")
-    run_onnx_stereo_video(input_video, output_video, onnx_path, input_size=392) 
+    run_onnx_stereo_video(input_video, output_video, onnx_path) 

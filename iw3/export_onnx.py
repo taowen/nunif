@@ -63,7 +63,7 @@ class End2EndStereoModel(torch.nn.Module):
         )
         return left, right
 
-def export_end2end_to_onnx(model_size='s', input_size=392, edge_dilation=2, divergence=2.0, convergence=0.5):
+def export_end2end_to_onnx(model_size='s', input_size=(392, 392), edge_dilation=2, divergence=2.0, convergence=0.5):
     # 1. 加载深度模型
     encoder = {'s': 'v2_vits', 'b': 'v2_vitb', 'l': 'v2_vitl'}[model_size]
     with HiddenPrints():
@@ -80,7 +80,10 @@ def export_end2end_to_onnx(model_size='s', input_size=392, edge_dilation=2, dive
     # 3. 包装
     model = End2EndStereoModel(depth_model, side_model, divergence, convergence)
     # 4. dummy input
-    dummy_input = torch.randn(1, 3, input_size, input_size)
+    if isinstance(input_size, int):
+        dummy_input = torch.randn(1, 3, input_size, input_size)
+    else:
+        dummy_input = torch.randn(1, 3, input_size[0], input_size[1])
     # 5. 导出
     output_file = path.join(HUB_MODEL_DIR, f"end2end_stereo_{model_size}.onnx")
     torch.onnx.export(
@@ -96,10 +99,12 @@ def export_end2end_to_onnx(model_size='s', input_size=392, edge_dilation=2, dive
             'input': {0: 'batch_size', 2: 'height', 3: 'width'},
             'left': {0: 'batch_size', 2: 'height', 3: 'width'},
             'right': {0: 'batch_size', 2: 'height', 3: 'width'}
-        }
+        },
+        verbose=True
     )
     print(f"ONNX model exported to {output_file}")
 
 if __name__ == "__main__":
     with TorchHubDir(HUB_MODEL_DIR):
-        export_end2end_to_onnx('s', edge_dilation=2)
+        # 用常见视频分辨率导出，确保模型支持非正方形
+        export_end2end_to_onnx('s', input_size=(14 * 30, 14 * 20), edge_dilation=2)
