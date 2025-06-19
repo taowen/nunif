@@ -10,11 +10,13 @@ from PIL import Image
 import os
 
 from nunif.utils.ui import TorchHubDir
+from nunif.logger import logger
 from iw3.backward_warp import apply_divergence_nn_LR
 
 # 1. 读取图片
 img_path1 = "iw3/figure/convergence.png"
 img_path2 = "iw3/figure/divergence.png"
+logger.debug(f"load two images")
 img1 = Image.open(img_path1).convert("RGB")
 img2 = Image.open(img_path2).convert("RGB")
 x1 = TF.to_tensor(img1)
