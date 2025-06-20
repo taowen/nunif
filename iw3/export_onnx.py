@@ -8,6 +8,7 @@ import torch
 from torchvision.transforms import functional as TF
 from PIL import Image
 import os
+import torch.nn as nn
 
 from nunif.utils.ui import TorchHubDir
 from nunif.logger import logger
@@ -36,26 +37,40 @@ with TorchHubDir(HUB_MODEL_DIR):
 side_model.delta_output = True
 side_model.symmetric = True
 
+class StereoDepthModule(nn.Module):
+    def __init__(self, depth_model, side_model):
+        super().__init__()
+        self.depth_model = depth_model
+        self.side_model = side_model
+
+    def forward(self, x):
+        # x: BCHW, float32, 0-1, on correct device
+        depth = self.depth_model.infer(
+            x, tta=False, low_vram=False, enable_amp=True, edge_dilation=0, depth_aa=False
+        )
+        depth = self.depth_model.minmax_normalize_chw(depth)  # BCHW
+
+        left, right = apply_divergence_nn_LR(
+            self.side_model,
+            x,
+            depth,
+            divergence=2.0,
+            convergence=0.5,
+            steps=None,
+            mapper='none',
+            synthetic_view='both',
+            preserve_screen_border=False,
+            enable_amp=True
+        )
+        return left, right
+
+# 构建模型
+stereo_module = StereoDepthModule(depth_model, side_model).eval()
+
 with torch.inference_mode():
     x = x.to(depth_model.device)
     logger.debug(f"x moved to device: {x.device}, shape: {x.shape}")
-    depth = depth_model.infer(x, tta=False, low_vram=False, enable_amp=True, edge_dilation=0, depth_aa=False)
-    logger.debug(f"depth raw output shape: {depth.shape}, dtype: {depth.dtype}")
-    depth = depth_model.minmax_normalize_chw(depth)  # BCHW
-    logger.debug(f"depth normalized shape: {depth.shape}, min: {depth.min().item()}, max: {depth.max().item()}")
-
-    left, right = apply_divergence_nn_LR(
-        side_model,
-        x,         # 直接传入整个 batch
-        depth,     # 直接传入整个 batch
-        divergence=2.0,
-        convergence=0.5,
-        steps=None,
-        mapper='none',
-        synthetic_view='both',
-        preserve_screen_border=False,
-        enable_amp=True
-    )
+    left, right = stereo_module(x)
 
 os.makedirs("tmp", exist_ok=True)
 for idx in range(left.shape[0]):
