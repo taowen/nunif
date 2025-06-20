@@ -15,55 +15,56 @@ def make_divergence_feature_value(divergence, convergence, image_width):
 
 def make_input_tensor(c, depth, divergence, convergence,
                       image_width, mapper="pow2", preserve_screen_border=False):
-    depth = depth.squeeze(0)  # CHW -> HW
+    # depth is BCHW
+    B, _, H, W = depth.shape
     depth = get_mapper(mapper)(depth)
     divergence_value, convergence_value = make_divergence_feature_value(divergence, convergence, image_width)
-    divergence_feat = torch.full_like(depth, divergence_value, device=depth.device)
-    convergence_feat = torch.full_like(depth, convergence_value, device=depth.device)
+    divergence_feat = torch.full_like(depth, divergence_value)
+    convergence_feat = torch.full_like(depth, convergence_value)
 
     if preserve_screen_border:
         # Force set screen border parallax to zero.
         # Note that this does not work with tiled rendering (training code)
-        border_pix = round(divergence * 0.75 * 0.01 * image_width * (depth.shape[-1] / image_width))
+        border_pix = round(divergence * 0.75 * 0.01 * image_width * (W / image_width))
         if border_pix > 0:
             border_weight_l = torch.linspace(0.0, 1.0, border_pix, device=depth.device)
             border_weight_r = torch.linspace(1.0, 0.0, border_pix, device=depth.device)
-            divergence_feat[:, :border_pix] = (border_weight_l[None, :].expand_as(divergence_feat[:, :border_pix]) *
-                                               divergence_feat[:, :border_pix])
-            divergence_feat[:, -border_pix:] = (border_weight_r[None, :].expand_as(divergence_feat[:, -border_pix:]) *
-                                                divergence_feat[:, -border_pix:])
-            convergence_feat[:, :border_pix] = (border_weight_l[None, :].expand_as(convergence_feat[:, :border_pix]) *
-                                                convergence_feat[:, :border_pix])
-            convergence_feat[:, -border_pix:] = (border_weight_r[None, :].expand_as(convergence_feat[:, -border_pix:]) *
-                                                 convergence_feat[:, -border_pix:])
+            border_weight_l = border_weight_l.view(1, 1, 1, -1)
+            border_weight_r = border_weight_r.view(1, 1, 1, -1)
+            divergence_feat[..., :, :border_pix] *= border_weight_l
+            divergence_feat[..., :, -border_pix:] *= border_weight_r
+            convergence_feat[..., :, :border_pix] *= border_weight_l
+            convergence_feat[..., :, -border_pix:] *= border_weight_r
 
     if c is not None:
-        w, h = c.shape[2], c.shape[1]
-        mesh_y, mesh_x = torch.meshgrid(torch.linspace(-1, 1, h, device=c.device),
-                                        torch.linspace(-1, 1, w, device=c.device), indexing="ij")
+        mesh_y, mesh_x = torch.meshgrid(torch.linspace(-1, 1, H, device=c.device),
+                                        torch.linspace(-1, 1, W, device=c.device), indexing="ij")
         grid = torch.stack((mesh_x, mesh_y), 2)
         grid = grid.permute(2, 0, 1)  # CHW
+        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)  # BCHW
         return torch.cat([
             c,
-            depth.unsqueeze(0),
-            divergence_feat.unsqueeze(0),
-            convergence_feat.unsqueeze(0),
+            depth,
+            divergence_feat,
+            convergence_feat,
             grid,
-        ], dim=0)
+        ], dim=1)
     else:
         return torch.cat([
-            depth.unsqueeze(0),
-            divergence_feat.unsqueeze(0),
-            convergence_feat.unsqueeze(0),
-        ], dim=0)
+            depth,
+            divergence_feat,
+            convergence_feat,
+        ], dim=1)
 
 
 def backward_warp(c, grid, delta, delta_scale):
+    print(f"[backward_warp] c.shape={c.shape}, grid.shape={grid.shape}, delta.shape={delta.shape}")
     grid = grid + delta * delta_scale
     if c.shape[2] != grid.shape[2] or c.shape[3] != grid.shape[3]:
         grid = F.interpolate(grid, size=c.shape[-2:],
                              mode="bilinear", align_corners=True, antialias=False)
     grid = grid.permute(0, 2, 3, 1)
+    print(f"[backward_warp] after permute: c.shape={c.shape}, grid.shape={grid.shape}")
     if device_is_mps(c.device):
         # MPS does not support bicubic and border
         mode = "bilinear"
@@ -163,13 +164,12 @@ def apply_divergence_nn(model, c, depth, divergence, convergence, steps,
     depth_warp = depth
     delta_steps = []
     for j in range(steps):
-        x = torch.stack([make_input_tensor(None, depth_warp[i],
-                                           divergence=divergence_step,
-                                           convergence=convergence,
-                                           image_width=W,
-                                           mapper=mapper,
-                                           preserve_screen_border=preserve_screen_border)
-                         for i in range(depth_warp.shape[0])])
+        x = make_input_tensor(None, depth_warp,
+                              divergence=divergence_step,
+                              convergence=convergence,
+                              image_width=W,
+                              mapper=mapper,
+                              preserve_screen_border=preserve_screen_border)
         with autocast(device=depth.device, enabled=enable_amp):
             delta = model(x)
         delta_steps.append(delta)
@@ -198,12 +198,11 @@ def apply_divergence_nn_symmetric(model, c, depth, divergence, convergence,
     if synthetic_view != "both":
         divergence *= 2
 
-    x = torch.stack([make_input_tensor(None, depth[i],
-                                       divergence=divergence,
-                                       convergence=convergence,
-                                       image_width=W,
-                                       mapper=mapper)
-                     for i in range(depth.shape[0])])
+    x = make_input_tensor(None, depth,
+                          divergence=divergence,
+                          convergence=convergence,
+                          image_width=W,
+                          mapper=mapper)
     with autocast(device=depth.device, enabled=enable_amp):
         delta = model(x)
     grid = make_grid(B, W, H, c.device)

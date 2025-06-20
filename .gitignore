@@ -14,6 +14,7 @@ tmp
 *.zip
 *.xcf
 *.onnx
+*.trt
 /data
 !/data/.keep
 /models
