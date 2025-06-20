@@ -8,7 +8,7 @@
 import torch
 import numpy as np
 import tensorrt as trt
-from iw3.export_onnx import (
+from iw3.export_onnx_old import (
     export_end2end_to_onnx, HUB_MODEL_DIR,
     End2EndStereoModel, DistillAnyDepthWithDilation
 )
