@@ -97,7 +97,7 @@ def batch_preprocess(x, lower_bound=392, max_aspect_ratio=4):
 
     # TODO: 'aten::_upsample_bilinear2d_aa.out' is not currently implemented for mps/xpu device
     antialias = not (device_is_mps(x.device) or device_is_xpu(x.device))
-    x = F.interpolate(x, size=(new_h, new_w), mode="bilinear", align_corners=False, antialias=antialias)
+    x = F.interpolate(x, size=(new_h, new_w), mode="bilinear", align_corners=False, antialias=False)
     x.clamp_(0, 1)
 
     # normalize

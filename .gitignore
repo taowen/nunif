@@ -13,6 +13,7 @@ tmp
 *.tar
 *.zip
 *.xcf
+*.onnx
 /data
 !/data/.keep
 /models
