@@ -7,6 +7,7 @@ from nunif.device import create_device, autocast, device_is_mps, device_is_xpu #
 from .dilation import dilate_edge
 from .base_depth_model import BaseDepthModel, HUB_MODEL_DIR
 from .models import DepthAA
+from nunif.logger import logger  # 添加在文件顶部
 
 
 NAME_MAP = {
@@ -66,6 +67,9 @@ AA_SUPPORTED_MODELS = {
 
 
 def batch_preprocess(x, lower_bound=392, max_aspect_ratio=4):
+    logger.debug(
+        f"[batch_preprocess] input shape: {x.shape} (B=batch, C=channel, H=height, W=width)"
+    )
     # x: BCHW float32 0-1
     B, C, H, W = x.shape
 
@@ -100,13 +104,24 @@ def batch_preprocess(x, lower_bound=392, max_aspect_ratio=4):
     mean = torch.tensor([0.485, 0.456, 0.406], dtype=x.dtype, device=x.device).reshape(1, 3, 1, 1)
     stdv = torch.tensor([0.229, 0.224, 0.225], dtype=x.dtype, device=x.device).reshape(1, 3, 1, 1)
     x.sub_(mean).div_(stdv)
+    logger.debug(
+        f"[batch_preprocess] resized to: {(new_h, new_w)} (H, W), after ensure_multiple_of {ensure_multiple_of}"
+    )
+    logger.debug("[batch_preprocess] interpolate and normalized tensor (ImageNet mean/std)")
     return x
 
 
 def _forward(model, x, enable_amp):
+    logger.debug(
+        f"[_forward] input shape: {x.shape} (B=batch, C=channel, H=height, W=width), enable_amp={enable_amp}"
+    )
     with autocast(device=x.device, enabled=enable_amp):
         out = model(x).unsqueeze(dim=1)
+    logger.debug(
+        f"[_forward] model output shape: {out.shape} (B=batch, 1=depth channel, H, W), dtype: {out.dtype}"
+    )
     if out.dtype != torch.float32:
+        logger.debug("[_forward] converting output to float32")
         out = out.to(torch.float32)
     out = torch.nan_to_num(out)
     return out
@@ -116,60 +131,90 @@ def _forward(model, x, enable_amp):
 def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
                 output_device="cpu", device=None, edge_dilation=2, depth_aa=None,
                 **kwargs):
+    logger.debug(
+        f"[batch_infer] flip_aug={flip_aug}, low_vram={low_vram}, edge_dilation={edge_dilation}, depth_aa={'yes' if depth_aa is not None else 'no'}"
+    )
     device = device if device is not None else model.device
     batch = False
     if torch.is_tensor(im):
         assert im.ndim == 3 or im.ndim == 4
         if im.ndim == 3:
+            logger.debug("[batch_infer] input is 3D tensor, unsqueeze to add batch dimension")
             im = im.unsqueeze(0)
         else:
+            logger.debug("[batch_infer] input is 4D tensor, batch mode")
             batch = True
         x = im.to(device)
     else:
-        # PIL
+        logger.debug("[batch_infer] input is PIL image, convert to tensor and add batch dimension")
         x = TF.to_tensor(im).unsqueeze(0).to(device)
 
     x = batch_preprocess(x, model.prep_lower_bound)
+    logger.debug(f"[batch_infer] after preprocess: {x.shape} (B, C, H, W)")
 
     if not low_vram:
+        logger.debug("[batch_infer] low_vram is False, using normal inference path")
         if flip_aug:
+            logger.debug("[batch_infer] flip_aug is True, duplicating and flipping input along width (W)")
             x = torch.cat([x, torch.flip(x, dims=[3])], dim=0)
+        else:
+            logger.debug("[batch_infer] flip_aug is False, no flipping")
         out = _forward(model, x, enable_amp)
     else:
+        logger.debug("[batch_infer] low_vram is True, using sequential inference path")
         x_org = x
         out = _forward(model, x, enable_amp)
         if flip_aug:
+            logger.debug("[batch_infer] flip_aug is True, sequentially flipping input along width (W)")
             x = torch.flip(x_org, dims=[3])
             out2 = _forward(model, x, enable_amp)
             out = torch.cat([out, out2], dim=0)
+        else:
+            logger.debug("[batch_infer] flip_aug is False, no flipping")
     if depth_aa is not None:
+        logger.debug("[batch_infer] depth_aa is enabled, applying depth anti-aliasing")
         out = depth_aa.infer(out)
+    else:
+        logger.debug("[batch_infer] depth_aa is not enabled")
 
     if edge_dilation > 0:
+        logger.debug(f"[batch_infer] edge_dilation={edge_dilation}, applying dilate_edge (edge smoothing)")
         if not model.metric_depth:
+            logger.debug("[batch_infer] model.metric_depth is False, normal dilation")
             out = dilate_edge(out, edge_dilation)
         else:
+            logger.debug("[batch_infer] model.metric_depth is True, invert before and after dilation")
             out = dilate_edge(out.neg_(), edge_dilation).neg_()
+    else:
+        logger.debug("[batch_infer] edge_dilation is 0, skip dilation")
 
     if not model.metric_depth:
-        # invert for zoedepth compatibility
+        logger.debug("[batch_infer] model.metric_depth is False, inverting output (for compatibility)")
         out.neg_()
+    else:
+        logger.debug("[batch_infer] model.metric_depth is True, skip inverting output")
 
     if flip_aug:
+        logger.debug("[batch_infer] flip_aug is True, merging outputs from original and flipped input")
         if batch:
             n = out.shape[0] // 2
+            logger.debug(f"[batch_infer] batch mode, merging {n} pairs")
             z = torch.empty((n, *out.shape[1:]), device=out.device)
             for i in range(n):
                 z[i] = (out[i] + torch.flip(out[i + n], dims=[2])) * 128
         else:
+            logger.debug("[batch_infer] single image mode, merging original and flipped")
             z = (out[0:1] + torch.flip(out[1:2], dims=[3])) * 128
     else:
+        logger.debug("[batch_infer] flip_aug is False, scaling output by 256")
         z = out * 256
     if not batch:
         assert z.shape[0] == 1
+        logger.debug("[batch_infer] not batch mode, squeeze batch dimension")
         z = z.squeeze(0)
 
     z = z.to(output_device)
+    logger.debug(f"[batch_infer] final output shape: {z.shape} (C=1, H, W), device: {z.device}")
 
     return z
 
@@ -179,6 +224,7 @@ class DepthAnythingModel(BaseDepthModel):
         super().__init__(model_type)
 
     def load_model(self, model_type, resolution=None, device=None):
+        logger.debug(f"[DepthAnythingModel] load_model: {model_type}, resolution={resolution}, device={device}")
         # load aa model
         if model_type in AA_SUPPORTED_MODELS:
             self.depth_aa = DepthAA().load().eval().to(device)
@@ -228,9 +274,11 @@ class DepthAnythingModel(BaseDepthModel):
             model.prep_lower_bound += (14 - model.prep_lower_bound % 14)
         model.device = device
 
+        logger.debug(f"[DepthAnythingModel] loaded model: {encoder}, metric_depth={getattr(model, 'metric_depth', False)}")
         return model
 
     def infer(self, x, tta=False, low_vram=False, enable_amp=True, edge_dilation=0, depth_aa=False, **kwargs):
+        logger.debug(f"[DepthAnythingModel] infer: tta={tta}, low_vram={low_vram}, enable_amp={enable_amp}, edge_dilation={edge_dilation}, depth_aa={depth_aa}")
         if not torch.is_tensor(x):
             x = TF.to_tensor(x).to(self.device)
         return batch_infer(

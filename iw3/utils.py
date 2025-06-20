@@ -32,6 +32,8 @@ from .backward_warp import (
     apply_divergence_grid_sample,
     apply_divergence_nn_LR,
 )
+import logging
+logger = logging.getLogger("nunif")  # 放在文件顶部
 
 HUB_MODEL_DIR = path.join(path.dirname(__file__), "pretrained_models", "hub")
 
@@ -52,6 +54,7 @@ def chunks(array, n):
 
 
 def to_pil_image(x):
+    logger.debug(f"[to_pil_image] input x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
     # x is already clipped to 0-1
     assert x.dtype in {torch.float32, torch.float16}
     x = TF.to_pil_image((x * 255).round_().to(torch.uint8).cpu())
@@ -244,6 +247,7 @@ def preprocess_image(x, args):
 
 
 def apply_divergence(depth, im, args, side_model):
+    logger.debug(f"[apply_divergence] depth shape: {depth.shape}, im shape: {im.shape}")
     batch = True
     if depth.ndim != 4:
         # CHW
@@ -290,6 +294,7 @@ def apply_divergence(depth, im, args, side_model):
         left_eye = left_eye.squeeze(0)
         right_eye = right_eye.squeeze(0)
 
+    logger.debug(f"[apply_divergence] left_eye shape: {left_eye.shape}, right_eye shape: {right_eye.shape}")
     return left_eye, right_eye
 
 
@@ -326,6 +331,7 @@ def postprocess_padding(left_eye, right_eye, pad, pad_mode):
 
 
 def postprocess_image(left_eye, right_eye, args):
+    logger.debug(f"[postprocess_image] left_eye shape: {left_eye.shape}, right_eye shape: {right_eye.shape}")
     # CHW
     ipd_pad = int(abs(args.ipd_offset) * 0.01 * left_eye.shape[2])
     ipd_pad -= ipd_pad % 2
@@ -382,6 +388,7 @@ def postprocess_image(left_eye, right_eye, args):
         sbs = TF.resize(sbs, (new_h, new_w),
                         interpolation=InterpolationMode.BICUBIC, antialias=True)
         sbs = torch.clamp(sbs, 0, 1)
+    logger.debug(f"[postprocess_image] sbs shape: {sbs.shape}")
     return sbs
 
 
@@ -401,24 +408,34 @@ def debug_depth_image(depth, args):
 
 
 def process_image(x, args, depth_model, side_model):
+    logger.debug(f"[process_image] input x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
     assert depth_model.get_ema_buffer_size() == 1
     with torch.inference_mode():
         x = preprocess_image(x, args)
+        logger.debug(f"[process_image] after preprocess_image: {x.shape}, dtype: {x.dtype}, device: {x.device}")
         depth = depth_model.infer(x, tta=args.tta, low_vram=args.low_vram,
                                   enable_amp=not args.disable_amp,
                                   edge_dilation=args.edge_dilation,
                                   depth_aa=args.depth_aa)
+        logger.debug(f"[process_image] depth shape: {depth.shape}, dtype: {depth.dtype}, device: {depth.device}")
         depth = depth_model.minmax_normalize_chw(depth)
+        logger.debug(f"[process_image] after minmax_normalize_chw: {depth.shape}, dtype: {depth.dtype}, device: {depth.device}")
 
         if args.debug_depth:
-            return debug_depth_image(depth, args)
+            out = debug_depth_image(depth, args)
+            logger.debug(f"[process_image] debug_depth_image out shape: {out.shape}, dtype: {out.dtype}, device: {out.device}")
+            return out
         elif args.rgbd or args.half_rgbd:
             left_eye, right_eye = apply_rgbd(x, depth, mapper=args.mapper)
+            logger.debug(f"[process_image] apply_rgbd left_eye shape: {left_eye.shape}, right_eye shape: {right_eye.shape}")
             sbs = postprocess_image(left_eye, right_eye, args)
+            logger.debug(f"[process_image] postprocess_image sbs shape: {sbs.shape}, dtype: {sbs.dtype}, device: {sbs.device}")
             return sbs
         else:
             left_eye, right_eye = apply_divergence(depth, x, args, side_model)
+            logger.debug(f"[process_image] apply_divergence left_eye shape: {left_eye.shape}, right_eye shape: {right_eye.shape}")
             sbs = postprocess_image(left_eye, right_eye, args)
+            logger.debug(f"[process_image] postprocess_image sbs shape: {sbs.shape}, dtype: {sbs.dtype}, device: {sbs.device}")
             return sbs
 
 

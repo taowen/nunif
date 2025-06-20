@@ -10,7 +10,7 @@ import numpy as np
 subprocess.run("python -m iw3.end_to_end", shell=True, check=True)
 
 # 2. 用 CLI 跑一遍，获得 tmp/side_by_side.png
-subprocess.run('python -m iw3 --input waifu2x/docs/images/miku_128.png --output tmp/side_by_side.png --method row_flow_v3_sym --depth-model Distill_Any_S --format png --edge-dilation 0', shell=True,check=True)
+subprocess.run('python -m iw3 --input iw3/figure/convergence.png --output tmp/side_by_side.png --method row_flow_v3_sym --depth-model Distill_Any_S --format png --edge-dilation 0', shell=True,check=True)
 
 # 3. 比较图片
 
