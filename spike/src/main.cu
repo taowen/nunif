@@ -303,84 +303,49 @@ void printMemoryUsage() {
               << "Free: " << free_mem / 1024 / 1024 << " MB" << std::endl;
 }
 
-int main(int argc, char** argv) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
-        return 1;
-    }
-    
-    // Record start time
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    std::string engine_path = argv[1];
-    std::string input_path = argv[2];
-    std::string output_path = argv[3];
-    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
-    
-    std::cout << "=== Video Processing Setup ===" << std::endl;
-    std::cout << "Engine: " << engine_path << std::endl;
-    std::cout << "Input: " << input_path << std::endl;
-    std::cout << "Output: " << output_path << std::endl;
-    std::cout << "Batch size: " << batch_size << std::endl;
-    
-    VideoProcessor processor;
-    
-    // 先检查内存状态
-    size_t total_mem, free_mem;
-    cudaMemGetInfo(&free_mem, &total_mem);
-    std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
-    printMemoryUsage();
-    
-    // 更保守的缓冲区分配策略
-    // 为TensorRT引擎预留足够空间后，剩余内存用于输入输出缓冲区
-    size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024; // 预估2GB给引擎
-    size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
-    
-    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);   // 1/3 剩余内存
-    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);  // 1/2 剩余内存
-    
-    std::cout << "Setting buffer limits - Input: " << max_input_mb 
-              << "MB, Output: " << max_output_mb << "MB" << std::endl;
-    
-    processor.setMaxBufferSize(max_input_mb, max_output_mb);
-    
-    if (!processor.loadEngine(engine_path)) {
-        std::cerr << "\n❌ Failed to load engine" << std::endl;
-        return 1;
-    }
-    
-    // Setup CUDA device
-    AVBufferRef* hw_device_ctx = nullptr;
-    if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
-        std::cerr << "Failed to create CUDA device" << std::endl;
-        return 1;
-    }
-    
-    // Open input
+// 新增的子函数声明
+struct VideoContext {
     AVFormatContext* ifmt_ctx = nullptr;
-    if (avformat_open_input(&ifmt_ctx, input_path.c_str(), nullptr, nullptr) < 0) {
+    AVFormatContext* ofmt_ctx = nullptr;
+    AVCodecContext* dec_ctx = nullptr;
+    AVCodecContext* enc_ctx = nullptr;
+    AVStream* out_stream = nullptr;
+    AVBufferRef* hw_device_ctx = nullptr;
+    int video_stream_idx = -1;
+    int64_t total_frames = 0;
+    std::string input_path;
+    std::string output_path;
+};
+
+// 设置输入解码器
+bool setupInputDecoder(VideoContext& ctx) {
+    // Open input
+    if (avformat_open_input(&ctx.ifmt_ctx, ctx.input_path.c_str(), nullptr, nullptr) < 0) {
         std::cerr << "Could not open input file" << std::endl;
-        return 1;
+        return false;
     }
-    avformat_find_stream_info(ifmt_ctx, nullptr);
+    avformat_find_stream_info(ctx.ifmt_ctx, nullptr);
     
-    int video_stream_idx = av_find_best_stream(ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    AVCodecParameters* codecpar = ifmt_ctx->streams[video_stream_idx]->codecpar;
+    ctx.video_stream_idx = av_find_best_stream(ctx.ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (ctx.video_stream_idx < 0) {
+        std::cerr << "Could not find video stream" << std::endl;
+        return false;
+    }
+    
+    AVCodecParameters* codecpar = ctx.ifmt_ctx->streams[ctx.video_stream_idx]->codecpar;
     
     // Calculate total frames for progress estimation
-    AVStream* video_stream = ifmt_ctx->streams[video_stream_idx];
-    int64_t total_frames = 0;
+    AVStream* video_stream = ctx.ifmt_ctx->streams[ctx.video_stream_idx];
     if (video_stream->nb_frames > 0) {
-        total_frames = video_stream->nb_frames;
+        ctx.total_frames = video_stream->nb_frames;
     } else if (video_stream->duration > 0 && video_stream->r_frame_rate.num > 0) {
-        // Estimate from duration and frame rate
         double duration_sec = (double)video_stream->duration * av_q2d(video_stream->time_base);
         double fps = av_q2d(video_stream->r_frame_rate);
-        total_frames = (int64_t)(duration_sec * fps);
+        ctx.total_frames = (int64_t)(duration_sec * fps);
     }
     
-    if (total_frames > 0) {
-        std::cout << "Estimated total frames: " << total_frames << std::endl;
+    if (ctx.total_frames > 0) {
+        std::cout << "Estimated total frames: " << ctx.total_frames << std::endl;
     }
     
     // Setup decoder
@@ -393,36 +358,305 @@ int main(int argc, char** argv) {
         decoder = avcodec_find_decoder(codecpar->codec_id);
     }
     
-    AVCodecContext* dec_ctx = avcodec_alloc_context3(decoder);
-    avcodec_parameters_to_context(dec_ctx, codecpar);
-    dec_ctx->pkt_timebase = ifmt_ctx->streams[video_stream_idx]->time_base;
-    if (strstr(decoder->name, "cuvid")) {
-        dec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+    if (!decoder) {
+        std::cerr << "Decoder not found" << std::endl;
+        return false;
     }
-    avcodec_open2(dec_ctx, decoder, nullptr);
     
-    // Setup output
-    AVFormatContext* ofmt_ctx = nullptr;
-    int ret = avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, output_path.c_str());
-    if (ret < 0 || !ofmt_ctx) {
+    ctx.dec_ctx = avcodec_alloc_context3(decoder);
+    avcodec_parameters_to_context(ctx.dec_ctx, codecpar);
+    ctx.dec_ctx->pkt_timebase = ctx.ifmt_ctx->streams[ctx.video_stream_idx]->time_base;
+    if (strstr(decoder->name, "cuvid")) {
+        ctx.dec_ctx->hw_device_ctx = av_buffer_ref(ctx.hw_device_ctx);
+    }
+    
+    if (avcodec_open2(ctx.dec_ctx, decoder, nullptr) < 0) {
+        std::cerr << "Failed to open decoder" << std::endl;
+        return false;
+    }
+    
+    return true;
+}
+
+// 设置输出编码器
+bool setupOutputEncoder(VideoContext& ctx) {
+    int ret = avformat_alloc_output_context2(&ctx.ofmt_ctx, nullptr, nullptr, ctx.output_path.c_str());
+    if (ret < 0 || !ctx.ofmt_ctx) {
         char error_buf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, error_buf, sizeof(error_buf));
         std::cerr << "Could not create output context: " << error_buf << std::endl;
-        return 1;
+        return false;
     }
     
-    AVStream* out_stream = avformat_new_stream(ofmt_ctx, nullptr);
-    if (!out_stream) {
+    ctx.out_stream = avformat_new_stream(ctx.ofmt_ctx, nullptr);
+    if (!ctx.out_stream) {
         std::cerr << "Failed to create output stream" << std::endl;
-        return 1;
+        return false;
     }
     
     const AVCodec* encoder = avcodec_find_encoder_by_name("hevc_nvenc");
     if (!encoder) {
         std::cerr << "hevc_nvenc encoder not found" << std::endl;
+        return false;
+    }
+    
+    ctx.enc_ctx = avcodec_alloc_context3(encoder);
+    return true;
+}
+
+// 初始化编码器
+bool initializeEncoder(VideoContext& ctx, AVFrame* first_frame) {
+    int ret;
+    
+    ctx.enc_ctx->width = first_frame->width;
+    ctx.enc_ctx->height = first_frame->height;
+    ctx.enc_ctx->pix_fmt = AV_PIX_FMT_CUDA;
+    ctx.enc_ctx->hw_device_ctx = av_buffer_ref(ctx.hw_device_ctx);
+    
+    // Set frame rate and time base properly
+    AVRational input_framerate = av_guess_frame_rate(ctx.ifmt_ctx, ctx.ifmt_ctx->streams[ctx.video_stream_idx], nullptr);
+    if (input_framerate.num > 0 && input_framerate.den > 0) {
+        ctx.enc_ctx->framerate = input_framerate;
+        ctx.enc_ctx->time_base = av_inv_q(input_framerate);
+    } else {
+        ctx.enc_ctx->framerate = {30, 1};
+        ctx.enc_ctx->time_base = {1, 30};
+    }
+    
+    // Create hw_frames_ctx for the encoder
+    AVBufferRef* enc_hw_frames_ref = av_hwframe_ctx_alloc(ctx.hw_device_ctx);
+    AVHWFramesContext* enc_hw_frames_ctx = (AVHWFramesContext*)enc_hw_frames_ref->data;
+    enc_hw_frames_ctx->format = AV_PIX_FMT_CUDA;
+    enc_hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    enc_hw_frames_ctx->width = first_frame->width;
+    enc_hw_frames_ctx->height = first_frame->height;
+    enc_hw_frames_ctx->initial_pool_size = 4;
+    ret = av_hwframe_ctx_init(enc_hw_frames_ref);
+    if (ret < 0) {
+        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error_buf, sizeof(error_buf));
+        std::cerr << "Failed to initialize hw_frames_ctx: " << error_buf << std::endl;
+        return false;
+    }
+    ctx.enc_ctx->hw_frames_ctx = enc_hw_frames_ref;
+    
+    // Calculate bitrate based on resolution
+    int calculated_bitrate = calculateBitrate(first_frame->width, first_frame->height);
+    ctx.enc_ctx->bit_rate = calculated_bitrate;
+    
+    std::cout << "Resolution: " << first_frame->width << "x" << first_frame->height 
+              << ", Calculated bitrate: " << calculated_bitrate / 1000000.0 << " Mbps" << std::endl;
+    
+    // Set encoding parameters
+    ctx.enc_ctx->gop_size = 30;
+    ctx.enc_ctx->max_b_frames = 0;
+    
+    // Set HEVC-specific parameters
+    av_opt_set(ctx.enc_ctx->priv_data, "preset", "fast", 0);
+    av_opt_set(ctx.enc_ctx->priv_data, "profile", "main", 0);
+    av_opt_set(ctx.enc_ctx->priv_data, "level", "auto", 0);
+    av_opt_set(ctx.enc_ctx->priv_data, "tier", "main", 0);
+    
+    // Ensure global header is set for container
+    if (ctx.ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
+        ctx.enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
+    
+    ret = avcodec_open2(ctx.enc_ctx, avcodec_find_encoder_by_name("hevc_nvenc"), nullptr);
+    if (ret < 0) {
+        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error_buf, sizeof(error_buf));
+        std::cerr << "Failed to open encoder: " << error_buf << std::endl;
+        return false;
+    }
+    
+    // Setup output stream parameters
+    ret = avcodec_parameters_from_context(ctx.out_stream->codecpar, ctx.enc_ctx);
+    if (ret < 0) {
+        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error_buf, sizeof(error_buf));
+        std::cerr << "Failed to copy codec parameters: " << error_buf << std::endl;
+        return false;
+    }
+    ctx.out_stream->time_base = ctx.enc_ctx->time_base;
+    
+    // Open output file and write header
+    ret = avio_open(&ctx.ofmt_ctx->pb, ctx.output_path.c_str(), AVIO_FLAG_WRITE);
+    if (ret < 0) {
+        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error_buf, sizeof(error_buf));
+        std::cerr << "Could not open output file: " << error_buf << std::endl;
+        return false;
+    }
+    
+    ret = avformat_write_header(ctx.ofmt_ctx, nullptr);
+    if (ret < 0) {
+        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, error_buf, sizeof(error_buf));
+        std::cerr << "Error writing header: " << error_buf << std::endl;
+        return false;
+    }
+    
+    std::cout << "Encoder initialized and header written" << std::endl;
+    return true;
+}
+
+// 编码并写入帧
+bool encodeAndWriteFrames(VideoContext& ctx, const std::vector<AVFrame*>& frames, int64_t& next_pts) {
+    int ret;
+    
+    for (size_t i = 0; i < frames.size(); i++) {
+        frames[i]->pts = next_pts++;
+        
+        if (avcodec_send_frame(ctx.enc_ctx, frames[i]) == 0) {
+            AVPacket* out_pkt = av_packet_alloc();
+            if (!out_pkt) continue;
+            
+            while (avcodec_receive_packet(ctx.enc_ctx, out_pkt) == 0) {
+                if (out_pkt->size > 0) {
+                    av_packet_rescale_ts(out_pkt, ctx.enc_ctx->time_base, ctx.out_stream->time_base);
+                    out_pkt->stream_index = 0;
+                    
+                    ret = av_interleaved_write_frame(ctx.ofmt_ctx, out_pkt);
+                    if (ret < 0) {
+                        char error_buf[AV_ERROR_MAX_STRING_SIZE];
+                        av_strerror(ret, error_buf, sizeof(error_buf));
+                        std::cerr << "Error writing frame: " << error_buf << std::endl;
+                    }
+                }
+                av_packet_unref(out_pkt);
+            }
+            av_packet_free(&out_pkt);
+        }
+    }
+    
+    return true;
+}
+
+// 显示进度信息
+void displayProgress(int frame_count, int64_t total_frames, const std::chrono::high_resolution_clock::time_point& start_time) {
+    auto current_time = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time);
+    
+    std::cout << "Processed " << frame_count << " frames";
+    
+    if (total_frames > 0 && frame_count > 0) {
+        double progress = (double)frame_count / total_frames;
+        double elapsed_sec = elapsed.count() / 1000.0;
+        double estimated_total_sec = elapsed_sec / progress;
+        double remaining_sec = estimated_total_sec - elapsed_sec;
+        
+        int remaining_min = (int)(remaining_sec / 60);
+        int remaining_sec_part = (int)(remaining_sec) % 60;
+        
+        std::cout << " (" << std::fixed << std::setprecision(1) 
+                  << (progress * 100) << "%, ETA: " 
+                  << remaining_min << "m" << remaining_sec_part << "s)";
+    }
+    std::cout << std::endl;
+}
+
+// 完成编码器
+bool finalizeEncoder(VideoContext& ctx) {
+    int ret;
+    
+    avcodec_send_frame(ctx.enc_ctx, nullptr);
+    AVPacket* out_pkt = av_packet_alloc();
+    if (out_pkt) {
+        while (avcodec_receive_packet(ctx.enc_ctx, out_pkt) == 0) {
+            if (out_pkt->size > 0) {
+                av_packet_rescale_ts(out_pkt, ctx.enc_ctx->time_base, ctx.out_stream->time_base);
+                out_pkt->stream_index = 0;
+                ret = av_interleaved_write_frame(ctx.ofmt_ctx, out_pkt);
+                if (ret < 0) {
+                    std::cerr << "Error writing final frame" << std::endl;
+                }
+            }
+            av_packet_unref(out_pkt);
+        }
+        av_packet_free(&out_pkt);
+    }
+    
+    av_write_trailer(ctx.ofmt_ctx);
+    return true;
+}
+
+// 清理资源
+void cleanupVideoContext(VideoContext& ctx) {
+    if (ctx.ofmt_ctx && ctx.ofmt_ctx->pb) {
+        avio_closep(&ctx.ofmt_ctx->pb);
+    }
+    avformat_free_context(ctx.ofmt_ctx);
+    avformat_close_input(&ctx.ifmt_ctx);
+    avcodec_free_context(&ctx.dec_ctx);
+    avcodec_free_context(&ctx.enc_ctx);
+    av_buffer_unref(&ctx.hw_device_ctx);
+}
+
+int main(int argc, char** argv) {
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
         return 1;
     }
-    AVCodecContext* enc_ctx = avcodec_alloc_context3(encoder);
+    
+    // Record start time
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    std::string engine_path = argv[1];
+    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
+    
+    // Initialize video context
+    VideoContext ctx;
+    ctx.input_path = argv[2];
+    ctx.output_path = argv[3];
+    
+    std::cout << "=== Video Processing Setup ===" << std::endl;
+    std::cout << "Engine: " << engine_path << std::endl;
+    std::cout << "Input: " << ctx.input_path << std::endl;
+    std::cout << "Output: " << ctx.output_path << std::endl;
+    std::cout << "Batch size: " << batch_size << std::endl;
+    
+    VideoProcessor processor;
+    
+    // Setup memory management
+    size_t total_mem, free_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
+    printMemoryUsage();
+    
+    size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024;
+    size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
+    
+    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);
+    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);
+    
+    std::cout << "Setting buffer limits - Input: " << max_input_mb 
+              << "MB, Output: " << max_output_mb << "MB" << std::endl;
+    
+    processor.setMaxBufferSize(max_input_mb, max_output_mb);
+    
+    if (!processor.loadEngine(engine_path)) {
+        std::cerr << "\n❌ Failed to load engine" << std::endl;
+        return 1;
+    }
+    
+    // Setup CUDA device
+    if (av_hwdevice_ctx_create(&ctx.hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
+        std::cerr << "Failed to create CUDA device" << std::endl;
+        return 1;
+    }
+    
+    // Setup input decoder
+    if (!setupInputDecoder(ctx)) {
+        cleanupVideoContext(ctx);
+        return 1;
+    }
+    
+    // Setup output encoder
+    if (!setupOutputEncoder(ctx)) {
+        cleanupVideoContext(ctx);
+        return 1;
+    }
     
     // Process frames
     AVPacket* pkt = av_packet_alloc();
@@ -432,240 +666,70 @@ int main(int argc, char** argv) {
     bool encoder_initialized = false;
     int64_t next_pts = 0;
     
-    while (av_read_frame(ifmt_ctx, pkt) >= 0) {
-        if (pkt->stream_index != video_stream_idx) {
+    while (av_read_frame(ctx.ifmt_ctx, pkt) >= 0) {
+        if (pkt->stream_index != ctx.video_stream_idx) {
             av_packet_unref(pkt);
             continue;
         }
         
-        if (avcodec_send_packet(dec_ctx, pkt) == 0) {
-            while (avcodec_receive_frame(dec_ctx, frame) == 0) {
+        if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
+            while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
                 AVFrame* ref_frame = av_frame_alloc();
                 av_frame_ref(ref_frame, frame);
                 frame_buffer.push_back(ref_frame);
                 
                 if (frame_buffer.size() >= batch_size) {
-                    auto processed_frames = processor.processBatch(frame_buffer, hw_device_ctx);
+                    auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
                     
                     // Initialize encoder on first batch
                     if (!encoder_initialized) {
-                        enc_ctx->width = processed_frames[0]->width;
-                        enc_ctx->height = processed_frames[0]->height;
-                        enc_ctx->pix_fmt = AV_PIX_FMT_CUDA;
-                        enc_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-                        
-                        // Set frame rate and time base properly
-                        AVRational input_framerate = av_guess_frame_rate(ifmt_ctx, ifmt_ctx->streams[video_stream_idx], nullptr);
-                        if (input_framerate.num > 0 && input_framerate.den > 0) {
-                            enc_ctx->framerate = input_framerate;
-                            enc_ctx->time_base = av_inv_q(input_framerate);
-                        } else {
-                            enc_ctx->framerate = {30, 1};
-                            enc_ctx->time_base = {1, 30};
-                        }
-                        
-                        // Create hw_frames_ctx for the encoder
-                        AVBufferRef* enc_hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
-                        AVHWFramesContext* enc_hw_frames_ctx = (AVHWFramesContext*)enc_hw_frames_ref->data;
-                        enc_hw_frames_ctx->format = AV_PIX_FMT_CUDA;
-                        enc_hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-                        enc_hw_frames_ctx->width = processed_frames[0]->width;
-                        enc_hw_frames_ctx->height = processed_frames[0]->height;
-                        enc_hw_frames_ctx->initial_pool_size = 4;
-                        ret = av_hwframe_ctx_init(enc_hw_frames_ref);
-                        if (ret < 0) {
-                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(ret, error_buf, sizeof(error_buf));
-                            std::cerr << "Failed to initialize hw_frames_ctx: " << error_buf << std::endl;
+                        if (!initializeEncoder(ctx, processed_frames[0])) {
+                            cleanupVideoContext(ctx);
                             return 1;
                         }
-                        enc_ctx->hw_frames_ctx = enc_hw_frames_ref;
-                        
-                        // Calculate bitrate based on resolution
-                        int calculated_bitrate = calculateBitrate(processed_frames[0]->width, processed_frames[0]->height);
-                        enc_ctx->bit_rate = calculated_bitrate;
-                        
-                        std::cout << "Resolution: " << processed_frames[0]->width << "x" << processed_frames[0]->height 
-                                  << ", Calculated bitrate: " << calculated_bitrate / 1000000.0 << " Mbps" << std::endl;
-                        
-                        // Set encoding parameters
-                        enc_ctx->gop_size = 30;
-                        enc_ctx->max_b_frames = 0;  // Disable B-frames for better compatibility
-                        
-                        // Set HEVC-specific parameters
-                        av_opt_set(enc_ctx->priv_data, "preset", "fast", 0);
-                        av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
-                        av_opt_set(enc_ctx->priv_data, "level", "auto", 0);
-                        av_opt_set(enc_ctx->priv_data, "tier", "main", 0);
-                        
-                        // Ensure global header is set for container
-                        if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
-                            enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-                        }
-                        
-                        ret = avcodec_open2(enc_ctx, encoder, nullptr);
-                        if (ret < 0) {
-                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(ret, error_buf, sizeof(error_buf));
-                            std::cerr << "Failed to open encoder: " << error_buf << std::endl;
-                            return 1;
-                        }
-                        
-                        // Setup output stream parameters
-                        ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
-                        if (ret < 0) {
-                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(ret, error_buf, sizeof(error_buf));
-                            std::cerr << "Failed to copy codec parameters: " << error_buf << std::endl;
-                            return 1;
-                        }
-                        out_stream->time_base = enc_ctx->time_base;
-                        
-                        // Open output file and write header
-                        ret = avio_open(&ofmt_ctx->pb, output_path.c_str(), AVIO_FLAG_WRITE);
-                        if (ret < 0) {
-                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(ret, error_buf, sizeof(error_buf));
-                            std::cerr << "Could not open output file: " << error_buf << std::endl;
-                            return 1;
-                        }
-                        
-                        ret = avformat_write_header(ofmt_ctx, nullptr);
-                        if (ret < 0) {
-                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                            av_strerror(ret, error_buf, sizeof(error_buf));
-                            std::cerr << "Error writing header: " << error_buf << std::endl;
-                            return 1;
-                        }
-                        
                         encoder_initialized = true;
-                        std::cout << "Encoder initialized and header written" << std::endl;
                     }
                     
                     // Encode frames
-                    for (size_t i = 0; i < processed_frames.size(); i++) {
-                        processed_frames[i]->pts = next_pts++;
-                        
-                        if (avcodec_send_frame(enc_ctx, processed_frames[i]) == 0) {
-                            AVPacket* out_pkt = av_packet_alloc();
-                            if (!out_pkt) continue;
-                            
-                            while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                                if (out_pkt->size > 0) {
-                                    av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
-                                    out_pkt->stream_index = 0;
-                                    
-                                    ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
-                                    if (ret < 0) {
-                                        char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                        av_strerror(ret, error_buf, sizeof(error_buf));
-                                        std::cerr << "Error writing frame: " << error_buf << std::endl;
-                                    }
-                                }
-                                av_packet_unref(out_pkt);
-                            }
-                            av_packet_free(&out_pkt);
-                        }
-                        
-                        av_frame_free(&processed_frames[i]);
-                    }
+                    encodeAndWriteFrames(ctx, processed_frames, next_pts);
                     
+                    // Cleanup processed frames
+                    for (auto f : processed_frames) av_frame_free(&f);
                     for (auto f : frame_buffer) av_frame_free(&f);
                     frame_buffer.clear();
                     frame_count += processed_frames.size();
                     
-                    // Calculate and display progress with ETA
-                    auto current_time = std::chrono::high_resolution_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time);
-                    
-                    std::cout << "Processed " << frame_count << " frames";
-                    
-                    if (total_frames > 0 && frame_count > 0) {
-                        double progress = (double)frame_count / total_frames;
-                        double elapsed_sec = elapsed.count() / 1000.0;
-                        double estimated_total_sec = elapsed_sec / progress;
-                        double remaining_sec = estimated_total_sec - elapsed_sec;
-                        
-                        int remaining_min = (int)(remaining_sec / 60);
-                        int remaining_sec_part = (int)(remaining_sec) % 60;
-                        
-                        std::cout << " (" << std::fixed << std::setprecision(1) 
-                                  << (progress * 100) << "%, ETA: " 
-                                  << remaining_min << "m" << remaining_sec_part << "s)";
-                    }
-                    std::cout << std::endl;
+                    // Display progress
+                    displayProgress(frame_count, ctx.total_frames, start_time);
                 }
             }
         }
         av_packet_unref(pkt);
         
-        // 在处理过程中定期检查显存
-        if (frame_count % 100 == 0) {  // 每100帧检查一次
+        // Memory check
+        if (frame_count % 100 == 0) {
             printMemoryUsage();
         }
     }
     
     // Process remaining frames
     if (!frame_buffer.empty() && encoder_initialized) {
-        auto processed_frames = processor.processBatch(frame_buffer, hw_device_ctx);
-        for (size_t i = 0; i < processed_frames.size(); i++) {
-            processed_frames[i]->pts = next_pts++;
-            
-            if (avcodec_send_frame(enc_ctx, processed_frames[i]) == 0) {
-                AVPacket* out_pkt = av_packet_alloc();
-                if (out_pkt) {
-                    while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                        if (out_pkt->size > 0) {
-                            av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
-                            out_pkt->stream_index = 0;
-                            ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
-                            if (ret < 0) {
-                                std::cerr << "Error writing frame" << std::endl;
-                            }
-                        }
-                        av_packet_unref(out_pkt);
-                    }
-                    av_packet_free(&out_pkt);
-                }
-            }
-            av_frame_free(&processed_frames[i]);
-        }
+        auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
+        encodeAndWriteFrames(ctx, processed_frames, next_pts);
+        
+        for (auto f : processed_frames) av_frame_free(&f);
         for (auto f : frame_buffer) av_frame_free(&f);
     }
     
     // Finalize encoder
     if (encoder_initialized) {
-        avcodec_send_frame(enc_ctx, nullptr);
-        AVPacket* out_pkt = av_packet_alloc();
-        if (out_pkt) {
-            while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                if (out_pkt->size > 0) {
-                    av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
-                    out_pkt->stream_index = 0;
-                    ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
-                    if (ret < 0) {
-                        std::cerr << "Error writing final frame" << std::endl;
-                    }
-                }
-                av_packet_unref(out_pkt);
-            }
-            av_packet_free(&out_pkt);
-        }
-        
-        av_write_trailer(ofmt_ctx);
+        finalizeEncoder(ctx);
     }
     
     // Cleanup
-    if (ofmt_ctx && ofmt_ctx->pb) {
-        avio_closep(&ofmt_ctx->pb);
-    }
-    avformat_free_context(ofmt_ctx);
-    avformat_close_input(&ifmt_ctx);
-    avcodec_free_context(&dec_ctx);
-    avcodec_free_context(&enc_ctx);
     av_packet_free(&pkt);
     av_frame_free(&frame);
-    av_buffer_unref(&hw_device_ctx);
+    cleanupVideoContext(ctx);
     
     // Print total processing time
     auto end_time = std::chrono::high_resolution_clock::now();
