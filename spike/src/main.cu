@@ -89,6 +89,8 @@ private:
     float* d_output = nullptr;
     size_t input_size = 0;
     size_t output_size = 0;
+    size_t max_input_size = 0;   // 添加最大尺寸限制
+    size_t max_output_size = 0;
     
     Logger logger;
     
@@ -128,8 +130,29 @@ public:
         context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
         if (!context) return false;
         
-        std::cout << "Engine loaded successfully!" << std::endl;
+        // 更智能的内存管理策略
+        size_t total_mem, free_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        
+        size_t engine_required = engine->getDeviceMemorySize();
+        
+        // 预留给系统和其他操作的内存（至少1GB）
+        size_t reserved_mem = std::max(1024ULL * 1024 * 1024, total_mem / 10); // 1GB或总内存的10%，取较大值
+        size_t usable_mem = (free_mem > reserved_mem) ? (free_mem - reserved_mem) : 0;
+        
+        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Reserved Memory: " << reserved_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Usable Memory: " << usable_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+
         return true;
+    }
+    
+    // 添加缓冲区大小限制方法
+    void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
+        max_input_size = max_input_mb * 1024 * 1024;
+        max_output_size = max_output_mb * 1024 * 1024;
     }
     
     std::vector<AVFrame*> processBatch(const std::vector<AVFrame*>& frames, AVBufferRef* hw_device_ctx) {
@@ -140,12 +163,19 @@ public:
         const int width = frames[0]->width;
         const int channels = 3;
         
-        // Allocate GPU buffers
+        // 限制缓冲区大小
         size_t required_input_size = batch_size * channels * height * width * sizeof(float);
+        if (max_input_size > 0 && required_input_size > max_input_size) {
+            std::cerr << "Warning: Required input size exceeds limit, processing smaller batches" << std::endl;
+            // 可以考虑分割batch或降低精度
+        }
+        
         if (required_input_size > input_size) {
             if (d_input) cudaFree(d_input);
             cudaMalloc(&d_input, required_input_size);
             input_size = required_input_size;
+            
+            std::cout << "Allocated input buffer: " << required_input_size / 1024 / 1024 << " MB" << std::endl;
         }
         
         // Preprocess: NV12 -> CHW Float
@@ -207,7 +237,7 @@ public:
         hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
         hw_frames_ctx->width = out_W;
         hw_frames_ctx->height = out_H;
-        hw_frames_ctx->initial_pool_size = batch_size + 2;
+        hw_frames_ctx->initial_pool_size = batch_size + 1;
         av_hwframe_ctx_init(hw_frames_ref);
         
         std::vector<AVFrame*> output_frames;
@@ -262,6 +292,27 @@ int calculateBitrate(int width, int height) {
     return std::max(min_bitrate, std::min(max_bitrate, bitrate));
 }
 
+// 添加显存监控函数
+void printMemoryUsage() {
+    size_t total_mem, free_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    size_t used_mem = total_mem - free_mem;
+    
+    std::cout << "GPU Memory - Total: " << total_mem / 1024 / 1024 << " MB, "
+              << "Used: " << used_mem / 1024 / 1024 << " MB, "
+              << "Free: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+}
+
+// 添加引擎优化建议函数
+void printOptimizationSuggestions() {
+    std::cout << "\n=== Memory Optimization Suggestions ===" << std::endl;
+    std::cout << "1. Use FP16 precision when building TensorRT engine (if supported)" << std::endl;
+    std::cout << "2. Reduce batch size to lower memory requirements" << std::endl;
+    std::cout << "3. Consider using dynamic shapes for variable input sizes" << std::endl;
+    std::cout << "4. Use INT8 quantization for further memory reduction (requires calibration)" << std::endl;
+    std::cout << "5. Enable memory optimization flags during engine building" << std::endl;
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
@@ -274,11 +325,50 @@ int main(int argc, char** argv) {
     std::string engine_path = argv[1];
     std::string input_path = argv[2];
     std::string output_path = argv[3];
-    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 4;
+    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 1;  // 默认批处理大小改为1
+    
+    std::cout << "=== Video Processing Setup ===" << std::endl;
+    std::cout << "Engine: " << engine_path << std::endl;
+    std::cout << "Input: " << input_path << std::endl;
+    std::cout << "Output: " << output_path << std::endl;
+    std::cout << "Batch size: " << batch_size << std::endl;
     
     VideoProcessor processor;
+    
+    // 先检查内存状态
+    size_t total_mem, free_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
+    printMemoryUsage();
+    
+    // 更保守的缓冲区分配策略
+    // 为TensorRT引擎预留足够空间后，剩余内存用于输入输出缓冲区
+    size_t estimated_engine_mem = 8ULL * 1024 * 1024 * 1024; // 预估8GB给引擎
+    size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
+    
+    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);   // 1/3 剩余内存
+    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);  // 1/2 剩余内存
+    
+    std::cout << "Setting buffer limits - Input: " << max_input_mb 
+              << "MB, Output: " << max_output_mb << "MB" << std::endl;
+    
+    processor.setMaxBufferSize(max_input_mb, max_output_mb);
+    
     if (!processor.loadEngine(engine_path)) {
-        std::cerr << "Failed to load engine" << std::endl;
+        std::cerr << "\n❌ Failed to load engine" << std::endl;
+        printOptimizationSuggestions();
+        
+        // 提供具体的FP16重建命令示例
+        std::cout << "\n🔧 QUICK FIX - TensorRT FP16 Rebuild Example:" << std::endl;
+        std::cout << "If you have the ONNX model, rebuild with:" << std::endl;
+        std::cout << "trtexec --onnx=your_model.onnx --fp16 --best --memPoolSize=workspace:6000 --saveEngine=new_engine_fp16.trt" << std::endl;
+        std::cout << "\nOr for dynamic shapes (like your current command):" << std::endl;
+        std::cout << "trtexec --onnx=sim.onnx --saveEngine=stereo_module_half_sbs_fp16.trt --best --memPoolSize=workspace:6000 --fp16 \\" << std::endl;
+        std::cout << "  --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:16x3x2160x3840" << std::endl;
+        std::cout << "\nAlternatively, try without explicit workspace limit:" << std::endl;
+        std::cout << "trtexec --onnx=sim.onnx --saveEngine=stereo_module_half_sbs_fp16.trt --best --fp16 \\" << std::endl;
+        std::cout << "  --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:16x3x2160x3840" << std::endl;
+        
         return 1;
     }
     
@@ -404,7 +494,7 @@ int main(int argc, char** argv) {
                         enc_hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
                         enc_hw_frames_ctx->width = processed_frames[0]->width;
                         enc_hw_frames_ctx->height = processed_frames[0]->height;
-                        enc_hw_frames_ctx->initial_pool_size = 8;
+                        enc_hw_frames_ctx->initial_pool_size = 4;
                         ret = av_hwframe_ctx_init(enc_hw_frames_ref);
                         if (ret < 0) {
                             char error_buf[AV_ERROR_MAX_STRING_SIZE];
@@ -531,6 +621,11 @@ int main(int argc, char** argv) {
             }
         }
         av_packet_unref(pkt);
+        
+        // 在处理过程中定期检查显存
+        if (frame_count % 100 == 0) {  // 每100帧检查一次
+            printMemoryUsage();
+        }
     }
     
     // Process remaining frames
