@@ -11,6 +11,7 @@ import os
 import torch.nn as nn
 import torch.onnx
 
+from iw3.mapper import get_mapper, resolve_mapper_name
 from nunif.utils.ui import TorchHubDir
 from nunif.logger import logger
 from iw3.backward_warp import apply_divergence_nn_LR
@@ -28,7 +29,7 @@ logger.debug(f"stacked x shape: {x.shape}")
 
 from iw3.depth_model_factory import create_depth_model
 depth_model = create_depth_model("Distill_Any_S")
-depth_model.load(gpu=[0], resolution=None)
+depth_model.load(gpu=[0], resolution=392)
 from nunif.models import load_model
 from iw3.utils import HUB_MODEL_DIR, ROW_FLOW_V3_SYM_URL
 
@@ -37,6 +38,10 @@ with TorchHubDir(HUB_MODEL_DIR):
     side_model = load_model(side_model_path, weights_only=True, device_ids=[0])[0].eval()
 side_model.delta_output = True
 side_model.symmetric = True
+
+mapper_name = resolve_mapper_name(mapper=None, foreground_scale=0.9, metric_depth=False)
+logger.debug(f"mapper_name: {mapper_name}")
+mapper = get_mapper(mapper_name)
 
 class StereoDepthModule(nn.Module):
     def __init__(self, depth_model, side_model):
@@ -49,9 +54,10 @@ class StereoDepthModule(nn.Module):
     def forward(self, x):
         # x: BCHW, float32, 0-1, on correct device
         depth = self.depth_model_wrapper.infer(
-            x, tta=False, low_vram=False, enable_amp=True, edge_dilation=0, depth_aa=False
+            x, tta=False, low_vram=False, enable_amp=True, edge_dilation=1, depth_aa=False
         )
         depth = self.depth_model_wrapper.minmax_normalize_chw(depth)  # BCHW
+        depth = mapper(depth)
 
         left, right = apply_divergence_nn_LR(
             self.side_model_wrapper,

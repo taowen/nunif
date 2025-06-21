@@ -642,10 +642,22 @@ def process_video(input_path, output_path,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
                   start_time=None, end_time=None,
-                  batch_size=4):
+                  batch_size=8):
     
     processor = TensorRTProcessor("stereo_module.trt")
     frame_buffer = []  # Buffer to collect frames for batch processing
+
+    # 统计时间
+    time_stats_total = {
+        "to_tensor": 0.0,
+        "host2dev": 0.0,
+        "inference": 0.0,
+        "dev2host": 0.0,
+        "post": 0.0,
+        "other": 0.0,
+        "post_gpu": 0.0,
+        "post_cpu": 0.0,
+    }
 
     if isinstance(start_time, str):
         start_time = parse_time(start_time)
@@ -745,13 +757,23 @@ def process_video(input_path, output_path,
                     
                     # Process when buffer is full
                     if len(frame_buffer) >= batch_size:
-                        processed_frames = processor.process(frame_buffer)
+                        t0 = time.perf_counter()
+                        processed_frames, time_stats = processor.process(frame_buffer)
+                        t1 = time.perf_counter()
+                        for k in time_stats:
+                            if k in time_stats_total:
+                                time_stats_total[k] += time_stats[k]
+                        time_stats_total["other"] += (t1 - t0) - sum(time_stats.values())
+
+                        t2 = time.perf_counter()
                         for new_frame in processed_frames:
                             new_frame = reformatter(new_frame)
                             enc_packet = video_output_stream.encode(new_frame)
                             if enc_packet:
                                 output_container.mux(enc_packet)
                             pbar.update(1)
+                        t3 = time.perf_counter()
+                        time_stats_total["other"] += (t3 - t2)
                         frame_buffer = []  # Clear buffer
                     
         elif packet.stream.type == "audio":
@@ -777,26 +799,46 @@ def process_video(input_path, output_path,
             frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
             frame_buffer.append(frame)
             if len(frame_buffer) >= batch_size:
-                processed_frames = processor.process(frame_buffer)
+                t0 = time.perf_counter()
+                processed_frames, time_stats = processor.process(frame_buffer)
+                t1 = time.perf_counter()
+                for k in time_stats:
+                    if k in time_stats_total:
+                        time_stats_total[k] += time_stats[k]
+                time_stats_total["other"] += (t1 - t0) - sum(time_stats.values())
+
+                t2 = time.perf_counter()
                 for new_frame in processed_frames:
                     new_frame = reformatter(new_frame)
                     enc_packet = video_output_stream.encode(new_frame)
                     if enc_packet:
                         output_container.mux(enc_packet)
                     pbar.update(1)
+                t3 = time.perf_counter()
+                time_stats_total["other"] += (t3 - t2)
                 frame_buffer = []
         else:
             break
 
     # Process any remaining frames in buffer
     if frame_buffer:
-        processed_frames = processor.process(frame_buffer)
+        t0 = time.perf_counter()
+        processed_frames, time_stats = processor.process(frame_buffer)
+        t1 = time.perf_counter()
+        for k in time_stats:
+            if k in time_stats_total:
+                time_stats_total[k] += time_stats[k]
+        time_stats_total["other"] += (t1 - t0) - sum(time_stats.values())
+
+        t2 = time.perf_counter()
         for new_frame in processed_frames:
             new_frame = reformatter(new_frame)
             enc_packet = video_output_stream.encode(new_frame)
             if enc_packet:
                 output_container.mux(enc_packet)
             pbar.update(1)
+        t3 = time.perf_counter()
+        time_stats_total["other"] += (t3 - t2)
 
     packet = video_output_stream.encode(None)
     if packet:
@@ -811,6 +853,20 @@ def process_video(input_path, output_path,
             try_replace(output_path_tmp, output_path)
 
     processor.release()
+
+    # 输出统计
+    total_time = sum(time_stats_total.values())
+    print(f"to_tensor时间: {time_stats_total['to_tensor']:.3f} 秒")
+    print(f"host2dev拷贝时间: {time_stats_total['host2dev']:.3f} 秒")
+    print(f"模型推理时间: {time_stats_total['inference']:.3f} 秒")
+    print(f"dev2host拷贝时间: {time_stats_total['dev2host']:.3f} 秒")
+    print(f"后处理时间: {time_stats_total['post']:.3f} 秒")
+    print(f"后处理GPU时间: {time_stats_total.get('post_gpu', 0):.3f} 秒")
+    print(f"后处理CPU时间: {time_stats_total.get('post_cpu', 0):.3f} 秒")
+    print(f"其他处理时间: {time_stats_total['other']:.3f} 秒")
+    print(f"总时间: {total_time:.3f} 秒")
+    if total_time > 0:
+        print(f"模型推理占比: {time_stats_total['inference']/total_time*100:.2f}%")
 
 
 def process_video_keyframes(input_path, frame_callback, min_interval_sec=4., title=None, stop_event=None, suspend_event=None):
@@ -1054,31 +1110,34 @@ class TensorRTProcessor:
                 self.output_tensors_host[binding_name] = h_output
 
     def process(self, frames):
-        """
-        Process multiple frames in batch
-        Args:
-            frames: List of av.VideoFrame objects
-        Returns:
-            List of processed av.VideoFrame objects
-        """
-        # Convert frames to tensor batch
-        x_batch = torch.stack([TF.to_tensor(frame.to_image()) for frame in frames])
+        t0 = time.perf_counter()
+        # 直接用 to_ndarray，避免 PIL
+        x_batch = torch.stack([
+            torch.from_numpy(frame.to_ndarray(format="rgb24")).permute(2, 0, 1).float() / 255.0
+            for frame in frames
+        ])
+        t1 = time.perf_counter()
 
         if self.input_shape != x_batch.shape:
             self._setup_buffers(x_batch)
 
-        # Copy input to GPU
+        # 放到 GPU
+        t2 = time.perf_counter()
+        x_batch = x_batch.cuda(non_blocking=True)
         check_cuda_error(cudart.cudaMemcpy(
             self.input_bindings_dev[0], 
             x_batch.contiguous().data_ptr(),
             x_batch.nbytes,
-            cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice  # 直接 GPU->GPU
         ))
+        t3 = time.perf_counter()
 
-        # Execute inference
+        # 推理
+        t4 = time.perf_counter()
         self.context.execute_v2(self.bindings)
+        t5 = time.perf_counter()
 
-        # Copy outputs back to CPU
+        # 输出拷回 CPU
         for name, d_output in self.output_bindings_dev.items():
             h_output = self.output_tensors_host[name]
             check_cuda_error(cudart.cudaMemcpy(
@@ -1087,27 +1146,47 @@ class TensorRTProcessor:
                 h_output.nbytes,
                 cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
             ))
+        t6 = time.perf_counter()
 
-        left_batch = self.output_tensors_host['left']  # shape: (B, C, H, W)
-        right_batch = self.output_tensors_host['right']
+        left_batch = self.output_tensors_host['left'].cuda()  # 放回 GPU
+        right_batch = self.output_tensors_host['right'].cuda()
 
-        # Process each image in batch
+        # 后处理全在 GPU
         output_frames = []
+        t_gpu_post = 0.0
+        t_cpu_post = 0.0
         for i in range(len(frames)):
             left = left_batch[i]
             right = right_batch[i]
             _, h, w = left.shape
             new_w = w // 2
 
-            # Create half side-by-side image
+            t_post_gpu0 = time.perf_counter()
             left_half = F.interpolate(left.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
             right_half = F.interpolate(right.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
             combined = torch.cat([left_half, right_half], dim=2)
-            combined_pil = TF.to_pil_image(combined)
-            
-            output_frames.append(frames[i].from_image(combined_pil))
+            combined_gpu = (combined.clamp(0, 1) * 255).byte().permute(1, 2, 0)
+            torch.cuda.synchronize()  # 保证GPU操作完成
+            t_post_gpu1 = time.perf_counter()
+            t_gpu_post += (t_post_gpu1 - t_post_gpu0)
 
-        return output_frames
+            t_post_cpu0 = time.perf_counter()
+            combined_cpu = combined_gpu.cpu().numpy()
+            output_frames.append(av.VideoFrame.from_ndarray(combined_cpu, format="rgb24"))
+            t_post_cpu1 = time.perf_counter()
+            t_cpu_post += (t_post_cpu1 - t_post_cpu0)
+        t7 = time.perf_counter()
+
+        time_stats = {
+            "to_tensor": t1 - t0,
+            "host2dev": t3 - t2,
+            "inference": t5 - t4,
+            "dev2host": t6 - t5,
+            "post_gpu": t_gpu_post,
+            "post_cpu": t_cpu_post,
+            "post": t7 - t6,
+        }
+        return output_frames, time_stats
 
     def release(self):
         if self.input_bindings_dev:
@@ -1124,8 +1203,8 @@ class TensorRTProcessor:
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", "-i", required=True, help="Input video path")
-    parser.add_argument("--output", "-o", required=True, help="Output video path")
+    parser.add_argument("--input", "-i", default="C:/Users/taowen/Downloads/sample-5s.mp4", help="Input video path")
+    parser.add_argument("--output", "-o", default="C:/Users/taowen/Downloads/test.mkv", help="Output video path")
     parser.add_argument("--engine", "-e", default="stereo_module.trt", help="TensorRT engine path")
     args = parser.parse_args()
 
