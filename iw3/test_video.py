@@ -342,33 +342,6 @@ SIZE_SAFE_FILTERS = [
 ]
 
 
-def test_output_size(test_callback, video_stream, vf):
-    video_filter = FixedFPSFilter(video_stream, fps=60, vf=vf, deny_filters=SIZE_SAFE_FILTERS)
-    empty_image = Image.new("RGB", (video_stream.codec_context.width,
-                                    video_stream.codec_context.height), (128, 128, 128))
-    test_frame = av.video.frame.VideoFrame.from_image(empty_image).reformat(
-        format=video_stream.pix_fmt,
-        src_color_range=ColorRange.JPEG, dst_color_range=video_stream.codec_context.color_range)
-    pts_step = int((1. / video_stream.time_base) / 30) or 1
-    test_frame.pts = pts_step
-
-    try_count = 0
-    while True:
-        while True:
-            frame = video_filter.update(test_frame)
-            test_frame.pts = (test_frame.pts + pts_step)
-            if frame is not None:
-                break
-            try_count += 1
-            if try_count * video_stream.codec_context.width * video_stream.codec_context.height * 3 > 2000 * 1024 * 1024:
-                raise RuntimeError("Unable to estimate output size of video filter")
-        output_frame = get_new_frames(test_callback(frame))
-        if output_frame:
-            output_frame = output_frame[0]
-            break
-    return output_frame.width, output_frame.height
-
-
 def get_new_frames(frame_or_frames_or_none):
     if frame_or_frames_or_none is None:
         return []
@@ -445,8 +418,6 @@ def guess_target_colorspace(input_stream, colorspace_arg, pix_fmt,
     if input_stream is not None and colorspace_arg == "auto":
         colorspace_arg = "copy"
     elif input_stream is None and colorspace_arg in {"auto", "copy"}:
-        # image import (generate_video)
-        # use exported setting
         if exported_output_colorspace == Colorspace.ITU709.value:
             if exported_source_color_range == ColorRange.MPEG:
                 colorspace_arg = "bt709-tv"
@@ -562,7 +533,6 @@ def configure_colorspace(output_stream, input_stream, config):
                 reformatter_src_colorspace = rgb24_options["dst_colorspace"]  # output_stream.codec_context.colorspace
                 reformatter_src_color_range = rgb24_options["dst_color_range"]  # ColorRange.JPEG
             else:
-                # image import (generate_video)
                 if exported_output_colorspace in KNOWN_COLORSPACES:
                     reformatter_src_colorspace = exported_output_colorspace
                     reformatter_src_color_range = ColorRange.JPEG
@@ -590,7 +560,6 @@ def configure_colorspace(output_stream, input_stream, config):
                 reformatter_src_colorspace = rgb24_options["dst_colorspace"]  # output_stream.codec_context.colorspace
                 reformatter_src_color_range = rgb24_options["dst_color_range"]  # ColorRange.JPEG
             else:
-                # image import (generate_video)
                 if exported_output_colorspace in KNOWN_COLORSPACES:
                     target_colorspace = exported_output_colorspace
                     reformatter_src_colorspace = exported_output_colorspace
@@ -668,13 +637,14 @@ def try_replace(output_path_tmp, output_path):
 
 
 def process_video(input_path, output_path,
-                  frame_callback,
                   config_callback=default_config_callback,
                   title=None,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
-                  start_time=None, end_time=None,
-                  test_callback=None):
+                  start_time=None, end_time=None):
+    
+    processor = TensorRTProcessor("stereo_module.trt")
+
     if isinstance(start_time, str):
         start_time = parse_time(start_time)
     if isinstance(end_time, str):
@@ -719,10 +689,8 @@ def process_video(input_path, output_path,
     if config.output_width is not None and config.output_height is not None:
         output_size = config.output_width, config.output_height
     else:
-        if test_callback is None:
-            # TODO: warning
-            test_callback = frame_callback
-        output_size = test_output_size(test_callback, video_input_stream, vf)
+        output_size = video_input_stream.codec_context.width, video_input_stream.codec_context.height
+
 
     output_fps = config.output_fps or config.fps
     video_output_stream = output_container.add_stream(config.video_codec, output_fps)
@@ -771,12 +739,12 @@ def process_video(input_path, output_path,
                 frame = fps_filter.update(frame)
                 if frame is not None:
                     frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
-                    for new_frame in get_new_frames(frame_callback(frame)):
-                        new_frame = reformatter(new_frame)
-                        enc_packet = video_output_stream.encode(new_frame)
-                        if enc_packet:
-                            output_container.mux(enc_packet)
-                        pbar.update(1)
+                    new_frame = processor.process(frame)
+                    new_frame = reformatter(new_frame)
+                    enc_packet = video_output_stream.encode(new_frame)
+                    if enc_packet:
+                        output_container.mux(enc_packet)
+                    pbar.update(1)
         elif packet.stream.type == "audio":
             if packet.dts is not None:
                 if audio_copy:
@@ -797,21 +765,14 @@ def process_video(input_path, output_path,
         frame = fps_filter.update(None)
         if frame is not None:
             frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
-            for new_frame in get_new_frames(frame_callback(frame)):
-                new_frame = reformatter(new_frame)
-                enc_packet = video_output_stream.encode(new_frame)
-                if enc_packet:
-                    output_container.mux(enc_packet)
-                pbar.update(1)
+            new_frame = processor.process(frame)
+            new_frame = reformatter(new_frame)
+            enc_packet = video_output_stream.encode(new_frame)
+            if enc_packet:
+                output_container.mux(enc_packet)
+            pbar.update(1)
         else:
             break
-
-    for new_frame in get_new_frames(frame_callback(None)):
-        new_frame = reformatter(new_frame)
-        enc_packet = video_output_stream.encode(new_frame)
-        if enc_packet:
-            output_container.mux(enc_packet)
-        pbar.update(1)
 
     packet = video_output_stream.encode(None)
     if packet:
@@ -825,120 +786,7 @@ def process_video(input_path, output_path,
         if path.exists(output_path_tmp):
             try_replace(output_path_tmp, output_path)
 
-
-def generate_video(output_path,
-                   frame_generator,
-                   config,
-                   audio_file=None,
-                   title=None, total_frames=None,
-                   stop_event=None, suspend_event=None, tqdm_fn=None):
-
-    output_path_tmp = path.join(path.dirname(output_path), "_tmp_" + path.basename(output_path))
-    output_container = av.open(output_path_tmp, 'w', options=config.container_options)
-    output_size = config.output_width, config.output_height
-
-    if not config.container_format:
-        config.container_format = path.splitext(output_path)[-1].lower()[1:]
-    if not config.video_codec:
-        config.video_codec = get_default_video_codec(config.container_format)
-    configure_video_codec(config)
-
-    video_output_stream = output_container.add_stream(config.video_codec, convert_known_fps(config.fps))
-    configure_colorspace(video_output_stream, None, config)
-    video_output_stream.thread_type = "AUTO"
-    video_output_stream.pix_fmt = config.pix_fmt
-    video_output_stream.width = output_size[0]
-    video_output_stream.height = output_size[1]
-    video_output_stream.options = config.options
-    reformatter = config.state["reformatter"]
-
-    if audio_file is not None:
-        input_container = av.open(audio_file)
-        if input_container.duration:
-            container_duration = float(input_container.duration * av.time_base)
-        else:
-            container_duration = None
-        if len(input_container.streams.audio) > 0:
-            # has audio stream
-            audio_input_stream = input_container.streams.audio[0]
-            if audio_input_stream.rate < 16000:
-                audio_output_stream = output_container.add_stream("aac", 16000)
-                audio_copy = False
-            else:
-                try:
-                    audio_output_stream = add_stream_from_template(output_container, template=audio_input_stream)
-                    audio_copy = True
-                except ValueError:
-                    audio_output_stream = output_container.add_stream("aac", audio_input_stream.rate)
-                    audio_copy = False
-
-            tqdm_fn = tqdm_fn or tqdm
-            desc = (title + " Audio" if title else "Audio")
-            ncols = len(desc) + 60
-            total = get_duration(audio_input_stream, container_duration=container_duration)
-            pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
-            last_sec = 0
-
-            for packet in input_container.demux([audio_input_stream]):
-                if packet.pts is not None:
-                    current_sec = int(packet.pts * packet.time_base)
-                    if current_sec - last_sec > 0:
-                        pbar.update(current_sec - last_sec)
-                        last_sec = current_sec
-                if packet.dts is not None:
-                    if audio_copy:
-                        packet.stream = audio_output_stream
-                        output_container.mux(packet)
-                    else:
-                        for frame in packet.decode():
-                            frame.pts = None
-                            enc_packet = audio_output_stream.encode(frame)
-                            if enc_packet:
-                                output_container.mux(enc_packet)
-                if suspend_event is not None:
-                    suspend_event.wait()
-                if stop_event is not None and stop_event.is_set():
-                    break
-            pbar.close()
-            try:
-                for packet in audio_output_stream.encode(None):
-                    output_container.mux(packet)
-            except ValueError:
-                pass
-            input_container.close()
-
-    if stop_event is not None and stop_event.is_set():
-        output_container.close()
-        return
-
-    desc = (title + " Frames" if title else "Frames")
-    ncols = len(desc) + 60
-    tqdm_fn = tqdm_fn or tqdm
-    pbar = tqdm_fn(desc=desc, total=total_frames, ncols=ncols)
-    for frame in frame_generator():
-        if frame is None:
-            break
-        for new_frame in get_new_frames(frame):
-            new_frame = reformatter(new_frame)
-            enc_packet = video_output_stream.encode(new_frame)
-            if enc_packet:
-                output_container.mux(enc_packet)
-            pbar.update(1)
-        if suspend_event is not None:
-            suspend_event.wait()
-        if stop_event is not None and stop_event.is_set():
-            break
-
-    packet = video_output_stream.encode(None)
-    if packet:
-        output_container.mux(packet)
-    pbar.close()
-    output_container.close()
-
-    if not (stop_event is not None and stop_event.is_set()):
-        # success
-        if path.exists(output_path_tmp):
-            try_replace(output_path_tmp, output_path)
+    processor.release()
 
 
 def process_video_keyframes(input_path, frame_callback, min_interval_sec=4., title=None, stop_event=None, suspend_event=None):
@@ -1281,101 +1129,6 @@ class FrameCallbackPool():
         self.shutdown()
 
 
-def _test_process_video():
-    from PIL import ImageOps
-    import argparse
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--input", "-i", type=str, required=True,
-                        help="input video file")
-    parser.add_argument("--output", "-o", type=str, required=True,
-                        help="output video file")
-    args = parser.parse_args()
-
-    def make_config(stream):
-        fps = get_fps(stream)
-        if fps > 30:
-            fps = 30
-        return VideoOutputConfig(
-            fps=fps,
-            options={"preset": "ultrafast", "crf": "20"}
-        )
-
-    def process_image(frame):
-        if frame is None:
-            return None
-        im = frame.to_image()
-        mirror = ImageOps.mirror(im)
-        new_im = Image.new("RGB", (im.width * 2, im.height))
-        new_im.paste(im, (0, 0))
-        new_im.paste(mirror, (im.width, 0))
-        new_frame = frame.from_image(new_im)
-        return new_frame
-
-    process_video(args.input, args.output, config_callback=make_config, frame_callback=process_image)
-
-
-def _test_export_audio():
-    import argparse
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--input", "-i", type=str, required=True, help="input video file")
-    parser.add_argument("--output", "-o", type=str, required=True, help="output audio file")
-    parser.add_argument("--start-time", type=str, help="start time")
-    parser.add_argument("--end-time", type=str, help="end time")
-    args = parser.parse_args()
-
-    print(export_audio(args.input, args.output, start_time=args.start_time, end_time=args.end_time))
-
-
-def _test_reencode():
-    import argparse
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--input", "-i", type=str, required=True,
-                        help="input video file")
-    parser.add_argument("--output", "-o", type=str, required=True,
-                        help="output video file")
-    parser.add_argument("--pix-fmt", type=str, default="yuv420p",
-                        choices=["yuv420p", "yuv444p", "rgb24"],
-                        help="colorspace")
-    parser.add_argument("--colorspace", type=str, default="unspecified",
-                        choices=["auto", "unspecified", "bt709", "bt709-pc", "bt709-tv", "bt601", "bt601-pc", "bt601-tv"],
-                        help="colorspace")
-    parser.add_argument("--video-codec", type=str, default=LIBH264,
-                        choices=["libx264", "libopenh264", "libx265", "h264_nvenc", "hevc_nvenc"],
-                        help="video codec")
-    parser.add_argument("--max-workers", type=int, default=0, help="max worker threads")
-    parser.add_argument("--gpu", type=int, default=0, help="0: gpu, -1: cpu")
-    parser.add_argument("--batch-size", type=int, default=4, help="batch size")
-
-    args = parser.parse_args()
-    device = "cpu" if args.gpu < 0 else f"cuda:{args.gpu}"
-    preset = "fast" if args.video_codec in {"h264_nvenc", "hevc_nvenc"} else "ultrafast"
-
-    def make_config(stream):
-        fps = get_fps(stream)
-        if fps > 30:
-            fps = 30
-        return VideoOutputConfig(
-            fps=fps,
-            pix_fmt=args.pix_fmt,
-            colorspace=args.colorspace,
-            video_codec=args.video_codec,
-            options={"preset": preset, "crf": "20"}
-        )
-
-    def process_image(frames):
-        # width x 2
-        return torch.cat([frames, frames], dim=3)
-
-    callback = FrameCallbackPool(process_image, batch_size=args.batch_size,
-                                 device=device, max_workers=args.max_workers,
-                                 max_batch_queue=args.max_workers + 1)
-
-    process_video(args.input, args.output, config_callback=make_config, frame_callback=callback)
-
-
 def check_cuda_error(cuda_ret):
     err, *rest = cuda_ret
     if err != cudart.cudaError_t.cudaSuccess:
@@ -1430,9 +1183,6 @@ class TensorRTProcessor:
                 self.output_tensors_host[binding_name] = h_output
 
     def process(self, frame):
-        if frame is None:
-            return None
-
         x = TF.to_tensor(frame.to_image())
         x_batch = x.unsqueeze(0)
 
@@ -1486,7 +1236,6 @@ def main():
     parser.add_argument("--engine", "-e", default="stereo_module.trt", help="TensorRT engine path")
     args = parser.parse_args()
 
-    processor = TensorRTProcessor(args.engine)
 
     def make_config(stream):
         fps = get_fps(stream)
@@ -1498,15 +1247,9 @@ def main():
             options={"preset": "p7", "rc": "vbr", "cq": "19"}
         )
 
-    def frame_callback(frame):
-        return processor.process(frame)
 
-    try:
-        process_video(args.input, args.output,
-                      frame_callback=frame_callback,
-                      config_callback=make_config)
-    finally:
-        processor.release()
+    process_video(args.input, args.output,
+                    config_callback=make_config)
 
 
 if __name__ == "__main__":
