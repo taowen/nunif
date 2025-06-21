@@ -303,7 +303,7 @@ void printMemoryUsage() {
               << "Free: " << free_mem / 1024 / 1024 << " MB" << std::endl;
 }
 
-// 新增的子函数声明
+// 修改 VideoContext 结构体，添加流映射支持
 struct VideoContext {
     AVFormatContext* ifmt_ctx = nullptr;
     AVFormatContext* ofmt_ctx = nullptr;
@@ -315,6 +315,10 @@ struct VideoContext {
     int64_t total_frames = 0;
     std::string input_path;
     std::string output_path;
+    
+    // 添加流映射
+    std::vector<int> stream_mapping;  // input stream index -> output stream index
+    std::vector<AVStream*> output_streams;  // 所有输出流
 };
 
 // 设置输入解码器
@@ -378,7 +382,7 @@ bool setupInputDecoder(VideoContext& ctx) {
     return true;
 }
 
-// 设置输出编码器
+// 修改设置输出编码器函数，支持多流
 bool setupOutputEncoder(VideoContext& ctx) {
     int ret = avformat_alloc_output_context2(&ctx.ofmt_ctx, nullptr, nullptr, ctx.output_path.c_str());
     if (ret < 0 || !ctx.ofmt_ctx) {
@@ -388,12 +392,89 @@ bool setupOutputEncoder(VideoContext& ctx) {
         return false;
     }
     
-    ctx.out_stream = avformat_new_stream(ctx.ofmt_ctx, nullptr);
-    if (!ctx.out_stream) {
-        std::cerr << "Failed to create output stream" << std::endl;
-        return false;
+    // 初始化流映射
+    ctx.stream_mapping.resize(ctx.ifmt_ctx->nb_streams, -1);
+    ctx.output_streams.resize(ctx.ifmt_ctx->nb_streams, nullptr);
+    
+    // 为每个输入流创建对应的输出流
+    for (unsigned int i = 0; i < ctx.ifmt_ctx->nb_streams; i++) {
+        AVStream* in_stream = ctx.ifmt_ctx->streams[i];
+        AVStream* out_stream = nullptr;
+        
+        if (i == ctx.video_stream_idx) {
+            // 视频流 - 将被处理
+            out_stream = avformat_new_stream(ctx.ofmt_ctx, nullptr);
+            if (!out_stream) {
+                std::cerr << "Failed to create output video stream" << std::endl;
+                return false;
+            }
+            ctx.out_stream = out_stream;  // 保存视频流引用
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            // 音频流 - 更仔细地处理
+            out_stream = avformat_new_stream(ctx.ofmt_ctx, nullptr);
+            if (!out_stream) {
+                std::cerr << "Failed to create output audio stream for stream " << i << std::endl;
+                continue;
+            }
+            
+            // 复制基本音频参数，但要清理容器特定的数据
+            ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+            if (ret < 0) {
+                std::cerr << "Failed to copy codec parameters for audio stream " << i << std::endl;
+                continue;
+            }
+            
+            // 清理可能导致兼容性问题的字段
+            out_stream->codecpar->codec_tag = 0; // 让输出容器自动选择合适的tag
+            
+            // 复制时间基准
+            out_stream->time_base = in_stream->time_base;
+            
+            // 如果需要，可以设置输出格式特定的参数
+            if (ctx.ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
+                out_stream->codecpar->codec_tag = 0;
+            }
+            
+            std::cout << "Copying audio stream " << i 
+                      << " (codec: " << avcodec_get_name(in_stream->codecpar->codec_id) 
+                      << ", channels: " << in_stream->codecpar->ch_layout.nb_channels
+                      << ", sample_rate: " << in_stream->codecpar->sample_rate << ")" << std::endl;
+                      
+        } else if (in_stream->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            // 字幕流处理
+            out_stream = avformat_new_stream(ctx.ofmt_ctx, nullptr);
+            if (!out_stream) {
+                std::cerr << "Failed to create output subtitle stream for stream " << i << std::endl;
+                continue;
+            }
+            
+            // 复制字幕流参数
+            ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
+            if (ret < 0) {
+                std::cerr << "Failed to copy codec parameters for subtitle stream " << i << std::endl;
+                continue;
+            }
+            
+            // 清理容器特定标签
+            out_stream->codecpar->codec_tag = 0;
+            
+            // 复制时间基准和其他元数据
+            out_stream->time_base = in_stream->time_base;
+            
+            // 复制字幕流的元数据（如语言信息）
+            av_dict_copy(&out_stream->metadata, in_stream->metadata, 0);
+            
+            std::cout << "Copying subtitle stream " << i 
+                      << " (codec: " << avcodec_get_name(in_stream->codecpar->codec_id) << ")" << std::endl;
+        }
+        
+        if (out_stream) {
+            ctx.stream_mapping[i] = out_stream->index;
+            ctx.output_streams[i] = out_stream;
+        }
     }
     
+    // 设置视频编码器
     const AVCodec* encoder = avcodec_find_encoder_by_name("hevc_nvenc");
     if (!encoder) {
         std::cerr << "hevc_nvenc encoder not found" << std::endl;
@@ -593,6 +674,57 @@ void cleanupVideoContext(VideoContext& ctx) {
     av_buffer_unref(&ctx.hw_device_ctx);
 }
 
+// 修改处理非视频流的函数，添加更好的错误处理
+bool processNonVideoPacket(VideoContext& ctx, AVPacket* pkt) {
+    int input_stream_index = pkt->stream_index;
+    
+    // 检查流映射
+    if (input_stream_index >= ctx.stream_mapping.size()) {
+        return true; // 忽略超出范围的流
+    }
+    
+    int output_stream_index = ctx.stream_mapping[input_stream_index];
+    
+    if (output_stream_index < 0) {
+        return true;  // 忽略未映射的流
+    }
+    
+    AVStream* in_stream = ctx.ifmt_ctx->streams[input_stream_index];
+    AVStream* out_stream = ctx.output_streams[input_stream_index];
+    
+    if (!out_stream) {
+        return true;
+    }
+    
+    // 复制数据包
+    AVPacket* out_pkt = av_packet_alloc();
+    if (!out_pkt) {
+        return false;
+    }
+    
+    av_packet_ref(out_pkt, pkt);
+    
+    // 重新缩放时间戳
+    av_packet_rescale_ts(out_pkt, in_stream->time_base, out_stream->time_base);
+    out_pkt->stream_index = output_stream_index;
+    
+    // 写入数据包
+    int ret = av_interleaved_write_frame(ctx.ofmt_ctx, out_pkt);
+    if (ret < 0) {
+        // 只在严重错误时报告，忽略一些常见的非致命错误
+        if (ret != AVERROR(EINVAL) && ret != AVERROR_INVALIDDATA) {
+            char error_buf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, error_buf, sizeof(error_buf));
+            std::cerr << "Error writing packet for stream " << input_stream_index 
+                      << " (" << av_get_media_type_string(in_stream->codecpar->codec_type)
+                      << "): " << error_buf << std::endl;
+        }
+    }
+    
+    av_packet_free(&out_pkt);
+    return ret >= 0 || ret == AVERROR(EINVAL) || ret == AVERROR_INVALIDDATA;
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
@@ -652,6 +784,23 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    // 输出输入文件的流信息
+    std::cout << "\n=== Input File Stream Information ===" << std::endl;
+    for (unsigned int i = 0; i < ctx.ifmt_ctx->nb_streams; i++) {
+        AVStream* stream = ctx.ifmt_ctx->streams[i];
+        const char* media_type = av_get_media_type_string(stream->codecpar->codec_type);
+        const char* codec_name = avcodec_get_name(stream->codecpar->codec_id);
+        std::cout << "Stream " << i << ": " << media_type << " (" << codec_name << ")";
+        
+        if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            std::cout << ", " << stream->codecpar->ch_layout.nb_channels 
+                      << " channels, " << stream->codecpar->sample_rate << " Hz";
+        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            std::cout << ", " << stream->codecpar->width << "x" << stream->codecpar->height;
+        }
+        std::cout << std::endl;
+    }
+    
     // Setup output encoder
     if (!setupOutputEncoder(ctx)) {
         cleanupVideoContext(ctx);
@@ -666,44 +815,51 @@ int main(int argc, char** argv) {
     bool encoder_initialized = false;
     int64_t next_pts = 0;
     
+    std::cout << "\n=== Processing Video ===" << std::endl;
+    
     while (av_read_frame(ctx.ifmt_ctx, pkt) >= 0) {
-        if (pkt->stream_index != ctx.video_stream_idx) {
-            av_packet_unref(pkt);
-            continue;
-        }
-        
-        if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
-            while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
-                AVFrame* ref_frame = av_frame_alloc();
-                av_frame_ref(ref_frame, frame);
-                frame_buffer.push_back(ref_frame);
-                
-                if (frame_buffer.size() >= batch_size) {
-                    auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
+        if (pkt->stream_index == ctx.video_stream_idx) {
+            // 处理视频流
+            if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
+                while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
+                    AVFrame* ref_frame = av_frame_alloc();
+                    av_frame_ref(ref_frame, frame);
+                    frame_buffer.push_back(ref_frame);
                     
-                    // Initialize encoder on first batch
-                    if (!encoder_initialized) {
-                        if (!initializeEncoder(ctx, processed_frames[0])) {
-                            cleanupVideoContext(ctx);
-                            return 1;
+                    if (frame_buffer.size() >= batch_size) {
+                        auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
+                        
+                        // Initialize encoder on first batch
+                        if (!encoder_initialized) {
+                            if (!initializeEncoder(ctx, processed_frames[0])) {
+                                cleanupVideoContext(ctx);
+                                return 1;
+                            }
+                            encoder_initialized = true;
+                            std::cout << "Encoder initialized, processing streams..." << std::endl;
                         }
-                        encoder_initialized = true;
+                        
+                        // Encode frames
+                        encodeAndWriteFrames(ctx, processed_frames, next_pts);
+                        
+                        // Cleanup processed frames
+                        for (auto f : processed_frames) av_frame_free(&f);
+                        for (auto f : frame_buffer) av_frame_free(&f);
+                        frame_buffer.clear();
+                        frame_count += processed_frames.size();
+                        
+                        // Display progress
+                        displayProgress(frame_count, ctx.total_frames, start_time);
                     }
-                    
-                    // Encode frames
-                    encodeAndWriteFrames(ctx, processed_frames, next_pts);
-                    
-                    // Cleanup processed frames
-                    for (auto f : processed_frames) av_frame_free(&f);
-                    for (auto f : frame_buffer) av_frame_free(&f);
-                    frame_buffer.clear();
-                    frame_count += processed_frames.size();
-                    
-                    // Display progress
-                    displayProgress(frame_count, ctx.total_frames, start_time);
                 }
             }
+        } else {
+            // 处理音频、字幕等其他流
+            if (encoder_initialized) {  // 只有在编码器初始化后才开始写入其他流
+                processNonVideoPacket(ctx, pkt);
+            }
         }
+        
         av_packet_unref(pkt);
         
         // Memory check
@@ -719,6 +875,9 @@ int main(int argc, char** argv) {
         
         for (auto f : processed_frames) av_frame_free(&f);
         for (auto f : frame_buffer) av_frame_free(&f);
+        
+        frame_count += processed_frames.size();
+        std::cout << "Processed remaining " << processed_frames.size() << " frames" << std::endl;
     }
     
     // Finalize encoder
