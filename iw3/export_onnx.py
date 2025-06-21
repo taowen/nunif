@@ -10,6 +10,7 @@ from PIL import Image
 import os
 import torch.nn as nn
 import torch.onnx
+import torch.nn.functional as F
 
 from iw3.mapper import get_mapper, resolve_mapper_name
 from nunif.utils.ui import TorchHubDir
@@ -71,7 +72,13 @@ class StereoDepthModule(nn.Module):
             preserve_screen_border=False,
             enable_amp=True
         )
-        return left, right
+        # resize left/right to half width
+        B, C, H, W = left.shape
+        left_half = F.interpolate(left, size=(H, W // 2), mode="bilinear", align_corners=False)
+        right_half = F.interpolate(right, size=(H, W // 2), mode="bilinear", align_corners=False)
+        # concat along width
+        half_sbs = torch.cat([left_half, right_half], dim=3)  # (B, C, H, W)
+        return half_sbs
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
@@ -79,10 +86,10 @@ stereo_module = StereoDepthModule(depth_model, side_model).eval()
 with torch.inference_mode():
     x = x.to(depth_model.device)
     logger.debug(f"x moved to device: {x.device}, shape: {x.shape}")
-    left, right = stereo_module(x)
+    half_sbs = stereo_module(x)
 
     # export to onnx
-    output_path = "stereo_module.onnx"
+    output_path = "stereo_module_half_sbs.onnx"
     logger.info(f"Exporting ONNX model to {output_path}")
     torch.onnx.export(
         stereo_module,
@@ -90,32 +97,29 @@ with torch.inference_mode():
         output_path,
         opset_version=18,
         input_names=["input"],
-        output_names=["left", "right"],
+        output_names=["half_sbs"],
         dynamic_axes={
             "input": {0: "batch_size", 2: "height", 3: "width"},
-            "left": {0: "batch_size", 2: "height", 3: "width"},
-            "right": {0: "batch_size", 2: "height", 3: "width"},
+            "half_sbs": {0: "batch_size", 2: "height", 3: "width"},
         },
     )
     logger.info(f"ONNX model saved to {output_path}")
 
 os.makedirs("tmp", exist_ok=True)
-for idx in range(left.shape[0]):
-    logger.debug(f"Saving left_eye_{idx}.png shape: {left[idx].shape}, right_eye_{idx}.png shape: {right[idx].shape}")
-    TF.to_pil_image(left[idx]).save(f"tmp/left_eye_{idx}.png")
-    TF.to_pil_image(right[idx]).save(f"tmp/right_eye_{idx}.png")
+for idx in range(half_sbs.shape[0]):
+    logger.debug(f"Saving half_sbs_{idx}.png shape: {half_sbs[idx].shape}")
+    TF.to_pil_image(half_sbs[idx]).save(f"tmp/half_sbs_{idx}.png")
 print('done')
 
 # 验证 ONNX 推理结果和 PyTorch 输出一致性
 import onnxruntime as ort
 import numpy as np
 
-ort_session = ort.InferenceSession("stereo_module.onnx", providers=['CPUExecutionProvider'])
+ort_session = ort.InferenceSession("sim.onnx", providers=['CPUExecutionProvider'])
 x_numpy = x.cpu().numpy()
 onnx_outputs = ort_session.run(None, {"input": x_numpy})
-onnx_left, onnx_right = onnx_outputs
-torch_left = left.cpu().numpy()
-torch_right = right.cpu().numpy()
+onnx_half_sbs = onnx_outputs[0]
+torch_half_sbs = half_sbs.cpu().numpy()
 
 def compare_outputs(torch_out, onnx_out, name):
     diff = np.abs(torch_out - onnx_out)
@@ -123,5 +127,4 @@ def compare_outputs(torch_out, onnx_out, name):
     mean_diff = diff.mean()
     print(f"{name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
-compare_outputs(torch_left, onnx_left, "Left Eye")
-compare_outputs(torch_right, onnx_right, "Right Eye")
+compare_outputs(torch_half_sbs, onnx_half_sbs, "Half Side-by-Side")

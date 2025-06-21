@@ -1,1 +1,2 @@
-trtexec --onnx=stereo_module.onnx --saveEngine=stereo_module.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:8x3x2160x3840
+python -m onnxsim stereo_module_half_sbs.onnx sim.onnx
+trtexec --onnx=sim.onnx --saveEngine=stereo_module_half_sbs.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:16x3x2160x3840

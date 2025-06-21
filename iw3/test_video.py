@@ -642,9 +642,9 @@ def process_video(input_path, output_path,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
                   start_time=None, end_time=None,
-                  batch_size=8):
+                  batch_size=16):
     
-    processor = TensorRTProcessor("stereo_module.trt")
+    processor = TensorRTProcessor("stereo_module_half_sbs.trt")
     frame_buffer = []  # Buffer to collect frames for batch processing
 
     # 统计时间
@@ -1148,31 +1148,23 @@ class TensorRTProcessor:
             ))
         t6 = time.perf_counter()
 
-        left_batch = self.output_tensors_host['left'].cuda()  # 放回 GPU
-        right_batch = self.output_tensors_host['right'].cuda()
-
-        # 后处理全在 GPU
+        # 直接处理 half_sbs 输出
+        half_sbs_batch = self.output_tensors_host['half_sbs']  # shape: (B, 3, H, W)
         output_frames = []
         t_gpu_post = 0.0
         t_cpu_post = 0.0
         for i in range(len(frames)):
-            left = left_batch[i]
-            right = right_batch[i]
-            _, h, w = left.shape
-            new_w = w // 2
-
             t_post_gpu0 = time.perf_counter()
-            left_half = F.interpolate(left.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
-            right_half = F.interpolate(right.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
-            combined = torch.cat([left_half, right_half], dim=2)
-            combined_gpu = (combined.clamp(0, 1) * 255).byte().permute(1, 2, 0)
-            torch.cuda.synchronize()  # 保证GPU操作完成
+            # half_sbs_batch 已经是 (3, H, W)，只需 clamp/转为 uint8
+            half_sbs = half_sbs_batch[i].cuda()
+            half_sbs_img = (half_sbs.clamp(0, 1) * 255).byte().permute(1, 2, 0)
+            torch.cuda.synchronize()
             t_post_gpu1 = time.perf_counter()
             t_gpu_post += (t_post_gpu1 - t_post_gpu0)
 
             t_post_cpu0 = time.perf_counter()
-            combined_cpu = combined_gpu.cpu().numpy()
-            output_frames.append(av.VideoFrame.from_ndarray(combined_cpu, format="rgb24"))
+            half_sbs_cpu = half_sbs_img.cpu().numpy()
+            output_frames.append(av.VideoFrame.from_ndarray(half_sbs_cpu, format="rgb24"))
             t_post_cpu1 = time.perf_counter()
             t_cpu_post += (t_post_cpu1 - t_post_cpu0)
         t7 = time.perf_counter()
@@ -1203,9 +1195,9 @@ class TensorRTProcessor:
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", "-i", default="C:/Users/taowen/Downloads/sample-5s.mp4", help="Input video path")
+    parser.add_argument("--input", "-i", default="C:/Users/taowen/Downloads/06 4k.mp4", help="Input video path")
     parser.add_argument("--output", "-o", default="C:/Users/taowen/Downloads/test.mkv", help="Output video path")
-    parser.add_argument("--engine", "-e", default="stereo_module.trt", help="TensorRT engine path")
+    parser.add_argument("--engine", "-e", default="stereo_module_half_sbs.trt", help="TensorRT engine path")
     args = parser.parse_args()
 
 
