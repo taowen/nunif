@@ -134,7 +134,7 @@ endif()
 # Instead of using pkg-config for FFmpeg, manually find the libraries
 if(WIN32)
     # Set FFMPEG_ROOT to point to your FFmpeg installation
-    set(FFMPEG_ROOT "C:/games/ffmpeg-7.1.1/install" CACHE PATH "FFmpeg installation directory")
+    set(FFMPEG_ROOT "C:/games/ffmpeg-7.1.1" CACHE PATH "FFmpeg installation directory")
     
     # Find FFmpeg include directory
     find_path(FFMPEG_INCLUDE_DIR libavcodec/avcodec.h
@@ -144,19 +144,19 @@ if(WIN32)
     
     # Find FFmpeg libraries
     find_library(AVCODEC_LIBRARY avcodec
-        HINTS ${FFMPEG_ROOT}/bin
+        HINTS ${FFMPEG_ROOT}/lib
         REQUIRED
     )
     find_library(AVFORMAT_LIBRARY avformat
-        HINTS ${FFMPEG_ROOT}/bin
+        HINTS ${FFMPEG_ROOT}/lib
         REQUIRED
     )
     find_library(AVUTIL_LIBRARY avutil
-        HINTS ${FFMPEG_ROOT}/bin
+        HINTS ${FFMPEG_ROOT}/lib
         REQUIRED
     )
     find_library(SWSCALE_LIBRARY swscale
-        HINTS ${FFMPEG_ROOT}/bin
+        HINTS ${FFMPEG_ROOT}/lib
         REQUIRED
     )
 else()
@@ -166,7 +166,7 @@ else()
 endif()
 
 # Add executable
-add_executable(spike src/main.cpp)
+add_executable(spike src/main.cu)
 
 # Add FFmpeg libraries
 if(WIN32)
