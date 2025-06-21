@@ -1,1 +1,1 @@
-trtexec --onnx=stereo_module.onnx --saveEngine=stereo_module.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:1x3x392x392 --maxShapes=input:1x3x2160x3840
+trtexec --onnx=stereo_module.onnx --saveEngine=stereo_module.trt --fp16 --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:8x3x2160x3840
