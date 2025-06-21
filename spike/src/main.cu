@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <chrono>
+#include <iomanip>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -232,11 +233,43 @@ public:
     }
 };
 
+// Helper function to calculate bitrate based on resolution
+int calculateBitrate(int width, int height) {
+    int pixels = width * height;
+    
+    // Base bitrate calculation: bits per pixel approach
+    // For stereo video processing, we need higher quality
+    double bpp; // bits per pixel
+    
+    if (pixels <= 640 * 480) {           // SD and below
+        bpp = 1.2;
+    } else if (pixels <= 1280 * 720) {   // 720p
+        bpp = 1;
+    } else if (pixels <= 1920 * 1080) {  // 1080p
+        bpp = 0.8;
+    } else if (pixels <= 2560 * 1440) {  // 1440p
+        bpp = 0.8;
+    } else {                             // 4K and above
+        bpp = 0.8;   // 提高到合理水平
+    }
+    
+    int bitrate = static_cast<int>(pixels * bpp);
+    
+    // Ensure minimum and maximum bounds  
+    int min_bitrate = 1000000;   
+    int max_bitrate = 50000000;  // 50 Mbps maximum
+    
+    return std::max(min_bitrate, std::min(max_bitrate, bitrate));
+}
+
 int main(int argc, char** argv) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
         return 1;
     }
+    
+    // Record start time
+    auto start_time = std::chrono::high_resolution_clock::now();
     
     std::string engine_path = argv[1];
     std::string input_path = argv[2];
@@ -266,6 +299,22 @@ int main(int argc, char** argv) {
     
     int video_stream_idx = av_find_best_stream(ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     AVCodecParameters* codecpar = ifmt_ctx->streams[video_stream_idx]->codecpar;
+    
+    // Calculate total frames for progress estimation
+    AVStream* video_stream = ifmt_ctx->streams[video_stream_idx];
+    int64_t total_frames = 0;
+    if (video_stream->nb_frames > 0) {
+        total_frames = video_stream->nb_frames;
+    } else if (video_stream->duration > 0 && video_stream->r_frame_rate.num > 0) {
+        // Estimate from duration and frame rate
+        double duration_sec = (double)video_stream->duration * av_q2d(video_stream->time_base);
+        double fps = av_q2d(video_stream->r_frame_rate);
+        total_frames = (int64_t)(duration_sec * fps);
+    }
+    
+    if (total_frames > 0) {
+        std::cout << "Estimated total frames: " << total_frames << std::endl;
+    }
     
     // Setup decoder
     const AVCodec* decoder = nullptr;
@@ -365,8 +414,14 @@ int main(int argc, char** argv) {
                         }
                         enc_ctx->hw_frames_ctx = enc_hw_frames_ref;
                         
+                        // Calculate bitrate based on resolution
+                        int calculated_bitrate = calculateBitrate(processed_frames[0]->width, processed_frames[0]->height);
+                        enc_ctx->bit_rate = calculated_bitrate;
+                        
+                        std::cout << "Resolution: " << processed_frames[0]->width << "x" << processed_frames[0]->height 
+                                  << ", Calculated bitrate: " << calculated_bitrate / 1000000.0 << " Mbps" << std::endl;
+                        
                         // Set encoding parameters
-                        enc_ctx->bit_rate = 8000000;
                         enc_ctx->gop_size = 30;
                         enc_ctx->max_b_frames = 0;  // Disable B-frames for better compatibility
                         
@@ -451,7 +506,27 @@ int main(int argc, char** argv) {
                     for (auto f : frame_buffer) av_frame_free(&f);
                     frame_buffer.clear();
                     frame_count += processed_frames.size();
-                    std::cout << "Processed " << frame_count << " frames" << std::endl;
+                    
+                    // Calculate and display progress with ETA
+                    auto current_time = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time);
+                    
+                    std::cout << "Processed " << frame_count << " frames";
+                    
+                    if (total_frames > 0 && frame_count > 0) {
+                        double progress = (double)frame_count / total_frames;
+                        double elapsed_sec = elapsed.count() / 1000.0;
+                        double estimated_total_sec = elapsed_sec / progress;
+                        double remaining_sec = estimated_total_sec - elapsed_sec;
+                        
+                        int remaining_min = (int)(remaining_sec / 60);
+                        int remaining_sec_part = (int)(remaining_sec) % 60;
+                        
+                        std::cout << " (" << std::fixed << std::setprecision(1) 
+                                  << (progress * 100) << "%, ETA: " 
+                                  << remaining_min << "m" << remaining_sec_part << "s)";
+                    }
+                    std::cout << std::endl;
                 }
             }
         }
@@ -519,6 +594,21 @@ int main(int argc, char** argv) {
     av_packet_free(&pkt);
     av_frame_free(&frame);
     av_buffer_unref(&hw_device_ctx);
+    
+    // Print total processing time
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    double total_sec = total_elapsed.count() / 1000.0;
+    int total_min = (int)(total_sec / 60);
+    int total_sec_part = (int)(total_sec) % 60;
+    
+    std::cout << "\n=== Processing Complete ===" << std::endl;
+    std::cout << "Total frames processed: " << frame_count << std::endl;
+    std::cout << "Total time: " << total_min << "m" << total_sec_part << "s" << std::endl;
+    if (frame_count > 0) {
+        std::cout << "Average speed: " << std::fixed << std::setprecision(2) 
+                  << (frame_count / total_sec) << " fps" << std::endl;
+    }
     
     return 0;
 }
