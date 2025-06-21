@@ -641,9 +641,11 @@ def process_video(input_path, output_path,
                   title=None,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
-                  start_time=None, end_time=None):
+                  start_time=None, end_time=None,
+                  batch_size=4):
     
     processor = TensorRTProcessor("stereo_module.trt")
+    frame_buffer = []  # Buffer to collect frames for batch processing
 
     if isinstance(start_time, str):
         start_time = parse_time(start_time)
@@ -739,12 +741,19 @@ def process_video(input_path, output_path,
                 frame = fps_filter.update(frame)
                 if frame is not None:
                     frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
-                    new_frame = processor.process(frame)
-                    new_frame = reformatter(new_frame)
-                    enc_packet = video_output_stream.encode(new_frame)
-                    if enc_packet:
-                        output_container.mux(enc_packet)
-                    pbar.update(1)
+                    frame_buffer.append(frame)
+                    
+                    # Process when buffer is full
+                    if len(frame_buffer) >= batch_size:
+                        processed_frames = processor.process(frame_buffer)
+                        for new_frame in processed_frames:
+                            new_frame = reformatter(new_frame)
+                            enc_packet = video_output_stream.encode(new_frame)
+                            if enc_packet:
+                                output_container.mux(enc_packet)
+                            pbar.update(1)
+                        frame_buffer = []  # Clear buffer
+                    
         elif packet.stream.type == "audio":
             if packet.dts is not None:
                 if audio_copy:
@@ -761,18 +770,33 @@ def process_video(input_path, output_path,
         if stop_event is not None and stop_event.is_set():
             break
 
+    # Process remaining frames in buffer
     while True:
         frame = fps_filter.update(None)
         if frame is not None:
             frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
-            new_frame = processor.process(frame)
+            frame_buffer.append(frame)
+            if len(frame_buffer) >= batch_size:
+                processed_frames = processor.process(frame_buffer)
+                for new_frame in processed_frames:
+                    new_frame = reformatter(new_frame)
+                    enc_packet = video_output_stream.encode(new_frame)
+                    if enc_packet:
+                        output_container.mux(enc_packet)
+                    pbar.update(1)
+                frame_buffer = []
+        else:
+            break
+
+    # Process any remaining frames in buffer
+    if frame_buffer:
+        processed_frames = processor.process(frame_buffer)
+        for new_frame in processed_frames:
             new_frame = reformatter(new_frame)
             enc_packet = video_output_stream.encode(new_frame)
             if enc_packet:
                 output_container.mux(enc_packet)
             pbar.update(1)
-        else:
-            break
 
     packet = video_output_stream.encode(None)
     if packet:
@@ -976,7 +1000,6 @@ def export_audio(input_path, output_path, start_time=None, end_time=None,
     return True
 
 
-
 def check_cuda_error(cuda_ret):
     err, *rest = cuda_ret
     if err != cudart.cudaError_t.cudaSuccess:
@@ -1030,39 +1053,61 @@ class TensorRTProcessor:
                 self.output_bindings_dev[binding_name] = d_output
                 self.output_tensors_host[binding_name] = h_output
 
-    def process(self, frame):
-        x = TF.to_tensor(frame.to_image())
-        x_batch = x.unsqueeze(0)
+    def process(self, frames):
+        """
+        Process multiple frames in batch
+        Args:
+            frames: List of av.VideoFrame objects
+        Returns:
+            List of processed av.VideoFrame objects
+        """
+        # Convert frames to tensor batch
+        x_batch = torch.stack([TF.to_tensor(frame.to_image()) for frame in frames])
 
         if self.input_shape != x_batch.shape:
             self._setup_buffers(x_batch)
 
-        h_input = x_batch.contiguous()
-        check_cuda_error(cudart.cudaMemcpy(self.input_bindings_dev[0], h_input.data_ptr(), h_input.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice))
+        # Copy input to GPU
+        check_cuda_error(cudart.cudaMemcpy(
+            self.input_bindings_dev[0], 
+            x_batch.contiguous().data_ptr(),
+            x_batch.nbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        ))
 
+        # Execute inference
         self.context.execute_v2(self.bindings)
 
+        # Copy outputs back to CPU
         for name, d_output in self.output_bindings_dev.items():
             h_output = self.output_tensors_host[name]
-            check_cuda_error(cudart.cudaMemcpy(h_output.data_ptr(), d_output, h_output.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost))
+            check_cuda_error(cudart.cudaMemcpy(
+                h_output.data_ptr(),
+                d_output, 
+                h_output.nbytes,
+                cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+            ))
 
-        left_batch = self.output_tensors_host['left']
+        left_batch = self.output_tensors_host['left']  # shape: (B, C, H, W)
         right_batch = self.output_tensors_host['right']
 
-        # === half side-by-side ===
-        # 假设 left_batch/right_batch shape: (1, C, H, W)
-        left = left_batch[0]
-        right = right_batch[0]
-        _, h, w = left.shape
-        new_w = w // 2
+        # Process each image in batch
+        output_frames = []
+        for i in range(len(frames)):
+            left = left_batch[i]
+            right = right_batch[i]
+            _, h, w = left.shape
+            new_w = w // 2
 
-        left_half = F.interpolate(left.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
-        right_half = F.interpolate(right.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
-        combined = torch.cat([left_half, right_half], dim=2)
-        combined_pil = TF.to_pil_image(combined)
-        # === end half side-by-side ===
+            # Create half side-by-side image
+            left_half = F.interpolate(left.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
+            right_half = F.interpolate(right.unsqueeze(0), size=(h, new_w), mode="bilinear", align_corners=False)[0]
+            combined = torch.cat([left_half, right_half], dim=2)
+            combined_pil = TF.to_pil_image(combined)
+            
+            output_frames.append(frames[i].from_image(combined_pil))
 
-        return frame.from_image(combined_pil)
+        return output_frames
 
     def release(self):
         if self.input_bindings_dev:
