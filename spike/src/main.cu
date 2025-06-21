@@ -303,16 +303,6 @@ void printMemoryUsage() {
               << "Free: " << free_mem / 1024 / 1024 << " MB" << std::endl;
 }
 
-// 添加引擎优化建议函数
-void printOptimizationSuggestions() {
-    std::cout << "\n=== Memory Optimization Suggestions ===" << std::endl;
-    std::cout << "1. Use FP16 precision when building TensorRT engine (if supported)" << std::endl;
-    std::cout << "2. Reduce batch size to lower memory requirements" << std::endl;
-    std::cout << "3. Consider using dynamic shapes for variable input sizes" << std::endl;
-    std::cout << "4. Use INT8 quantization for further memory reduction (requires calibration)" << std::endl;
-    std::cout << "5. Enable memory optimization flags during engine building" << std::endl;
-}
-
 int main(int argc, char** argv) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
@@ -325,7 +315,7 @@ int main(int argc, char** argv) {
     std::string engine_path = argv[1];
     std::string input_path = argv[2];
     std::string output_path = argv[3];
-    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 1;  // 默认批处理大小改为1
+    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
     
     std::cout << "=== Video Processing Setup ===" << std::endl;
     std::cout << "Engine: " << engine_path << std::endl;
@@ -343,7 +333,7 @@ int main(int argc, char** argv) {
     
     // 更保守的缓冲区分配策略
     // 为TensorRT引擎预留足够空间后，剩余内存用于输入输出缓冲区
-    size_t estimated_engine_mem = 8ULL * 1024 * 1024 * 1024; // 预估8GB给引擎
+    size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024; // 预估2GB给引擎
     size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
     
     size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);   // 1/3 剩余内存
@@ -356,19 +346,6 @@ int main(int argc, char** argv) {
     
     if (!processor.loadEngine(engine_path)) {
         std::cerr << "\n❌ Failed to load engine" << std::endl;
-        printOptimizationSuggestions();
-        
-        // 提供具体的FP16重建命令示例
-        std::cout << "\n🔧 QUICK FIX - TensorRT FP16 Rebuild Example:" << std::endl;
-        std::cout << "If you have the ONNX model, rebuild with:" << std::endl;
-        std::cout << "trtexec --onnx=your_model.onnx --fp16 --best --memPoolSize=workspace:6000 --saveEngine=new_engine_fp16.trt" << std::endl;
-        std::cout << "\nOr for dynamic shapes (like your current command):" << std::endl;
-        std::cout << "trtexec --onnx=sim.onnx --saveEngine=stereo_module_half_sbs_fp16.trt --best --memPoolSize=workspace:6000 --fp16 \\" << std::endl;
-        std::cout << "  --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:16x3x2160x3840" << std::endl;
-        std::cout << "\nAlternatively, try without explicit workspace limit:" << std::endl;
-        std::cout << "trtexec --onnx=sim.onnx --saveEngine=stereo_module_half_sbs_fp16.trt --best --fp16 \\" << std::endl;
-        std::cout << "  --minShapes=input:1x3x392x392 --optShapes=input:2x3x392x392 --maxShapes=input:16x3x2160x3840" << std::endl;
-        
         return 1;
     }
     
