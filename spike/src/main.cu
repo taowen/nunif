@@ -295,18 +295,6 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Explicitly set the output format if auto-detection fails
-    if (!ofmt_ctx->oformat) {
-        const AVOutputFormat* fmt = av_guess_format("matroska", output_path.c_str(), nullptr);
-        if (fmt) {
-            ofmt_ctx->oformat = fmt;
-            std::cout << "Set output format to: " << fmt->long_name << std::endl;
-        } else {
-            std::cerr << "Could not determine output format" << std::endl;
-            return 1;
-        }
-    }
-
     AVStream* out_stream = avformat_new_stream(ofmt_ctx, nullptr);
     if (!out_stream) {
         std::cerr << "Failed to create output stream" << std::endl;
@@ -326,6 +314,7 @@ int main(int argc, char** argv) {
     std::vector<AVFrame*> frame_buffer;
     int frame_count = 0;
     bool encoder_initialized = false;
+    int64_t next_pts = 0;
     
     while (av_read_frame(ifmt_ctx, pkt) >= 0) {
         if (pkt->stream_index != video_stream_idx) {
@@ -355,7 +344,6 @@ int main(int argc, char** argv) {
                             enc_ctx->framerate = input_framerate;
                             enc_ctx->time_base = av_inv_q(input_framerate);
                         } else {
-                            // Fallback to 30fps if framerate detection fails
                             enc_ctx->framerate = {30, 1};
                             enc_ctx->time_base = {1, 30};
                         }
@@ -379,25 +367,20 @@ int main(int argc, char** argv) {
                         
                         // Set encoding parameters
                         enc_ctx->bit_rate = 8000000;
-                        enc_ctx->gop_size = 12;
-                        enc_ctx->max_b_frames = 1;
+                        enc_ctx->gop_size = 30;
+                        enc_ctx->max_b_frames = 0;  // Disable B-frames for better compatibility
                         
-                        // Set HEVC-specific parameters with more explicit options
+                        // Set HEVC-specific parameters
                         av_opt_set(enc_ctx->priv_data, "preset", "fast", 0);
                         av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
-                        av_opt_set(enc_ctx->priv_data, "level", "auto", 0);  // Let NVENC decide the level
+                        av_opt_set(enc_ctx->priv_data, "level", "auto", 0);
                         av_opt_set(enc_ctx->priv_data, "tier", "main", 0);
                         
-                        // Force global header generation
-                        av_opt_set(enc_ctx->priv_data, "forced-idr", "1", 0);
-                        av_opt_set(enc_ctx->priv_data, "no-scenecut", "1", 0);
-                        
-                        // Try to force extradata generation by setting global header flag
+                        // Ensure global header is set for container
                         if (ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
                             enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
                         }
                         
-                        std::cout << "Opening encoder..." << std::endl;
                         ret = avcodec_open2(enc_ctx, encoder, nullptr);
                         if (ret < 0) {
                             char error_buf[AV_ERROR_MAX_STRING_SIZE];
@@ -405,9 +388,8 @@ int main(int argc, char** argv) {
                             std::cerr << "Failed to open encoder: " << error_buf << std::endl;
                             return 1;
                         }
-                        std::cout << "Encoder opened successfully" << std::endl;
                         
-                        // Copy initial parameters
+                        // Setup output stream parameters
                         ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
                         if (ret < 0) {
                             char error_buf[AV_ERROR_MAX_STRING_SIZE];
@@ -415,120 +397,49 @@ int main(int argc, char** argv) {
                             std::cerr << "Failed to copy codec parameters: " << error_buf << std::endl;
                             return 1;
                         }
-                        
-                        // Fix: Set the correct pixel format for the container
-                        out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
-                        
-                        // Set output stream timebase to match encoder
                         out_stream->time_base = enc_ctx->time_base;
                         
-                        // Don't write header yet - wait for first encoded packet
+                        // Open output file and write header
+                        ret = avio_open(&ofmt_ctx->pb, output_path.c_str(), AVIO_FLAG_WRITE);
+                        if (ret < 0) {
+                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
+                            av_strerror(ret, error_buf, sizeof(error_buf));
+                            std::cerr << "Could not open output file: " << error_buf << std::endl;
+                            return 1;
+                        }
+                        
+                        ret = avformat_write_header(ofmt_ctx, nullptr);
+                        if (ret < 0) {
+                            char error_buf[AV_ERROR_MAX_STRING_SIZE];
+                            av_strerror(ret, error_buf, sizeof(error_buf));
+                            std::cerr << "Error writing header: " << error_buf << std::endl;
+                            return 1;
+                        }
+                        
                         encoder_initialized = true;
-                        std::cout << "Encoder initialized, will write header after first packet" << std::endl;
+                        std::cout << "Encoder initialized and header written" << std::endl;
                     }
                     
                     // Encode frames
                     for (size_t i = 0; i < processed_frames.size(); i++) {
-                        processed_frames[i]->pts = frame_buffer[i]->pts;
+                        processed_frames[i]->pts = next_pts++;
                         
                         if (avcodec_send_frame(enc_ctx, processed_frames[i]) == 0) {
                             AVPacket* out_pkt = av_packet_alloc();
-                            if (!out_pkt) {
-                                std::cerr << "Failed to allocate packet" << std::endl;
-                                continue;
-                            }
+                            if (!out_pkt) continue;
                             
                             while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                                std::cout << "Received packet from encoder - size: " << out_pkt->size << ", pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << std::endl;
-                                
-                                // Check if this is the first packet and we haven't written header yet
-                                static bool header_written = false;
-                                if (!header_written && out_pkt->size > 0) {
-                                    // Update codec parameters with information from the first packet
-                                    ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
-                                    if (ret < 0) {
-                                        char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                        av_strerror(ret, error_buf, sizeof(error_buf));
-                                        std::cerr << "Failed to update codec parameters: " << error_buf << std::endl;
-                                        return 1;
-                                    }
-                                    
-                                    // Ensure pixel format is correct for container
-                                    out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
-                                    
-                                    // Debug info before header write
-                                    std::cout << "=== First Packet Info ===" << std::endl;
-                                    std::cout << "Packet size: " << out_pkt->size << std::endl;
-                                    std::cout << "Packet flags: " << out_pkt->flags << std::endl;
-                                    std::cout << "Is keyframe: " << (out_pkt->flags & AV_PKT_FLAG_KEY ? "Yes" : "No") << std::endl;
-                                    std::cout << "Encoder extradata size: " << enc_ctx->extradata_size << std::endl;
-                                    std::cout << "Codecpar extradata size: " << out_stream->codecpar->extradata_size << std::endl;
-                                    std::cout << "Encoder level: " << enc_ctx->level << std::endl;
-                                    std::cout << "Encoder profile: " << enc_ctx->profile << std::endl;
-                                    
-                                    ret = avio_open(&ofmt_ctx->pb, output_path.c_str(), AVIO_FLAG_WRITE);
-                                    if (ret < 0) {
-                                        char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                        av_strerror(ret, error_buf, sizeof(error_buf));
-                                        std::cerr << "Could not open output file: " << error_buf << std::endl;
-                                        return 1;
-                                    }
-                                    
-                                    std::cout << "About to write header with actual encoder data..." << std::endl;
-                                    ret = avformat_write_header(ofmt_ctx, nullptr);
-                                    if (ret < 0) {
-                                        char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                        av_strerror(ret, error_buf, sizeof(error_buf));
-                                        std::cerr << "Error writing header: " << error_buf << std::endl;
-                                        std::cerr << "Error code: " << ret << std::endl;
-                                        
-                                        // Try alternative - write header without extradata
-                                        std::cerr << "Trying to write header without extradata..." << std::endl;
-                                        
-                                        // Clear extradata and try again
-                                        if (out_stream->codecpar->extradata) {
-                                            av_freep(&out_stream->codecpar->extradata);
-                                            out_stream->codecpar->extradata_size = 0;
-                                        }
-                                        
-                                        ret = avformat_write_header(ofmt_ctx, nullptr);
-                                        if (ret < 0) {
-                                            av_strerror(ret, error_buf, sizeof(error_buf));
-                                            std::cerr << "Still failed: " << error_buf << std::endl;
-                                            return 1;
-                                        }
-                                    }
-                                    
-                                    header_written = true;
-                                    std::cout << "Header written successfully!" << std::endl;
-                                }
-                                
-                                // Only write packets that have actual data
-                                if (out_pkt->size > 0 && ofmt_ctx && ofmt_ctx->pb) {
-                                    std::cout << "About to rescale packet - original pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << ", size: " << out_pkt->size << std::endl;
-                                    std::cout << "Encoder time base: " << enc_ctx->time_base.num << "/" << enc_ctx->time_base.den << std::endl;
-                                    std::cout << "Stream time base: " << out_stream->time_base.num << "/" << out_stream->time_base.den << std::endl;
-                                    
-                                    // Store the size before writing since av_interleaved_write_frame may modify the packet
-                                    int packet_size = out_pkt->size;
-                                    
+                                if (out_pkt->size > 0) {
                                     av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
                                     out_pkt->stream_index = 0;
-                                    
-                                    std::cout << "After rescale - pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << ", size: " << out_pkt->size << std::endl;
                                     
                                     ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
                                     if (ret < 0) {
                                         char error_buf[AV_ERROR_MAX_STRING_SIZE];
                                         av_strerror(ret, error_buf, sizeof(error_buf));
                                         std::cerr << "Error writing frame: " << error_buf << std::endl;
-                                    } else {
-                                        std::cout << "Successfully wrote packet of size " << packet_size << std::endl;
                                     }
-                                } else if (out_pkt->size == 0) {
-                                    std::cout << "Skipping zero-size packet" << std::endl;
                                 }
-                                
                                 av_packet_unref(out_pkt);
                             }
                             av_packet_free(&out_pkt);
@@ -551,101 +462,20 @@ int main(int argc, char** argv) {
     if (!frame_buffer.empty() && encoder_initialized) {
         auto processed_frames = processor.processBatch(frame_buffer, hw_device_ctx);
         for (size_t i = 0; i < processed_frames.size(); i++) {
-            processed_frames[i]->pts = frame_buffer[i]->pts;
+            processed_frames[i]->pts = next_pts++;
+            
             if (avcodec_send_frame(enc_ctx, processed_frames[i]) == 0) {
                 AVPacket* out_pkt = av_packet_alloc();
                 if (out_pkt) {
                     while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                        std::cout << "Received packet from encoder - size: " << out_pkt->size << ", pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << std::endl;
-                        
-                        // Check if this is the first packet and we haven't written header yet
-                        static bool header_written = false;
-                        if (!header_written && out_pkt->size > 0) {
-                            // Update codec parameters with information from the first packet
-                            ret = avcodec_parameters_from_context(out_stream->codecpar, enc_ctx);
-                            if (ret < 0) {
-                                char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                av_strerror(ret, error_buf, sizeof(error_buf));
-                                std::cerr << "Failed to update codec parameters: " << error_buf << std::endl;
-                                return 1;
-                            }
-                            
-                            // Ensure pixel format is correct for container
-                            out_stream->codecpar->format = AV_PIX_FMT_YUV420P;
-                            
-                            // Debug info before header write
-                            std::cout << "=== First Packet Info ===" << std::endl;
-                            std::cout << "Packet size: " << out_pkt->size << std::endl;
-                            std::cout << "Packet flags: " << out_pkt->flags << std::endl;
-                            std::cout << "Is keyframe: " << (out_pkt->flags & AV_PKT_FLAG_KEY ? "Yes" : "No") << std::endl;
-                            std::cout << "Encoder extradata size: " << enc_ctx->extradata_size << std::endl;
-                            std::cout << "Codecpar extradata size: " << out_stream->codecpar->extradata_size << std::endl;
-                            std::cout << "Encoder level: " << enc_ctx->level << std::endl;
-                            std::cout << "Encoder profile: " << enc_ctx->profile << std::endl;
-                            
-                            ret = avio_open(&ofmt_ctx->pb, output_path.c_str(), AVIO_FLAG_WRITE);
-                            if (ret < 0) {
-                                char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                av_strerror(ret, error_buf, sizeof(error_buf));
-                                std::cerr << "Could not open output file: " << error_buf << std::endl;
-                                return 1;
-                            }
-                            
-                            std::cout << "About to write header with actual encoder data..." << std::endl;
-                            ret = avformat_write_header(ofmt_ctx, nullptr);
-                            if (ret < 0) {
-                                char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                av_strerror(ret, error_buf, sizeof(error_buf));
-                                std::cerr << "Error writing header: " << error_buf << std::endl;
-                                std::cerr << "Error code: " << ret << std::endl;
-                                
-                                // Try alternative - write header without extradata
-                                std::cerr << "Trying to write header without extradata..." << std::endl;
-                                
-                                // Clear extradata and try again
-                                if (out_stream->codecpar->extradata) {
-                                    av_freep(&out_stream->codecpar->extradata);
-                                    out_stream->codecpar->extradata_size = 0;
-                                }
-                                
-                                ret = avformat_write_header(ofmt_ctx, nullptr);
-                                if (ret < 0) {
-                                    av_strerror(ret, error_buf, sizeof(error_buf));
-                                    std::cerr << "Still failed: " << error_buf << std::endl;
-                                    return 1;
-                                }
-                            }
-                            
-                            header_written = true;
-                            std::cout << "Header written successfully!" << std::endl;
-                        }
-                        
-                        // Only write packets that have actual data
-                        if (out_pkt->size > 0 && ofmt_ctx && ofmt_ctx->pb) {
-                            std::cout << "About to rescale packet - original pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << ", size: " << out_pkt->size << std::endl;
-                            std::cout << "Encoder time base: " << enc_ctx->time_base.num << "/" << enc_ctx->time_base.den << std::endl;
-                            std::cout << "Stream time base: " << out_stream->time_base.num << "/" << out_stream->time_base.den << std::endl;
-                            
-                            // Store the size before writing since av_interleaved_write_frame may modify the packet
-                            int packet_size = out_pkt->size;
-                            
+                        if (out_pkt->size > 0) {
                             av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
                             out_pkt->stream_index = 0;
-                            
-                            std::cout << "After rescale - pts: " << out_pkt->pts << ", dts: " << out_pkt->dts << ", size: " << out_pkt->size << std::endl;
-                            
                             ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
                             if (ret < 0) {
-                                char error_buf[AV_ERROR_MAX_STRING_SIZE];
-                                av_strerror(ret, error_buf, sizeof(error_buf));
-                                std::cerr << "Error writing frame: " << error_buf << std::endl;
-                            } else {
-                                std::cout << "Successfully wrote packet of size " << packet_size << std::endl;
+                                std::cerr << "Error writing frame" << std::endl;
                             }
-                        } else if (out_pkt->size == 0) {
-                            std::cout << "Skipping zero-size packet" << std::endl;
                         }
-                        
                         av_packet_unref(out_pkt);
                     }
                     av_packet_free(&out_pkt);
@@ -656,13 +486,13 @@ int main(int argc, char** argv) {
         for (auto f : frame_buffer) av_frame_free(&f);
     }
     
-    // Finalize
+    // Finalize encoder
     if (encoder_initialized) {
         avcodec_send_frame(enc_ctx, nullptr);
         AVPacket* out_pkt = av_packet_alloc();
         if (out_pkt) {
             while (avcodec_receive_packet(enc_ctx, out_pkt) == 0) {
-                if (out_pkt->size > 0 && ofmt_ctx && ofmt_ctx->pb) {
+                if (out_pkt->size > 0) {
                     av_packet_rescale_ts(out_pkt, enc_ctx->time_base, out_stream->time_base);
                     out_pkt->stream_index = 0;
                     ret = av_interleaved_write_frame(ofmt_ctx, out_pkt);
