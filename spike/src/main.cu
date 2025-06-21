@@ -457,6 +457,29 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
     int out_H = output_dims.d[2]; 
     int out_W = output_dims.d[3];
     
+    // 创建硬件帧上下文用于分配CUDA帧
+    AVBufferRef* hw_frames_ref = nullptr;
+    AVHWFramesContext* hw_frames_ctx = nullptr;
+    
+    hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
+    if (!hw_frames_ref) {
+        std::cerr << "Failed to allocate hardware frames context" << std::endl;
+        return {};
+    }
+    
+    hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
+    hw_frames_ctx->format = AV_PIX_FMT_CUDA;
+    hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    hw_frames_ctx->width = out_W;
+    hw_frames_ctx->height = out_H;
+    hw_frames_ctx->initial_pool_size = batch_size + 2; // 预分配一些额外的帧
+    
+    if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
+        std::cerr << "Failed to initialize hardware frames context" << std::endl;
+        av_buffer_unref(&hw_frames_ref);
+        return {};
+    }
+    
     std::vector<AVFrame*> processed_frames;
     processed_frames.reserve(batch_size);
 
@@ -468,21 +491,19 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
             for (auto* frame : processed_frames) {
                 av_frame_free(&frame);
             }
+            av_buffer_unref(&hw_frames_ref);
             return {};
         }
         
-        cuda_frame->format = AV_PIX_FMT_CUDA;
-        cuda_frame->width = out_W;
-        cuda_frame->height = out_H;
-        
-        // 不要设置hw_frames_ctx，让av_hwframe_get_buffer直接使用设备上下文
-        if (av_hwframe_get_buffer(hw_device_ctx, cuda_frame, 0) < 0) {
+        // 使用硬件帧上下文分配缓冲区
+        if (av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0) < 0) {
             std::cerr << "Failed to allocate CUDA frame buffer" << std::endl;
             av_frame_free(&cuda_frame);
             // 清理已分配的frames
             for (auto* frame : processed_frames) {
                 av_frame_free(&frame);
             }
+            av_buffer_unref(&hw_frames_ref);
             return {};
         }
         
@@ -500,6 +521,9 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
         
         processed_frames.push_back(cuda_frame);
     }
+    
+    // 清理硬件帧上下文
+    av_buffer_unref(&hw_frames_ref);
     
     cudaDeviceSynchronize();
     auto t4 = high_resolution_clock::now();
@@ -556,7 +580,28 @@ static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ct
     enc_ctx->pix_fmt = AV_PIX_FMT_CUDA; // 配置为接受CUDA输入
     enc_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx); // 设置硬件设备上下文
     
-    // 不要创建独立的硬件帧上下文，直接使用设备上下文
+    // 创建硬件帧上下文用于编码器
+    AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
+    if (!hw_frames_ref) {
+        std::cerr << "Failed to allocate hardware frames context for encoder" << std::endl;
+        return false;
+    }
+    
+    AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
+    hw_frames_ctx->format = AV_PIX_FMT_CUDA;
+    hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    hw_frames_ctx->width = sample_frame->width;
+    hw_frames_ctx->height = sample_frame->height;
+    hw_frames_ctx->initial_pool_size = 20; // 足够的缓冲池大小
+    
+    if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
+        std::cerr << "Failed to initialize hardware frames context for encoder" << std::endl;
+        av_buffer_unref(&hw_frames_ref);
+        return false;
+    }
+    
+    enc_ctx->hw_frames_ctx = hw_frames_ref; // 设置硬件帧上下文
+    
     enc_ctx->time_base = ifmt_ctx->streams[video_stream_idx]->time_base;
     enc_ctx->gop_size = 12;
     enc_ctx->max_b_frames = 2;
@@ -803,9 +848,10 @@ int main(int argc, char** argv) {
             }
             
             while (avcodec_receive_frame(dec_ctx, frame) == 0) {
-                AVFrame* cloned_frame = av_frame_clone(frame);
-                frame_buffer.push_back(cloned_frame);
-
+                AVFrame* ref_frame = av_frame_alloc();
+                av_frame_ref(ref_frame, frame);  // 使用引用而不是拷贝
+                frame_buffer.push_back(ref_frame);
+                
                 if (frame_buffer.size() >= batch_size) {
                     // 初始化编码器（第一批处理后）
                     if (!encoder_initialized) {
