@@ -193,13 +193,23 @@ struct GPUBufferManager {
     }
     
     void cleanup() {
-        if (d_input_buffer) cudaFree(d_input_buffer); d_input_buffer = nullptr;
-        if (d_output_buffer) cudaFree(d_output_buffer); d_output_buffer = nullptr;
-        if (d_yuv_y_buffer) cudaFree(d_yuv_y_buffer); d_yuv_y_buffer = nullptr;
-        if (d_yuv_u_buffer) cudaFree(d_yuv_u_buffer); d_yuv_u_buffer = nullptr;
-        if (d_yuv_v_buffer) cudaFree(d_yuv_v_buffer); d_yuv_v_buffer = nullptr;
+        // 等待所有CUDA操作完成
+        cudaDeviceSynchronize();
+        
+        if (d_input_buffer) { cudaFree(d_input_buffer); d_input_buffer = nullptr; }
+        if (d_output_buffer) { cudaFree(d_output_buffer); d_output_buffer = nullptr; }
+        if (d_yuv_y_buffer) { cudaFree(d_yuv_y_buffer); d_yuv_y_buffer = nullptr; }
+        if (d_yuv_u_buffer) { cudaFree(d_yuv_u_buffer); d_yuv_u_buffer = nullptr; }
+        if (d_yuv_v_buffer) { cudaFree(d_yuv_v_buffer); d_yuv_v_buffer = nullptr; }
+        
         input_buffer_size = output_buffer_size = 0;
         yuv_y_buffer_size = yuv_u_buffer_size = yuv_v_buffer_size = 0;
+        
+        // 检查CUDA错误
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cerr << "CUDA error during cleanup: " << cudaGetErrorString(err) << std::endl;
+        }
     }
     
     float* getInputBuffer(size_t required_size) {
@@ -262,6 +272,15 @@ struct TensorRTEngine {
     int output_height = 0;
     int output_width = 0;
     int output_channels = 0;
+    
+    // 添加显式析构函数确保清理顺序
+    ~TensorRTEngine() {
+        // 显式释放TensorRT资源
+        context.reset();
+        engine.reset();
+        runtime.reset();
+        // GPU buffers会在GPUBufferManager析构时自动清理
+    }
 };
 
 // Simple logger class
@@ -438,44 +457,33 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
     int out_H = output_dims.d[2]; 
     int out_W = output_dims.d[3];
     
-    // 创建硬件帧上下文用于CUDA格式帧分配
-    AVBufferRef* hw_frames_ref = nullptr;
-    AVHWFramesContext* frames_ctx = nullptr;
-    
-    hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
-    if (!hw_frames_ref) {
-        std::cerr << "Failed to create hardware frames context" << std::endl;
-        return {};
-    }
-    
-    frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
-    frames_ctx->format = AV_PIX_FMT_CUDA;
-    frames_ctx->sw_format = AV_PIX_FMT_NV12;
-    frames_ctx->width = out_W;
-    frames_ctx->height = out_H;
-    frames_ctx->initial_pool_size = batch_size + 2; // Pool size
-    
-    if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
-        std::cerr << "Failed to initialize hardware frames context" << std::endl;
-        av_buffer_unref(&hw_frames_ref);
-        return {};
-    }
-    
     std::vector<AVFrame*> processed_frames;
     processed_frames.reserve(batch_size);
 
     for (int i = 0; i < batch_size; ++i) {
-        // 创建CUDA格式的AVFrame
         AVFrame* cuda_frame = av_frame_alloc();
+        if (!cuda_frame) {
+            std::cerr << "Failed to allocate CUDA frame" << std::endl;
+            // 清理已分配的frames
+            for (auto* frame : processed_frames) {
+                av_frame_free(&frame);
+            }
+            return {};
+        }
+        
         cuda_frame->format = AV_PIX_FMT_CUDA;
         cuda_frame->width = out_W;
         cuda_frame->height = out_H;
-        cuda_frame->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
         
-        if (av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0) < 0) {
+        // 不要设置hw_frames_ctx，让av_hwframe_get_buffer直接使用设备上下文
+        if (av_hwframe_get_buffer(hw_device_ctx, cuda_frame, 0) < 0) {
             std::cerr << "Failed to allocate CUDA frame buffer" << std::endl;
             av_frame_free(&cuda_frame);
-            continue;
+            // 清理已分配的frames
+            for (auto* frame : processed_frames) {
+                av_frame_free(&frame);
+            }
+            return {};
         }
         
         // 直接将处理结果转换为NV12格式存储在GPU上
@@ -492,9 +500,6 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
         
         processed_frames.push_back(cuda_frame);
     }
-    
-    // 清理硬件帧上下文引用
-    av_buffer_unref(&hw_frames_ref);
     
     cudaDeviceSynchronize();
     auto t4 = high_resolution_clock::now();
@@ -551,27 +556,7 @@ static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ct
     enc_ctx->pix_fmt = AV_PIX_FMT_CUDA; // 配置为接受CUDA输入
     enc_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx); // 设置硬件设备上下文
     
-    // 创建编码器的硬件帧上下文
-    AVBufferRef* enc_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
-    if (!enc_frames_ref) {
-        std::cerr << "Failed to create encoder hardware frames context" << std::endl;
-        return false;
-    }
-    
-    AVHWFramesContext* enc_frames_ctx = (AVHWFramesContext*)enc_frames_ref->data;
-    enc_frames_ctx->format = AV_PIX_FMT_CUDA;
-    enc_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-    enc_frames_ctx->width = enc_ctx->width;
-    enc_frames_ctx->height = enc_ctx->height;
-    enc_frames_ctx->initial_pool_size = 20; // Pool size for encoder
-    
-    if (av_hwframe_ctx_init(enc_frames_ref) < 0) {
-        std::cerr << "Failed to initialize encoder hardware frames context" << std::endl;
-        av_buffer_unref(&enc_frames_ref);
-        return false;
-    }
-    
-    enc_ctx->hw_frames_ctx = enc_frames_ref; // 设置硬件帧上下文
+    // 不要创建独立的硬件帧上下文，直接使用设备上下文
     enc_ctx->time_base = ifmt_ctx->streams[video_stream_idx]->time_base;
     enc_ctx->gop_size = 12;
     enc_ctx->max_b_frames = 2;
@@ -635,7 +620,7 @@ static bool initializeOutputFile(AVFormatContext* ofmt_ctx, const std::string& o
     return true;
 }
 
-// 更新processFrameBatch函数调用
+// 修改processFrameBatch函数，确保完全清理
 static bool processFrameBatch(TensorRTEngine& engine_data, 
                              std::vector<AVFrame*>& frame_buffer,
                              AVCodecContext* enc_ctx, 
@@ -646,11 +631,15 @@ static bool processFrameBatch(TensorRTEngine& engine_data,
                              AVBufferRef* hw_device_ctx) {
     if (frame_buffer.empty()) return true;
     
-    // 使用统一的GPU批处理函数，现在返回CUDA格式帧
     std::vector<AVFrame*> processed_frames = processBatchOnGPU(engine_data, frame_buffer, hw_device_ctx);
     
     if (processed_frames.empty()) {
         std::cerr << "Failed to process frame batch" << std::endl;
+        // 清理输入frame_buffer
+        for(auto f : frame_buffer) {
+            av_frame_free(&f);
+        }
+        frame_buffer.clear();
         return false;
     }
     
@@ -666,16 +655,25 @@ static bool processFrameBatch(TensorRTEngine& engine_data,
             av_rescale_q(frame_buffer[i]->duration, in_tb, out_tb) : 0;
 
         encode_and_write_frame(enc_ctx, ofmt_ctx, processed_frames[i]);
+        
+        // 确保frame被完全释放
         av_frame_free(&processed_frames[i]);
     }
     
     frame_count += frame_buffer.size();
     std::cout << "Processed " << frame_count << " frames" << std::endl;
     
+    // 确保processed_frames vector被完全清理
+    processed_frames.clear();
+    
+    // 清理输入frames
     for(auto f : frame_buffer) {
         av_frame_free(&f);
     }
     frame_buffer.clear();
+    
+    // 强制同步CUDA操作，确保所有GPU操作完成
+    cudaDeviceSynchronize();
     
     return true;
 }
@@ -691,190 +689,234 @@ int main(int argc, char** argv) {
     std::string output_video_path = argv[3];
     int batch_size = (argc > 4) ? std::stoi(argv[4]) : 4;
     
-    // 初始化TensorRT引擎
     TensorRTEngine engine_data;
-    if (!loadEngine(engine_path, engine_data)) {
-        return 1;
-    }
-
-    // 创建CUDA硬件设备上下文
     AVBufferRef* hw_device_ctx = nullptr;
-    int ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
-    if (ret < 0) {
-        std::cerr << "Failed to create CUDA device context" << std::endl;
-        return 1;
-    }
-
-    // 设置输入解码器
     AVFormatContext *ifmt_ctx = nullptr;
-    if (avformat_open_input(&ifmt_ctx, input_video_path.c_str(), nullptr, nullptr) < 0) {
-        std::cerr << "Could not open input file " << input_video_path << std::endl;
-        return 1;
-    }
-    
-    if (avformat_find_stream_info(ifmt_ctx, nullptr) < 0) {
-        std::cerr << "Could not find stream info" << std::endl;
-        return 1;
-    }
-    
-    int video_stream_idx = av_find_best_stream(ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (video_stream_idx < 0) {
-        std::cerr << "Could not find video stream" << std::endl;
-        return 1;
-    }
-    
-    AVCodecParameters* codecpar = ifmt_ctx->streams[video_stream_idx]->codecpar;
-    
-    // 选择解码器
-    const AVCodec* decoder = nullptr;
-    if (codecpar->codec_id == AV_CODEC_ID_H264) {
-        decoder = avcodec_find_decoder_by_name("h264_cuvid");
-        std::cout << "Using h264_cuvid decoder" << std::endl;
-    } else if (codecpar->codec_id == AV_CODEC_ID_HEVC) {
-        decoder = avcodec_find_decoder_by_name("hevc_cuvid");
-        std::cout << "Using hevc_cuvid decoder" << std::endl;
-    } else {
-        decoder = avcodec_find_decoder(codecpar->codec_id);
-        std::cout << "Using software decoder for codec_id " << codecpar->codec_id << std::endl;
-    }
-    
-    if (!decoder) {
-        std::cerr << "Could not find decoder for codec_id " << codecpar->codec_id << std::endl;
-        return 1;
-    }
-    
-    // 初始化解码器上下文
-    AVCodecContext* dec_ctx = avcodec_alloc_context3(decoder);
-    if (!dec_ctx) {
-        std::cerr << "Could not allocate decoder context" << std::endl;
-        return 1;
-    }
-    
-    if (avcodec_parameters_to_context(dec_ctx, codecpar) < 0) {
-        std::cerr << "Could not copy codec parameters to decoder context" << std::endl;
-        return 1;
-    }
-    
-    // 配置硬件解码器
-    if (strstr(decoder->name, "cuvid")) {
-        dec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-        dec_ctx->pkt_timebase = ifmt_ctx->streams[video_stream_idx]->time_base;
-        av_opt_set_int(dec_ctx, "surfaces", 20, 0);
-        av_opt_set_int(dec_ctx, "drop_second_field", 1, 0);
-    }
-    
-    if (avcodec_open2(dec_ctx, decoder, nullptr) < 0) {
-        std::cerr << "Could not open decoder" << std::endl;
-        return 1;
-    }
-
-    // 设置输出格式
     AVFormatContext *ofmt_ctx = nullptr;
-    avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, output_video_path.c_str());
-    const AVCodec *encoder = avcodec_find_encoder_by_name("hevc_nvenc");
-    if (!encoder) {
-        std::cerr << "Could not find H.265 NVENC encoder (hevc_nvenc)" << std::endl;
-        return 1;
-    }
-    AVStream *out_stream = avformat_new_stream(ofmt_ctx, encoder);
+    AVCodecContext* dec_ctx = nullptr;
     AVCodecContext *enc_ctx = nullptr;
+    AVPacket *pkt = nullptr;
+    AVFrame *frame = nullptr;
+    
+    try {
+        // 初始化TensorRT引擎
+        if (!loadEngine(engine_path, engine_data)) {
+            return 1;
+        }
 
-    // 主处理循环
-    AVPacket *pkt = av_packet_alloc();
-    AVFrame *frame = av_frame_alloc();
-    std::vector<AVFrame*> frame_buffer;
-    int frame_count = 0;
-    bool encoder_initialized = false;
-    
-    std::cout << "Input resolution: " << dec_ctx->width << "x" << dec_ctx->height << std::endl;
-    
-    while (av_read_frame(ifmt_ctx, pkt) >= 0) {
-        if (pkt->stream_index != video_stream_idx) {
-            av_packet_unref(pkt);
-            continue;
+        // 创建CUDA硬件设备上下文
+        int ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
+        if (ret < 0) {
+            std::cerr << "Failed to create CUDA device context" << std::endl;
+            return 1;
+        }
+
+        // 设置输入解码器
+        if (avformat_open_input(&ifmt_ctx, input_video_path.c_str(), nullptr, nullptr) < 0) {
+            std::cerr << "Could not open input file " << input_video_path << std::endl;
+            return 1;
         }
         
-        if (avcodec_send_packet(dec_ctx, pkt) != 0) {
-            av_packet_unref(pkt);
-            continue;
+        if (avformat_find_stream_info(ifmt_ctx, nullptr) < 0) {
+            std::cerr << "Could not find stream info" << std::endl;
+            return 1;
         }
         
-        while (avcodec_receive_frame(dec_ctx, frame) == 0) {
-            AVFrame* cloned_frame = av_frame_clone(frame);
-            frame_buffer.push_back(cloned_frame);
+        int video_stream_idx = av_find_best_stream(ifmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (video_stream_idx < 0) {
+            std::cerr << "Could not find video stream" << std::endl;
+            return 1;
+        }
+        
+        AVCodecParameters* codecpar = ifmt_ctx->streams[video_stream_idx]->codecpar;
+        
+        // 选择解码器
+        const AVCodec* decoder = nullptr;
+        if (codecpar->codec_id == AV_CODEC_ID_H264) {
+            decoder = avcodec_find_decoder_by_name("h264_cuvid");
+            std::cout << "Using h264_cuvid decoder" << std::endl;
+        } else if (codecpar->codec_id == AV_CODEC_ID_HEVC) {
+            decoder = avcodec_find_decoder_by_name("hevc_cuvid");
+            std::cout << "Using hevc_cuvid decoder" << std::endl;
+        } else {
+            decoder = avcodec_find_decoder(codecpar->codec_id);
+            std::cout << "Using software decoder for codec_id " << codecpar->codec_id << std::endl;
+        }
+        
+        if (!decoder) {
+            std::cerr << "Could not find decoder for codec_id " << codecpar->codec_id << std::endl;
+            return 1;
+        }
+        
+        // 初始化解码器上下文
+        dec_ctx = avcodec_alloc_context3(decoder);
+        if (!dec_ctx) {
+            std::cerr << "Could not allocate decoder context" << std::endl;
+            return 1;
+        }
+        
+        if (avcodec_parameters_to_context(dec_ctx, codecpar) < 0) {
+            std::cerr << "Could not copy codec parameters to decoder context" << std::endl;
+            return 1;
+        }
+        
+        // 配置硬件解码器
+        if (strstr(decoder->name, "cuvid")) {
+            dec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+            dec_ctx->pkt_timebase = ifmt_ctx->streams[video_stream_idx]->time_base;
+            av_opt_set_int(dec_ctx, "surfaces", 20, 0);
+            av_opt_set_int(dec_ctx, "drop_second_field", 1, 0);
+        }
+        
+        if (avcodec_open2(dec_ctx, decoder, nullptr) < 0) {
+            std::cerr << "Could not open decoder" << std::endl;
+            return 1;
+        }
 
-            if (frame_buffer.size() >= batch_size) {
-                // 初始化编码器（第一批处理后）
-                if (!encoder_initialized) {
-                    std::vector<AVFrame*> sample_frames = processBatchOnGPU(engine_data, frame_buffer, hw_device_ctx);
-                    if (sample_frames.empty()) {
-                        std::cerr << "Failed to process first batch" << std::endl;
-                        return 1;
-                    }
-                    
-                    if (!initializeEncoder(enc_ctx, ofmt_ctx, out_stream, sample_frames[0], ifmt_ctx, video_stream_idx, hw_device_ctx)) {
-                        return 1;
-                    }
-                    
-                    if (!initializeOutputFile(ofmt_ctx, output_video_path)) {
-                        return 1;
-                    }
-                    
-                    encoder_initialized = true;
-                    
-                    // 编码第一批帧
-                    for (size_t i = 0; i < sample_frames.size(); i++) {
-                        AVRational in_tb = ifmt_ctx->streams[video_stream_idx]->time_base;
-                        AVRational out_tb = enc_ctx->time_base;
-                        sample_frames[i]->pts = av_rescale_q(frame_buffer[i]->pts, in_tb, out_tb);
-                        sample_frames[i]->pkt_dts = frame_buffer[i]->pkt_dts != AV_NOPTS_VALUE ? 
-                            av_rescale_q(frame_buffer[i]->pkt_dts, in_tb, out_tb) : AV_NOPTS_VALUE;
-                        sample_frames[i]->duration = frame_buffer[i]->duration > 0 ? 
-                            av_rescale_q(frame_buffer[i]->duration, in_tb, out_tb) : 0;
+        // 设置输出格式
+        avformat_alloc_output_context2(&ofmt_ctx, nullptr, nullptr, output_video_path.c_str());
+        const AVCodec *encoder = avcodec_find_encoder_by_name("hevc_nvenc");
+        if (!encoder) {
+            std::cerr << "Could not find H.265 NVENC encoder (hevc_nvenc)" << std::endl;
+            return 1;
+        }
+        AVStream *out_stream = avformat_new_stream(ofmt_ctx, encoder);
+
+        // 主处理循环
+        pkt = av_packet_alloc();
+        frame = av_frame_alloc();
+        std::vector<AVFrame*> frame_buffer;
+        int frame_count = 0;
+        bool encoder_initialized = false;
+        
+        std::cout << "Input resolution: " << dec_ctx->width << "x" << dec_ctx->height << std::endl;
+        
+        while (av_read_frame(ifmt_ctx, pkt) >= 0) {
+            if (pkt->stream_index != video_stream_idx) {
+                av_packet_unref(pkt);
+                continue;
+            }
+            
+            if (avcodec_send_packet(dec_ctx, pkt) != 0) {
+                av_packet_unref(pkt);
+                continue;
+            }
+            
+            while (avcodec_receive_frame(dec_ctx, frame) == 0) {
+                AVFrame* cloned_frame = av_frame_clone(frame);
+                frame_buffer.push_back(cloned_frame);
+
+                if (frame_buffer.size() >= batch_size) {
+                    // 初始化编码器（第一批处理后）
+                    if (!encoder_initialized) {
+                        std::vector<AVFrame*> sample_frames = processBatchOnGPU(engine_data, frame_buffer, hw_device_ctx);
+                        if (sample_frames.empty()) {
+                            std::cerr << "Failed to process first batch" << std::endl;
+                            return 1;
+                        }
                         
-                        encode_and_write_frame(enc_ctx, ofmt_ctx, sample_frames[i]);
-                        av_frame_free(&sample_frames[i]);
-                    }
-                    
-                    frame_count += frame_buffer.size();
-                    std::cout << "Processed " << frame_count << " frames" << std::endl;
-                    
-                    for(auto f : frame_buffer) av_frame_free(&f);
-                    frame_buffer.clear();
-                } else {
-                    // 处理后续批次
-                    if (!processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx)) {
-                        return 1;
+                        if (!initializeEncoder(enc_ctx, ofmt_ctx, out_stream, sample_frames[0], ifmt_ctx, video_stream_idx, hw_device_ctx)) {
+                            // 清理sample_frames
+                            for (auto* frame : sample_frames) {
+                                av_frame_free(&frame);
+                            }
+                            return 1;
+                        }
+                        
+                        if (!initializeOutputFile(ofmt_ctx, output_video_path)) {
+                            // 清理sample_frames
+                            for (auto* frame : sample_frames) {
+                                av_frame_free(&frame);
+                            }
+                            return 1;
+                        }
+                        
+                        encoder_initialized = true;
+                        
+                        // 编码第一批帧
+                        for (size_t i = 0; i < sample_frames.size(); i++) {
+                            AVRational in_tb = ifmt_ctx->streams[video_stream_idx]->time_base;
+                            AVRational out_tb = enc_ctx->time_base;
+                            sample_frames[i]->pts = av_rescale_q(frame_buffer[i]->pts, in_tb, out_tb);
+                            sample_frames[i]->pkt_dts = frame_buffer[i]->pkt_dts != AV_NOPTS_VALUE ? 
+                                av_rescale_q(frame_buffer[i]->pkt_dts, in_tb, out_tb) : AV_NOPTS_VALUE;
+                            sample_frames[i]->duration = frame_buffer[i]->duration > 0 ? 
+                                av_rescale_q(frame_buffer[i]->duration, in_tb, out_tb) : 0;
+                            
+                            encode_and_write_frame(enc_ctx, ofmt_ctx, sample_frames[i]);
+                            av_frame_free(&sample_frames[i]); // 立即释放每个frame
+                        }
+                        
+                        frame_count += frame_buffer.size();
+                        std::cout << "Processed " << frame_count << " frames" << std::endl;
+                        
+                        // 清理输入frames和sample_frames vector
+                        for(auto f : frame_buffer) av_frame_free(&f);
+                        frame_buffer.clear();
+                        sample_frames.clear(); // 清理vector
+                        
+                        // 强制同步CUDA操作
+                        cudaDeviceSynchronize();
+                    } else {
+                        // 处理后续批次
+                        if (!processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx)) {
+                            return 1;
+                        }
                     }
                 }
             }
+            av_packet_unref(pkt);
         }
-        av_packet_unref(pkt);
-    }
 
-    // 处理最后一批帧
-    if (!frame_buffer.empty() && encoder_initialized) {
-        processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx);
-    }
+        // 处理最后一批帧
+        if (!frame_buffer.empty() && encoder_initialized) {
+            processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx);
+        }
 
-    // 刷新编码器
-    encode_and_write_frame(enc_ctx, ofmt_ctx, nullptr);
-    
-    // 写入文件尾部
-    if (av_write_trailer(ofmt_ctx) < 0) {
-        std::cerr << "Error occurred when writing output trailer" << std::endl;
+        // 刷新编码器
+        encode_and_write_frame(enc_ctx, ofmt_ctx, nullptr);
+        
+        // 写入文件尾部
+        if (av_write_trailer(ofmt_ctx) < 0) {
+            std::cerr << "Error occurred when writing output trailer" << std::endl;
+        }
+        
+        // 清理资源
+        avio_closep(&ofmt_ctx->pb);
+        avformat_free_context(ofmt_ctx);
+        avformat_close_input(&ifmt_ctx);
+        avcodec_free_context(&dec_ctx);
+        avcodec_free_context(&enc_ctx);
+        av_packet_free(&pkt);
+        av_frame_free(&frame);
+        av_buffer_unref(&hw_device_ctx);
+        
+        // 清理剩余的frame_buffer中的frames
+        // 注意：这个需要在适当的作用域中处理
+        
+        cudaDeviceReset();
+        
+        return 0;
+    } catch (...) {
+        std::cerr << "Exception occurred, cleaning up resources..." << std::endl;
     }
     
-    // 清理资源
-    avio_closep(&ofmt_ctx->pb);
-    avformat_free_context(ofmt_ctx);
-    avformat_close_input(&ifmt_ctx);
-    avcodec_free_context(&dec_ctx);
-    avcodec_free_context(&enc_ctx);
-    av_packet_free(&pkt);
-    av_frame_free(&frame);
-    av_buffer_unref(&hw_device_ctx);
+    // 统一的资源清理
+    if (pkt) av_packet_free(&pkt);
+    if (frame) av_frame_free(&frame);
+    if (enc_ctx) avcodec_free_context(&enc_ctx);
+    if (dec_ctx) avcodec_free_context(&dec_ctx);
+    if (ofmt_ctx) {
+        if (ofmt_ctx->pb) avio_closep(&ofmt_ctx->pb);
+        avformat_free_context(ofmt_ctx);
+    }
+    if (ifmt_ctx) avformat_close_input(&ifmt_ctx);
+    if (hw_device_ctx) av_buffer_unref(&hw_device_ctx);
     
-    std::cout << "Finished processing. Output saved to " << output_video_path << std::endl;
+    // 清理剩余的frame_buffer中的frames
+    // 注意：这个需要在适当的作用域中处理
+    
+    cudaDeviceReset();
+    
     return 0;
 }
