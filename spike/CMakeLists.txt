@@ -15,19 +15,16 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 find_package(CUDAToolkit REQUIRED)
 
 # Try to find cuDNN in common locations
-set(CUDNN_ROOT_DIR "${CUDAToolkit_ROOT}" CACHE PATH "Folder containing cuDNN")
 find_path(CUDNN_INCLUDE_DIR cudnn.h
-    HINTS ${CUDNN_ROOT_DIR} ${CUDAToolkit_ROOT}
-    PATH_SUFFIXES include
+    HINTS ${CUDAToolkit_INCLUDE_DIRS}
 )
 find_library(CUDNN_LIBRARY cudnn
-    HINTS ${CUDNN_ROOT_DIR} ${CUDAToolkit_ROOT}
-    PATH_SUFFIXES lib lib64 lib/x64
+    HINTS ${CUDAToolkit_LIBRARY_DIR}
 )
 
 # Check if cuDNN was found
 if(NOT CUDNN_INCLUDE_DIR OR NOT CUDNN_LIBRARY)
-    message(WARNING "cuDNN not found. Please install cuDNN or set CUDNN_ROOT_DIR")
+    message(WARNING "cuDNN not found. Please install cuDNN or set CUDAToolkit_ROOT")
     message(STATUS "CUDNN_INCLUDE_DIR: ${CUDNN_INCLUDE_DIR}")
     message(STATUS "CUDNN_LIBRARY: ${CUDNN_LIBRARY}")
     message(STATUS "CUDAToolkit_ROOT: ${CUDAToolkit_ROOT}")
@@ -134,11 +131,54 @@ else()
     message(STATUS "Searched paths: ${TENSORRT_POSSIBLE_PATHS}")
 endif()
 
-# Find OpenCV
-find_package(OpenCV REQUIRED)
+# Instead of using pkg-config for FFmpeg, manually find the libraries
+if(WIN32)
+    # Set FFMPEG_ROOT to point to your FFmpeg installation
+    set(FFMPEG_ROOT "C:/games/ffmpeg-7.1.1/install" CACHE PATH "FFmpeg installation directory")
+    
+    # Find FFmpeg include directory
+    find_path(FFMPEG_INCLUDE_DIR libavcodec/avcodec.h
+        HINTS ${FFMPEG_ROOT}/include
+        REQUIRED
+    )
+    
+    # Find FFmpeg libraries
+    find_library(AVCODEC_LIBRARY avcodec
+        HINTS ${FFMPEG_ROOT}/bin
+        REQUIRED
+    )
+    find_library(AVFORMAT_LIBRARY avformat
+        HINTS ${FFMPEG_ROOT}/bin
+        REQUIRED
+    )
+    find_library(AVUTIL_LIBRARY avutil
+        HINTS ${FFMPEG_ROOT}/bin
+        REQUIRED
+    )
+    find_library(SWSCALE_LIBRARY swscale
+        HINTS ${FFMPEG_ROOT}/bin
+        REQUIRED
+    )
+else()
+    # Use pkg-config on non-Windows platforms
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFMPEG REQUIRED libavformat libavcodec libswscale libavutil)
+endif()
 
 # Add executable
 add_executable(spike src/main.cpp)
+
+# Add FFmpeg libraries
+if(WIN32)
+    target_link_libraries(spike
+        ${AVCODEC_LIBRARY}
+        ${AVFORMAT_LIBRARY}
+        ${AVUTIL_LIBRARY}
+        ${SWSCALE_LIBRARY}
+    )
+else()
+    target_link_libraries(spike ${FFMPEG_LIBRARIES})
+endif()
 
 # Set target properties for CUDA
 set_target_properties(spike PROPERTIES
@@ -148,7 +188,7 @@ set_target_properties(spike PROPERTIES
 # Include directories
 target_include_directories(spike PRIVATE 
     ${CUDAToolkit_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS}
+    ${FFMPEG_ROOT}/include
 )
 
 # Add cuDNN if available
@@ -162,7 +202,7 @@ endif()
 target_link_libraries(spike 
     CUDA::cudart
     CUDA::cuda_driver
-    ${OpenCV_LIBS}
+    ${FFMPEG_LIBRARIES}
 )
 
 # Add TensorRT if available
