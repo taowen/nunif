@@ -129,6 +129,51 @@ __global__ void chw_float_to_yuv420p_kernel(const float* __restrict__ src,
     }
 }
 
+// 在现有CUDA kernel函数之后添加新的kernel函数
+__global__ void chw_float_to_nv12_kernel(const float* __restrict__ src, 
+                                          uint8_t* __restrict__ y_plane,
+                                          uint8_t* __restrict__ uv_plane,
+                                          int W, int H, int y_pitch, int uv_pitch) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = W * H;
+    if (idx >= total) return;
+    
+    int h = idx / W;
+    int w = idx % W;
+    
+    // 获取RGB值
+    float r = src[0 * H * W + h * W + w]; // R channel
+    float g = src[1 * H * W + h * W + w]; // G channel  
+    float b = src[2 * H * W + h * W + w]; // B channel
+    
+    // 限制到[0,1]
+    r = fmaxf(0.0f, fminf(1.0f, r));
+    g = fmaxf(0.0f, fminf(1.0f, g));
+    b = fmaxf(0.0f, fminf(1.0f, b));
+    
+    // RGB到YUV转换
+    float y = 0.299f * r + 0.587f * g + 0.114f * b;
+    float u = -0.169f * r - 0.331f * g + 0.5f * b + 0.5f;
+    float v = 0.5f * r - 0.419f * g - 0.081f * b + 0.5f;
+    
+    // 存储Y值
+    y_plane[h * y_pitch + w] = static_cast<uint8_t>(y * 255.0f + 0.5f);
+    
+    // 对于UV分量（4:2:0子采样）
+    if (h % 2 == 0 && w % 2 == 0) {
+        int uv_h = h / 2;
+        int uv_w = w / 2;
+        
+        // 限制UV值到[0,1]并转换为8位
+        u = fmaxf(0.0f, fminf(1.0f, u));
+        v = fmaxf(0.0f, fminf(1.0f, v));
+        
+        // NV12格式：UV交错存储
+        uv_plane[uv_h * uv_pitch + uv_w * 2] = static_cast<uint8_t>(u * 255.0f + 0.5f);     // U
+        uv_plane[uv_h * uv_pitch + uv_w * 2 + 1] = static_cast<uint8_t>(v * 255.0f + 0.5f); // V
+    }
+}
+
 // 统一的GPU缓冲区管理器
 struct GPUBufferManager {
     float* d_input_buffer = nullptr;
@@ -299,8 +344,8 @@ static bool loadEngine(const std::string& engine_path, TensorRTEngine& engine_da
     return true;
 }
 
-// 统一的批处理推理函数 - 完全GPU处理，直接输出YUV420P
-static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, const std::vector<AVFrame*>& frames) {
+// 统一的批处理推理函数 - 完全GPU处理，直接输出CUDA格式AVFrame
+static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, const std::vector<AVFrame*>& frames, AVBufferRef* hw_device_ctx) {
     using namespace std::chrono;
     auto t0 = high_resolution_clock::now();
 
@@ -342,7 +387,6 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
         );
     }
     
-    // 添加同步确保预处理完成
     cudaDeviceSynchronize();
     auto t2 = high_resolution_clock::now();
 
@@ -389,69 +433,70 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
     
     auto t3 = high_resolution_clock::now();
 
-    // 4. 后处理：CHW Float -> YUV420P (直接在GPU上)
+    // 4. 后处理：CHW Float -> CUDA NV12 (完全在GPU上)
     int out_C = output_dims.d[1];
     int out_H = output_dims.d[2]; 
     int out_W = output_dims.d[3];
     
-    // 分配YUV420P缓冲区
-    size_t y_plane_size = out_W * out_H;
-    size_t uv_plane_size = (out_W / 2) * (out_H / 2);
-    size_t total_y_size = batch_size * y_plane_size;
-    size_t total_u_size = batch_size * uv_plane_size;
-    size_t total_v_size = batch_size * uv_plane_size;
+    // 创建硬件帧上下文用于CUDA格式帧分配
+    AVBufferRef* hw_frames_ref = nullptr;
+    AVHWFramesContext* frames_ctx = nullptr;
     
-    uint8_t* d_yuv_y = engine_data.gpu_buffers.getYUVYBuffer(total_y_size);
-    uint8_t* d_yuv_u = engine_data.gpu_buffers.getYUVUBuffer(total_u_size);
-    uint8_t* d_yuv_v = engine_data.gpu_buffers.getYUVVBuffer(total_v_size);
-
+    hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
+    if (!hw_frames_ref) {
+        std::cerr << "Failed to create hardware frames context" << std::endl;
+        return {};
+    }
+    
+    frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
+    frames_ctx->format = AV_PIX_FMT_CUDA;
+    frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    frames_ctx->width = out_W;
+    frames_ctx->height = out_H;
+    frames_ctx->initial_pool_size = batch_size + 2; // Pool size
+    
+    if (av_hwframe_ctx_init(hw_frames_ref) < 0) {
+        std::cerr << "Failed to initialize hardware frames context" << std::endl;
+        av_buffer_unref(&hw_frames_ref);
+        return {};
+    }
+    
     std::vector<AVFrame*> processed_frames;
     processed_frames.reserve(batch_size);
 
     for (int i = 0; i < batch_size; ++i) {
-        float* frame_chw = d_output + i * out_C * out_H * out_W;
-        uint8_t* frame_y = d_yuv_y + i * y_plane_size;
-        uint8_t* frame_u = d_yuv_u + i * uv_plane_size;
-        uint8_t* frame_v = d_yuv_v + i * uv_plane_size;
+        // 创建CUDA格式的AVFrame
+        AVFrame* cuda_frame = av_frame_alloc();
+        cuda_frame->format = AV_PIX_FMT_CUDA;
+        cuda_frame->width = out_W;
+        cuda_frame->height = out_H;
+        cuda_frame->hw_frames_ctx = av_buffer_ref(hw_frames_ref);
         
+        if (av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0) < 0) {
+            std::cerr << "Failed to allocate CUDA frame buffer" << std::endl;
+            av_frame_free(&cuda_frame);
+            continue;
+        }
+        
+        // 直接将处理结果转换为NV12格式存储在GPU上
+        float* frame_chw = d_output + i * out_C * out_H * out_W;
+        uint8_t* y_plane = cuda_frame->data[0];
+        uint8_t* uv_plane = cuda_frame->data[1];
+        int y_pitch = cuda_frame->linesize[0];
+        int uv_pitch = cuda_frame->linesize[1];
+        
+        // 使用CUDA kernel直接转换到NV12格式
         int threads = 256;
         int blocks = (out_W * out_H + threads - 1) / threads;
-        chw_float_to_yuv420p_kernel<<<blocks, threads>>>(frame_chw, frame_y, frame_u, frame_v, out_W, out_H);
+        chw_float_to_nv12_kernel<<<blocks, threads>>>(frame_chw, y_plane, uv_plane, out_W, out_H, y_pitch, uv_pitch);
+        
+        processed_frames.push_back(cuda_frame);
     }
     
-    // 同步并拷贝到CPU用于编码
+    // 清理硬件帧上下文引用
+    av_buffer_unref(&hw_frames_ref);
+    
     cudaDeviceSynchronize();
-    
-    std::vector<uint8_t> cpu_y_buffer(total_y_size);
-    std::vector<uint8_t> cpu_u_buffer(total_u_size);
-    std::vector<uint8_t> cpu_v_buffer(total_v_size);
-    
-    cudaMemcpy(cpu_y_buffer.data(), d_yuv_y, total_y_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(cpu_u_buffer.data(), d_yuv_u, total_u_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(cpu_v_buffer.data(), d_yuv_v, total_v_size, cudaMemcpyDeviceToHost);
-    
-    for (int i = 0; i < batch_size; ++i) {
-        AVFrame* frame = av_frame_alloc();
-        frame->format = AV_PIX_FMT_YUV420P;
-        frame->width = out_W;
-        frame->height = out_H;
-        av_frame_get_buffer(frame, 0);
-        
-        // 复制Y平面
-        uint8_t* src_y = cpu_y_buffer.data() + i * y_plane_size;
-        memcpy(frame->data[0], src_y, y_plane_size);
-        
-        // 复制U平面
-        uint8_t* src_u = cpu_u_buffer.data() + i * uv_plane_size;
-        memcpy(frame->data[1], src_u, uv_plane_size);
-        
-        // 复制V平面
-        uint8_t* src_v = cpu_v_buffer.data() + i * uv_plane_size;
-        memcpy(frame->data[2], src_v, uv_plane_size);
-        
-        processed_frames.push_back(frame);
-    }
-
     auto t4 = high_resolution_clock::now();
 
     std::cout << "[GPU Timing] preprocess: " << duration_cast<milliseconds>(t2-t1).count() << " ms, "
@@ -462,35 +507,10 @@ static std::vector<AVFrame*> processBatchOnGPU(TensorRTEngine& engine_data, cons
     return processed_frames;
 }
 
-// 简化的编码函数 - 直接处理YUV420P输入
+// 简化的编码函数 - 直接处理CUDA格式输入
 static void encode_and_write_frame(AVCodecContext *enc_ctx, AVFormatContext *ofmt_ctx, AVFrame *frame) {
-    AVFrame* target_frame = frame;
-    
-    // 如果输入已经是YUV420P格式，直接使用；否则进行转换
-    if (frame && frame->format != enc_ctx->pix_fmt) {
-        target_frame = av_frame_alloc();
-        target_frame->format = enc_ctx->pix_fmt;
-        target_frame->width = enc_ctx->width;
-        target_frame->height = enc_ctx->height;
-        av_frame_get_buffer(target_frame, 0);
-        
-        SwsContext* sws_ctx = sws_getContext(
-            frame->width, frame->height, (AVPixelFormat)frame->format,
-            enc_ctx->width, enc_ctx->height, enc_ctx->pix_fmt,
-            SWS_BILINEAR, nullptr, nullptr, nullptr
-        );
-        
-        sws_scale(sws_ctx, frame->data, frame->linesize, 0, frame->height, 
-                  target_frame->data, target_frame->linesize);
-        sws_freeContext(sws_ctx);
-        
-        target_frame->pts = frame->pts;
-        target_frame->pkt_dts = frame->pkt_dts;
-        target_frame->duration = frame->duration;
-    }
-    
-    int ret = avcodec_send_frame(enc_ctx, target_frame);
-    if (target_frame != frame) av_frame_free(&target_frame);
+    // 直接发送CUDA格式的帧给编码器，NVENC会自动处理GPU内存
+    int ret = avcodec_send_frame(enc_ctx, frame);
 
     if (ret < 0 && frame) {
         std::cerr << "avcodec_send_frame failed" << std::endl;
@@ -514,10 +534,11 @@ static void encode_and_write_frame(AVCodecContext *enc_ctx, AVFormatContext *ofm
     }
 }
 
-// 提取编码器初始化逻辑
+// 提取编码器初始化逻辑 - 配置为支持CUDA输入
 static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ctx, 
                              AVStream* out_stream, const AVFrame* sample_frame, 
-                             AVFormatContext* ifmt_ctx, int video_stream_idx) {
+                             AVFormatContext* ifmt_ctx, int video_stream_idx,
+                             AVBufferRef* hw_device_ctx) {
     const AVCodec *encoder = avcodec_find_encoder_by_name("hevc_nvenc");
     if (!encoder) {
         std::cerr << "Could not find H.265 NVENC encoder (hevc_nvenc)" << std::endl;
@@ -527,7 +548,30 @@ static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ct
     enc_ctx = avcodec_alloc_context3(encoder);
     enc_ctx->height = sample_frame->height;
     enc_ctx->width = sample_frame->width;
-    enc_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    enc_ctx->pix_fmt = AV_PIX_FMT_CUDA; // 配置为接受CUDA输入
+    enc_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx); // 设置硬件设备上下文
+    
+    // 创建编码器的硬件帧上下文
+    AVBufferRef* enc_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
+    if (!enc_frames_ref) {
+        std::cerr << "Failed to create encoder hardware frames context" << std::endl;
+        return false;
+    }
+    
+    AVHWFramesContext* enc_frames_ctx = (AVHWFramesContext*)enc_frames_ref->data;
+    enc_frames_ctx->format = AV_PIX_FMT_CUDA;
+    enc_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    enc_frames_ctx->width = enc_ctx->width;
+    enc_frames_ctx->height = enc_ctx->height;
+    enc_frames_ctx->initial_pool_size = 20; // Pool size for encoder
+    
+    if (av_hwframe_ctx_init(enc_frames_ref) < 0) {
+        std::cerr << "Failed to initialize encoder hardware frames context" << std::endl;
+        av_buffer_unref(&enc_frames_ref);
+        return false;
+    }
+    
+    enc_ctx->hw_frames_ctx = enc_frames_ref; // 设置硬件帧上下文
     enc_ctx->time_base = ifmt_ctx->streams[video_stream_idx]->time_base;
     enc_ctx->gop_size = 12;
     enc_ctx->max_b_frames = 2;
@@ -538,22 +582,24 @@ static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ct
 
     // 根据分辨率计算更高的码率
     int pixels = enc_ctx->width * enc_ctx->height;
-    if (pixels >= 1920 * 1080) {
-        enc_ctx->bit_rate = 12000000;  // 1080p: 12Mbps (提高from 8Mbps)
+    if (pixels >= 3840 * 2160) {
+        enc_ctx->bit_rate = 30000000;  // 4k: 30Mbps
+    } else if (pixels >= 1920 * 1080) {
+        enc_ctx->bit_rate = 12000000;  // 1080p: 12Mbps
     } else if (pixels >= 1280 * 720) {
-        enc_ctx->bit_rate = 8000000;   // 720p: 8Mbps (提高from 5Mbps)
+        enc_ctx->bit_rate = 8000000;   // 720p: 8Mbps
     } else {
-        enc_ctx->bit_rate = 5000000;   // 480p: 5Mbps (提高from 3Mbps)
+        enc_ctx->bit_rate = 5000000;   // 480p: 5Mbps
     }
 
     // 使用更高质量的设置
-    av_opt_set(enc_ctx->priv_data, "preset", "p7", 0);        // 更高质量preset
+    av_opt_set(enc_ctx->priv_data, "preset", "p7", 0);
     av_opt_set(enc_ctx->priv_data, "rc", "vbr", 0);
-    av_opt_set(enc_ctx->priv_data, "cq", "18", 0);            // 更低CQ值，更高质量
+    av_opt_set(enc_ctx->priv_data, "cq", "18", 0);
     av_opt_set(enc_ctx->priv_data, "profile", "main", 0);
     av_opt_set(enc_ctx->priv_data, "level", "auto", 0);
-    av_opt_set(enc_ctx->priv_data, "multipass", "fullres", 0); // 启用多遍编码
-    av_opt_set(enc_ctx->priv_data, "lookahead", "32", 0);     // 增加前瞻帧数
+    av_opt_set(enc_ctx->priv_data, "multipass", "fullres", 0);
+    av_opt_set(enc_ctx->priv_data, "lookahead", "32", 0);
 
     out_stream->time_base = enc_ctx->time_base;
 
@@ -569,7 +615,7 @@ static bool initializeEncoder(AVCodecContext*& enc_ctx, AVFormatContext* ofmt_ct
     
     std::cout << "Output resolution: " << enc_ctx->width << "x" << enc_ctx->height << std::endl;
     std::cout << "Bitrate: " << enc_ctx->bit_rate << " bps" << std::endl;
-    std::cout << "CQ: 18, Preset: p7, Multipass: fullres" << std::endl;
+    std::cout << "CUDA input format configured for GPU-to-GPU encoding" << std::endl;
     
     return true;
 }
@@ -589,30 +635,30 @@ static bool initializeOutputFile(AVFormatContext* ofmt_ctx, const std::string& o
     return true;
 }
 
-// 提取帧处理逻辑
+// 更新processFrameBatch函数调用
 static bool processFrameBatch(TensorRTEngine& engine_data, 
                              std::vector<AVFrame*>& frame_buffer,
                              AVCodecContext* enc_ctx, 
                              AVFormatContext* ofmt_ctx,
                              AVFormatContext* ifmt_ctx,
                              int video_stream_idx,
-                             int& frame_count) {
+                             int& frame_count,
+                             AVBufferRef* hw_device_ctx) {
     if (frame_buffer.empty()) return true;
     
-    // 使用统一的GPU批处理函数
-    std::vector<AVFrame*> processed_frames = processBatchOnGPU(engine_data, frame_buffer);
+    // 使用统一的GPU批处理函数，现在返回CUDA格式帧
+    std::vector<AVFrame*> processed_frames = processBatchOnGPU(engine_data, frame_buffer, hw_device_ctx);
     
     if (processed_frames.empty()) {
         std::cerr << "Failed to process frame batch" << std::endl;
         return false;
     }
     
-    // 编码处理好的帧
+    // 编码处理好的CUDA格式帧
     AVRational in_tb = ifmt_ctx->streams[video_stream_idx]->time_base;
     AVRational out_tb = enc_ctx->time_base;
     
     for (size_t i = 0; i < processed_frames.size(); i++) {
-        // 时间戳转换
         processed_frames[i]->pts = av_rescale_q(frame_buffer[i]->pts, in_tb, out_tb);
         processed_frames[i]->pkt_dts = frame_buffer[i]->pkt_dts != AV_NOPTS_VALUE ? 
             av_rescale_q(frame_buffer[i]->pkt_dts, in_tb, out_tb) : AV_NOPTS_VALUE;
@@ -626,7 +672,6 @@ static bool processFrameBatch(TensorRTEngine& engine_data,
     frame_count += frame_buffer.size();
     std::cout << "Processed " << frame_count << " frames" << std::endl;
     
-    // 清理缓冲区
     for(auto f : frame_buffer) {
         av_frame_free(&f);
     }
@@ -761,13 +806,13 @@ int main(int argc, char** argv) {
             if (frame_buffer.size() >= batch_size) {
                 // 初始化编码器（第一批处理后）
                 if (!encoder_initialized) {
-                    std::vector<AVFrame*> sample_frames = processBatchOnGPU(engine_data, frame_buffer);
+                    std::vector<AVFrame*> sample_frames = processBatchOnGPU(engine_data, frame_buffer, hw_device_ctx);
                     if (sample_frames.empty()) {
                         std::cerr << "Failed to process first batch" << std::endl;
                         return 1;
                     }
                     
-                    if (!initializeEncoder(enc_ctx, ofmt_ctx, out_stream, sample_frames[0], ifmt_ctx, video_stream_idx)) {
+                    if (!initializeEncoder(enc_ctx, ofmt_ctx, out_stream, sample_frames[0], ifmt_ctx, video_stream_idx, hw_device_ctx)) {
                         return 1;
                     }
                     
@@ -798,7 +843,7 @@ int main(int argc, char** argv) {
                     frame_buffer.clear();
                 } else {
                     // 处理后续批次
-                    if (!processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count)) {
+                    if (!processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx)) {
                         return 1;
                     }
                 }
@@ -809,7 +854,7 @@ int main(int argc, char** argv) {
 
     // 处理最后一批帧
     if (!frame_buffer.empty() && encoder_initialized) {
-        processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count);
+        processFrameBatch(engine_data, frame_buffer, enc_ctx, ofmt_ctx, ifmt_ctx, video_stream_idx, frame_count, hw_device_ctx);
     }
 
     // 刷新编码器
