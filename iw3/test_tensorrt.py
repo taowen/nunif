@@ -45,53 +45,53 @@ with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
 
 context = engine.create_execution_context()
 
-outputs = []
-for i in range(x_batch.shape[0]):
-    x = x_batch[i:i + 1]
-    logger.info(f"Processing image {i}, shape: {x.shape}")
+# I/O bindings
+input_bindings = []
+output_bindings_map = {}
+output_tensors_map = {}
+bindings = [0] * engine.num_io_tensors
 
-    # I/O bindings
-    input_bindings = []
-    output_bindings = []
-    output_tensors = []
-    bindings = [0] * engine.num_io_tensors
+# Set input shape for the whole batch
+context.set_input_shape('input', x_batch.shape)
 
-    for binding_idx in range(engine.num_io_tensors):
-        binding_name = engine.get_tensor_name(binding_idx)
-        if engine.get_tensor_mode(binding_name) == trt.TensorIOMode.INPUT:
-            if binding_name == 'input':  # from export_trt.bat
-                context.set_input_shape(binding_name, x.shape)
-                h_input = x.contiguous()
-                d_input = check_cuda_error(cudart.cudaMalloc(h_input.nbytes))
-                check_cuda_error(cudart.cudaMemcpy(d_input, h_input.data_ptr(), h_input.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice))
-                bindings[binding_idx] = int(d_input)
-                input_bindings.append(d_input)
-        else:
-            output_shape = context.get_tensor_shape(binding_name)
-            dtype = trt.nptype(engine.get_tensor_dtype(binding_name))
-            # HACK: convert numpy dtype to torch dtype
-            output_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
-            h_output = torch.empty(tuple(output_shape), dtype=output_dtype)
-            d_output = check_cuda_error(cudart.cudaMalloc(h_output.nbytes))
-            bindings[binding_idx] = int(d_output)
-            output_bindings.append(d_output)
-            output_tensors.append(h_output)
+for binding_idx in range(engine.num_io_tensors):
+    binding_name = engine.get_tensor_name(binding_idx)
+    if engine.get_tensor_mode(binding_name) == trt.TensorIOMode.INPUT:
+        if binding_name == 'input':  # from export_trt.bat
+            h_input = x_batch.contiguous()
+            d_input = check_cuda_error(cudart.cudaMalloc(h_input.nbytes))
+            check_cuda_error(cudart.cudaMemcpy(d_input, h_input.data_ptr(), h_input.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice))
+            bindings[binding_idx] = int(d_input)
+            input_bindings.append(d_input)
+    else:
+        # For dynamic shapes, get_tensor_shape() may return -1 for dynamic dimensions before execution.
+        # We know the output shape is the same as the input batch shape for this model.
+        output_shape = x_batch.shape
+        dtype = trt.nptype(engine.get_tensor_dtype(binding_name))
+        output_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
+        h_output = torch.empty(tuple(output_shape), dtype=output_dtype, device="cpu")
+        d_output = check_cuda_error(cudart.cudaMalloc(h_output.nbytes))
+        bindings[binding_idx] = int(d_output)
+        output_bindings_map[binding_name] = d_output
+        output_tensors_map[binding_name] = h_output
 
-    context.execute_v2(bindings)
+context.execute_v2(bindings)
 
-    for h_output, d_output in zip(output_tensors, output_bindings):
-        check_cuda_error(cudart.cudaMemcpy(h_output.data_ptr(), d_output, h_output.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost))
+for name, d_output in output_bindings_map.items():
+    h_output = output_tensors_map[name]
+    check_cuda_error(cudart.cudaMemcpy(h_output.data_ptr(), d_output, h_output.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost))
 
-    for d_mem in input_bindings + output_bindings:
-        check_cuda_error(cudart.cudaFree(d_mem))
+all_output_bindings = list(output_bindings_map.values())
+for d_mem in input_bindings + all_output_bindings:
+    check_cuda_error(cudart.cudaFree(d_mem))
 
-    # Assuming single output for simplicity in this example
-    outputs.append(output_tensors[0])
+left_batch = output_tensors_map['left']
+right_batch = output_tensors_map['right']
 
-output_batch = torch.cat(outputs, dim=0)
-logger.info(f"Final output batch shape: {output_batch.shape}")
-logger.debug(f"Output tensor (first 5 elements): {output_batch.flatten()[:5].cpu().numpy()}")
-logger.debug(f"Output tensor dtype: {output_batch.dtype}")
+logger.info(f"Final left batch shape: {left_batch.shape}")
+logger.info(f"Final right batch shape: {right_batch.shape}")
+logger.debug(f"Output tensor (first 5 elements): {left_batch.flatten()[:5].cpu().numpy()}")
+logger.debug(f"Output tensor dtype: {left_batch.dtype}")
 
 # === 读取导出的图片并对比 ===
 from PIL import Image
@@ -103,16 +103,18 @@ def load_eye_image(path, size):
     tensor = TF.to_tensor(img)
     return tensor
 
-trt_left_0 = output_batch[0].cpu()
-trt_right_0 = output_batch[1].cpu()
-trt_h, trt_w = trt_left_0.shape[1], trt_left_0.shape[2]
+for i in range(left_batch.shape[0]):
+    trt_left = left_batch[i].cpu()
+    trt_right = right_batch[i].cpu()
+    trt_h, trt_w = trt_left.shape[1], trt_left.shape[2]
 
-left_eye_0 = load_eye_image("tmp/left_eye_0.png", (trt_w, trt_h))
-right_eye_0 = load_eye_image("tmp/right_eye_0.png", (trt_w, trt_h))
+    left_eye = load_eye_image(f"tmp/left_eye_{i}.png", (trt_w, trt_h))
+    right_eye = load_eye_image(f"tmp/right_eye_{i}.png", (trt_w, trt_h))
 
-def compare_tensors(t1, t2, name):
-    diff = (t1 - t2).abs()
-    print(f"{name}: max_diff={diff.max():.6f}, mean_diff={diff.mean():.6f}")
+    def compare_tensors(t1, t2, name):
+        diff = (t1 - t2).abs()
+        print(f"{name}: max_diff={diff.max():.6f}, mean_diff={diff.mean():.6f}")
 
-compare_tensors(trt_left_0, left_eye_0, "Left Eye 0")
-compare_tensors(trt_right_0, right_eye_0, "Right Eye 0")
+    print(f"Comparing results for image {i}")
+    compare_tensors(trt_left, left_eye, f"Left Eye {i}")
+    compare_tensors(trt_right, right_eye, f"Right Eye {i}")
