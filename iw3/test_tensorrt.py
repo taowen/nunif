@@ -1,279 +1,118 @@
-# (venv) C:\games\nunif>python
-# Python 3.10.11 (tags/v3.10.11:7d4cc5a, Apr  5 2023, 00:38:17) [MSC v.1929 64 bit (AMD64)] on win32
-# Type "help", "copyright", "credits" or "license" for more information.
-# >>> import tensorrt
-# >>> print(tensorrt.__version__)
-# 10.11.0.33
-
+import tensorrt as trt # version 10.11.0.33
 import torch
+from torchvision.transforms import functional as TF
+from PIL import Image
+from nunif.logger import logger
 import numpy as np
-import tensorrt as trt
-from iw3.export_onnx_old import (
-    export_end2end_to_onnx, HUB_MODEL_DIR,
-    End2EndStereoModel, DistillAnyDepthWithDilation
-)
-from nunif.utils.ui import TorchHubDir, HiddenPrints
-from os import path
-import os
-import subprocess
-import ctypes
-from cuda.bindings import runtime as cuda_runtime
-from iw3.utils import ROW_FLOW_V3_SYM_URL
-from nunif.models import load_model
+import cuda.cudart as cudart
 
-# This script is adapted from the TensorRT Python examples and tailored for this project.
-# See: https://leimao.github.io/blog/TensorRT-Python-Inference/
-# and https://docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/python-api-docs.html
+def check_cuda_error(cuda_ret):
+    err, *rest = cuda_ret
+    if err != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"CUDA error: {cudart.cudaGetErrorString(err)[1].decode('utf-8')}")
+    if len(rest) == 1:
+        return rest[0]
+    return rest
+
+img_path1 = "iw3/figure/convergence.png"
+img_path2 = "iw3/figure/divergence.png"
+img1 = Image.open(img_path1).convert("RGB")
+img2 = Image.open(img_path2).convert("RGB")
+
+# The TRT engine was built with a specific input size range.
+# Valid range for profile 0: [1,3,392,392]..[1,3,2160,3840].
+# Resize to a valid size while maintaining aspect ratio.
+w, h = img1.size
+if h < 392:
+    new_h = 392
+    new_w = int(w * new_h / h)
+    img1 = img1.resize((new_w, new_h), Image.Resampling.BICUBIC)
+    img2 = img2.resize((new_w, new_h), Image.Resampling.BICUBIC)
+
+x1 = TF.to_tensor(img1)
+x2 = TF.to_tensor(img2)
+logger.debug(f"x1 shape: {x1.shape}, x2 shape: {x2.shape}")
+# x1 shape: torch.Size([3, 260, 780]), x2 shape: torch.Size([3, 260, 780])
+x_batch = torch.stack([x1, x2], dim=0)  # BCHW, float32, 0-1
+logger.debug(f"stacked x shape: {x_batch.shape}")
+# stacked x shape: torch.Size([2, 3, 260, 780])
 
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+engine_path = "stereo_module.trt"
+logger.info(f"Loading engine: {engine_path}")
+with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+    engine = runtime.deserialize_cuda_engine(f.read())
 
-def check_cuda_err(err):
-    if isinstance(err, cuda_runtime.cudaError_t):
-        if err != cuda_runtime.cudaError_t.cudaSuccess:
-            raise RuntimeError(f"CUDA Runtime Error: {err}")
-    else:
-        raise RuntimeError(f"Unknown error type: {err}")
+context = engine.create_execution_context()
 
-def cuda_call(call):
-    err, *res = call
-    check_cuda_err(err)
-    if len(res) == 1:
-        return res[0]
-    return res
+outputs = []
+for i in range(x_batch.shape[0]):
+    x = x_batch[i:i + 1]
+    logger.info(f"Processing image {i}, shape: {x.shape}")
 
-class HostDeviceMem:
-    """A helper class for managing paired host and device memory."""
-    def __init__(self, size: int, dtype: np.dtype, name: str, shape, format):
-        nbytes = size * dtype.itemsize
-        host_mem = cuda_call(cuda_runtime.cudaMallocHost(nbytes))
-        pointer_type = ctypes.POINTER(np.ctypeslib.as_ctypes_type(dtype))
-        self._host = np.ctypeslib.as_array(ctypes.cast(host_mem, pointer_type), (size, ))
-        self._device = cuda_call(cuda_runtime.cudaMalloc(nbytes))
-        self._nbytes = nbytes
-        self._name = name
-        self._shape = shape
-        self._format = format
-        self._dtype = dtype
+    # I/O bindings
+    input_bindings = []
+    output_bindings = []
+    output_tensors = []
+    bindings = [0] * engine.num_io_tensors
 
-    @property
-    def host(self) -> np.ndarray:
-        return self._host
-
-    @host.setter
-    def host(self, arr: np.ndarray):
-        if arr.size > self.host.size:
-            raise ValueError(
-                f"Tried to fit an array of size {arr.size} into host memory of size {self.host.size}"
-            )
-        np.copyto(self.host[:arr.size], arr.flat, casting='safe')
-
-    @property
-    def device(self) -> int:
-        return self._device
-
-    @property
-    def nbytes(self) -> int:
-        return self._nbytes
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def shape(self) -> tuple:
-        return self._shape
-
-    @property
-    def format(self):
-        return self._format
-
-    @property
-    def dtype(self) -> np.dtype:
-        return self._dtype
-
-    def free(self):
-        cuda_call(cuda_runtime.cudaFree(self.device))
-        cuda_call(cuda_runtime.cudaFreeHost(self.host.ctypes.data))
-
-
-def allocate_buffers(engine: trt.ICudaEngine, profile_idx: int = 0):
-    inputs = []
-    outputs = []
-    bindings = []
-    stream = cuda_call(cuda_runtime.cudaStreamCreate())
-    tensor_names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)]
-
-    for binding in tensor_names:
-        shape = engine.get_tensor_profile_shape(binding, profile_idx)[-1] # max shape
-        size = trt.volume(shape)
-        dtype = np.dtype(trt.nptype(engine.get_tensor_dtype(binding)))
-        
-        mem = HostDeviceMem(size, dtype, binding, shape, engine.get_tensor_format(binding))
-        bindings.append(int(mem.device))
-        
-        if engine.get_tensor_mode(binding) == trt.TensorIOMode.INPUT:
-            inputs.append(mem)
+    for binding_idx in range(engine.num_io_tensors):
+        binding_name = engine.get_tensor_name(binding_idx)
+        if engine.get_tensor_mode(binding_name) == trt.TensorIOMode.INPUT:
+            if binding_name == 'input':  # from export_trt.bat
+                context.set_input_shape(binding_name, x.shape)
+                h_input = x.contiguous()
+                d_input = check_cuda_error(cudart.cudaMalloc(h_input.nbytes))
+                check_cuda_error(cudart.cudaMemcpy(d_input, h_input.data_ptr(), h_input.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice))
+                bindings[binding_idx] = int(d_input)
+                input_bindings.append(d_input)
         else:
-            outputs.append(mem)
-            
-    output_map = {o.name: o for o in outputs}
-    # To maintain order
-    outputs = [output_map[name] for name in ["left", "right"]]
+            output_shape = context.get_tensor_shape(binding_name)
+            dtype = trt.nptype(engine.get_tensor_dtype(binding_name))
+            # HACK: convert numpy dtype to torch dtype
+            output_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
+            h_output = torch.empty(tuple(output_shape), dtype=output_dtype)
+            d_output = check_cuda_error(cudart.cudaMalloc(h_output.nbytes))
+            bindings[binding_idx] = int(d_output)
+            output_bindings.append(d_output)
+            output_tensors.append(h_output)
 
-    return inputs, outputs, bindings, stream
+    context.execute_v2(bindings)
 
-def do_inference(context, inputs, outputs, stream):
-    # Transfer input data to the GPU.
-    kind = cuda_runtime.cudaMemcpyKind.cudaMemcpyHostToDevice
-    for inp in inputs:
-        cuda_call(cuda_runtime.cudaMemcpyAsync(inp.device, inp.host.ctypes.data, inp.nbytes, kind, stream))
+    for h_output, d_output in zip(output_tensors, output_bindings):
+        check_cuda_error(cudart.cudaMemcpy(h_output.data_ptr(), d_output, h_output.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost))
 
-    # Run inference
-    context.execute_async_v3(stream_handle=stream)
+    for d_mem in input_bindings + output_bindings:
+        check_cuda_error(cudart.cudaFree(d_mem))
 
-    # Transfer predictions back from the GPU.
-    kind = cuda_runtime.cudaMemcpyKind.cudaMemcpyDeviceToHost
-    for out in outputs:
-        cuda_call(cuda_runtime.cudaMemcpyAsync(out.host.ctypes.data, out.device, out.nbytes, kind, stream))
-        
-    # Synchronize the stream
-    cuda_call(cuda_runtime.cudaStreamSynchronize(stream))
-    
-    return [out.host for out in outputs]
+    # Assuming single output for simplicity in this example
+    outputs.append(output_tensors[0])
 
-def test_end2end_tensorrt_model(model_size='s', input_size=392, edge_dilation=2, divergence=2.0, convergence=0.5):
-    """
-    Test End2End Stereo TensorRT model output against PyTorch model output
-    """
-    print(f"Testing End2End Stereo {model_size.upper()} TensorRT model...")
+output_batch = torch.cat(outputs, dim=0)
+logger.info(f"Final output batch shape: {output_batch.shape}")
+logger.debug(f"Output tensor (first 5 elements): {output_batch.flatten()[:5].cpu().numpy()}")
+logger.debug(f"Output tensor dtype: {output_batch.dtype}")
 
-    onnx_path = path.join(HUB_MODEL_DIR, f"end2end_stereo_{model_size}.onnx")
-    trt_path = path.join(HUB_MODEL_DIR, f"end2end_stereo_{model_size}.trt")
+# === 读取导出的图片并对比 ===
+from PIL import Image
+import torchvision.transforms.functional as TF
 
-    # Export ONNX model if it doesn't exist
-    if not path.exists(onnx_path):
-        with TorchHubDir(HUB_MODEL_DIR):
-            export_end2end_to_onnx(model_size=model_size, input_size=input_size,
-                                   edge_dilation=edge_dilation, divergence=divergence, convergence=convergence)
+def load_eye_image(path, size):
+    img = Image.open(path).convert("RGB")
+    img = img.resize(size, Image.BICUBIC)  # size: (width, height)
+    tensor = TF.to_tensor(img)
+    return tensor
 
-    # Build TensorRT engine if it doesn't exist
-    if not path.exists(trt_path):
-        print("TensorRT engine not found, building...")
-        command = [
-            "trtexec",
-            f"--onnx={onnx_path}",
-            f"--saveEngine={trt_path}",
-            "--fp16",
-            f"--minShapes=input:1x3x{input_size}x{input_size}",
-            f"--optShapes=input:1x3x{input_size}x{input_size}",
-            f"--maxShapes=input:1x3x1024x1024",
-            # Also specify output shapes for robustness
-            f"--minShapes=left:1x3x{input_size}x{input_size},right:1x3x{input_size}x{input_size}",
-            f"--optShapes=left:1x3x{input_size}x{input_size},right:1x3x{input_size}x{input_size}",
-            f"--maxShapes=left:1x3x1024x1024,right:1x3x1024x1024"
-        ]
-        print(f"Running: {' '.join(command)}")
-        subprocess.run(command, check=True)
-        print("TensorRT engine built.")
+trt_left_0 = output_batch[0].cpu()
+trt_right_0 = output_batch[1].cpu()
+trt_h, trt_w = trt_left_0.shape[1], trt_left_0.shape[2]
 
-    # Load PyTorch model
-    # This logic must be the same as in export_end2end_to_onnx
-    encoder = {'s': 'v2_vits', 'b': 'v2_vitb', 'l': 'v2_vitl'}[model_size]
-    with HiddenPrints(), TorchHubDir(HUB_MODEL_DIR):
-        depth_model_pt = torch.hub.load("nagadomi/Depth-Anything_iw3:main",
-                                        "DistillAnyDepth", encoder=encoder,
-                                        verbose=False, trust_repo=True)
-    depth_model_pt.eval()
-    depth_model_pt = DistillAnyDepthWithDilation(depth_model_pt, edge_dilation=edge_dilation)
+left_eye_0 = load_eye_image("tmp/left_eye_0.png", (trt_w, trt_h))
+right_eye_0 = load_eye_image("tmp/right_eye_0.png", (trt_w, trt_h))
 
-    side_model_path = ROW_FLOW_V3_SYM_URL
-    with TorchHubDir(HUB_MODEL_DIR):
-        side_model_pt = load_model(side_model_path, weights_only=True, device_ids=[-1])[0].eval()
-    side_model_pt.delta_output = True
-    side_model_pt.symmetric = True
+def compare_tensors(t1, t2, name):
+    diff = (t1 - t2).abs()
+    print(f"{name}: max_diff={diff.max():.6f}, mean_diff={diff.mean():.6f}")
 
-    model = End2EndStereoModel(depth_model_pt, side_model_pt, divergence, convergence)
-    model.eval()
-
-    # Create test input
-    test_input = torch.randn(1, 3, input_size, input_size)
-
-    # Get PyTorch output
-    with torch.no_grad():
-        torch_left, torch_right = model(test_input)
-        torch_left = torch_left.numpy()
-        torch_right = torch_right.numpy()
-
-    # Get TensorRT output
-    runtime = trt.Runtime(TRT_LOGGER)
-    with open(trt_path, "rb") as f:
-        engine = runtime.deserialize_cuda_engine(f.read())
-    
-    context = engine.create_execution_context()
-    
-    # 1. Allocate input buffers (max shape is fine)
-    inputs, outputs, bindings, stream = allocate_buffers(engine)
-
-    # 2. Set input shape
-    context.set_input_shape(inputs[0].name, test_input.shape)
-
-    # 3. Infer shapes
-    context.infer_shapes()
-
-    # 4. Query actual output shapes
-    left_shape = context.get_tensor_shape("left")
-    right_shape = context.get_tensor_shape("right")
-    left_size = trt.volume(left_shape)
-    right_size = trt.volume(right_shape)
-    left_dtype = np.dtype(trt.nptype(engine.get_tensor_dtype("left")))
-    right_dtype = np.dtype(trt.nptype(engine.get_tensor_dtype("right")))
-
-    # 5. Allocate output buffers for actual shapes
-    left_mem = HostDeviceMem(left_size, left_dtype, "left", left_shape, engine.get_tensor_format("left"))
-    right_mem = HostDeviceMem(right_size, right_dtype, "right", right_shape, engine.get_tensor_format("right"))
-    outputs = [left_mem, right_mem]
-
-    # 6. Set tensor addresses for all inputs and outputs
-    for mem in inputs + outputs:
-        context.set_tensor_address(mem.name, mem.device)
-
-    # 7. Set input data
-    inputs[0].host = test_input.numpy().ravel()
-
-    # 8. Run inference
-    trt_raw_outputs = do_inference(context, inputs, outputs, stream)
-    
-    # 9. Reshape output
-    trt_left = trt_raw_outputs[0].reshape(left_shape)
-    trt_right = trt_raw_outputs[1].reshape(right_shape)
-
-    # Compare outputs
-    # Left eye
-    max_diff_left = np.max(np.abs(torch_left - trt_left))
-    mean_diff_left = np.mean(np.abs(torch_left - trt_left))
-
-    print(f"Left Eye - Maximum absolute difference: {max_diff_left}")
-    print(f"Left Eye - Mean absolute difference: {mean_diff_left}")
-
-    # Right eye
-    max_diff_right = np.max(np.abs(torch_right - trt_right))
-    mean_diff_right = np.mean(np.abs(torch_right - trt_right))
-
-    print(f"Right Eye - Maximum absolute difference: {max_diff_right}")
-    print(f"Right Eye - Mean absolute difference: {mean_diff_right}")
-
-    # Check if the differences are within acceptable range for FP16
-    if max_diff_left > 1e-2 or max_diff_right > 1e-2:
-        print("WARNING: Large difference detected between PyTorch and TensorRT outputs!")
-    else:
-        print("TensorRT model output matches PyTorch model output within acceptable range.")
-
-    # Free memory
-    for i in inputs: i.free()
-    for o in outputs: o.free()
-
-
-if __name__ == "__main__":
-    with TorchHubDir(HUB_MODEL_DIR):
-        test_end2end_tensorrt_model('s')
-
+compare_tensors(trt_left_0, left_eye_0, "Left Eye 0")
+compare_tensors(trt_right_0, right_eye_0, "Right Eye 0")
