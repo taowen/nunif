@@ -1,8 +1,10 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include <NvInfer.h>
 #include <cuda_runtime.h>
+#include <iostream>
 
 // Simple logger for TensorRT
 class Logger : public nvinfer1::ILogger {
@@ -61,4 +63,23 @@ public:
         max_input_size = max_input_mb * 1024 * 1024;
         max_output_size = max_output_mb * 1024 * 1024;
     }
+};
+
+
+// 修改 VideoContext 结构体，添加流映射支持
+struct VideoContext {
+    AVFormatContext* ifmt_ctx = nullptr;
+    AVFormatContext* ofmt_ctx = nullptr;
+    AVCodecContext* dec_ctx = nullptr;
+    AVCodecContext* enc_ctx = nullptr;
+    AVStream* out_stream = nullptr;
+    AVBufferRef* hw_device_ctx = nullptr;
+    int video_stream_idx = -1;
+    int64_t total_frames = 0;
+    std::string input_path;
+    std::string output_path;
+    
+    // 添加流映射
+    std::vector<int> stream_mapping;  // input stream index -> output stream index
+    std::vector<AVStream*> output_streams;  // 所有输出流
 };

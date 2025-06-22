@@ -166,7 +166,7 @@ else()
 endif()
 
 # Add executable
-add_executable(spike src/main.cu)
+add_executable(spike src/main.cu src/onnx_utils.cpp)
 
 # Add FFmpeg libraries
 if(WIN32)
