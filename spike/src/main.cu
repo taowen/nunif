@@ -990,11 +990,12 @@ int main(int argc, char** argv) {
             // 处理视频流
             if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
                 while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
-                    // 直接处理单帧，不再批处理
+                    // 保存原始PTS，并转换到编码器的时间基准
+                    int64_t original_pts = frame->pts;
+                    
                     AVFrame* processed_frame = processor.processFrame(frame, ctx.hw_device_ctx);
                     
                     if (processed_frame) {
-                        // Initialize encoder on first frame
                         if (!encoder_initialized) {
                             if (!initializeEncoder(ctx, processed_frame)) {
                                 cleanupVideoContext(ctx);
@@ -1004,8 +1005,17 @@ int main(int argc, char** argv) {
                             std::cout << "Encoder initialized, processing streams..." << std::endl;
                         }
                         
+                        // 使用原始PTS，转换到编码器时间基准
+                        if (original_pts != AV_NOPTS_VALUE) {
+                            processed_frame->pts = av_rescale_q(original_pts, 
+                                                              ctx.ifmt_ctx->streams[ctx.video_stream_idx]->time_base,
+                                                              ctx.enc_ctx->time_base);
+                        } else {
+                            processed_frame->pts = next_pts;
+                        }
+                        next_pts = processed_frame->pts + 1;  // 更新next_pts
+                        
                         // 编码单帧
-                        processed_frame->pts = next_pts++;
                         std::vector<AVFrame*> single_frame = {processed_frame};
                         encodeAndWriteFrames(ctx, single_frame, next_pts);
                         
