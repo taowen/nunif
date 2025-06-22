@@ -216,15 +216,27 @@ public:
             output_size = required_output_size;
         }
         
+        // 参考官方示例，设置tensor地址
         context->setTensorAddress(input_name, d_input);
         context->setTensorAddress(output_name, d_output);
         
-        // Run inference
-        cudaStream_t stream;
-        cudaStreamCreate(&stream);
-        context->enqueueV3(stream);
-        cudaStreamSynchronize(stream);
-        cudaStreamDestroy(stream);
+        // 创建bindings数组（参考官方示例）
+        std::vector<void*> bindings(engine->getNbIOTensors());
+        for (int32_t i = 0, e = engine->getNbIOTensors(); i < e; i++) {
+            auto const name = engine->getIOTensorName(i);
+            if (std::string(name) == std::string(input_name)) {
+                bindings[i] = d_input;
+            } else if (std::string(name) == std::string(output_name)) {
+                bindings[i] = d_output;
+            }
+        }
+        
+        // 使用同步 API 执行推理（参考官方示例）
+        bool status = context->executeV2(bindings.data());
+        if (!status) {
+            std::cerr << "TensorRT synchronous execution failed" << std::endl;
+            return {};
+        }
         
         // Create output frames
         int out_H = output_dims.d[2];
