@@ -15,6 +15,7 @@ tmp
 *.xcf
 *.onnx
 *.trt
+*.trt_cache
 /data
 /deploy
 !/data/.keep
