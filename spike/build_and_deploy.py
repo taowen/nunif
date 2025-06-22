@@ -25,6 +25,23 @@ class DependencyAnalyzer:
         # Add common third-party library paths
         self.third_party_paths = self._get_third_party_paths()
         
+        # Check if pefile is available
+        self._check_pefile()
+        
+    def _check_pefile(self):
+        """Check if pefile is available and install if needed"""
+        try:
+            import pefile
+            print("pefile library found")
+        except ImportError:
+            print("pefile not installed. Installing...")
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "pefile"], check=True)
+                import pefile
+                print("pefile installed successfully")
+            except Exception as e:
+                raise RuntimeError(f"Failed to install pefile: {e}")
+        
     def _get_third_party_paths(self) -> List[Path]:
         """Get common third-party library installation paths"""
         paths = []
@@ -80,71 +97,13 @@ class DependencyAnalyzer:
         
         print(f"Third-party search paths: {[str(p) for p in paths]}")
         return paths
-        
-    def find_visual_studio_tools(self) -> Optional[Path]:
-        """Find Visual Studio tools directory"""
-        possible_paths = [
-            r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC",
-            r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\MSVC",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\VC\Tools\MSVC",
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Tools\MSVC",
-        ]
-        
-        for base_path in possible_paths:
-            if os.path.exists(base_path):
-                # Find the latest version
-                versions = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
-                if versions:
-                    latest_version = sorted(versions)[-1]
-                    tools_path = Path(base_path) / latest_version / "bin" / "Hostx64" / "x64"
-                    if tools_path.exists():
-                        return tools_path
-        return None
-    
-    def get_dependencies_dumpbin(self, exe_path: Path) -> Set[str]:
-        """Use dumpbin to get dependencies"""
-        tools_path = self.find_visual_studio_tools()
-        if not tools_path:
-            raise RuntimeError("Visual Studio tools not found")
-        
-        dumpbin_path = tools_path / "dumpbin.exe"
-        if not dumpbin_path.exists():
-            raise RuntimeError(f"dumpbin.exe not found at {dumpbin_path}")
-        
-        try:
-            result = subprocess.run([
-                str(dumpbin_path), "/dependents", str(exe_path)
-            ], capture_output=True, text=True, check=True)
-            
-            dependencies = set()
-            lines = result.stdout.split('\n')
-            in_section = False
-            
-            for line in lines:
-                line = line.strip()
-                if "Image has the following dependencies:" in line:
-                    in_section = True
-                    continue
-                elif in_section:
-                    if line == "" or "Summary" in line:
-                        break
-                    if line.endswith('.dll') or line.endswith('.DLL'):
-                        dependencies.add(line.lower())
-            
-            return dependencies
-        except subprocess.CalledProcessError as e:
-            print(f"dumpbin failed: {e}")
-            return set()
     
     def get_dependencies_pefile(self, exe_path: Path) -> Set[str]:
-        """Use pefile library to get dependencies (fallback method)"""
+        """Use pefile library to get dependencies"""
         try:
             import pefile
         except ImportError:
-            print("pefile not installed. Install with: pip install pefile")
-            return set()
+            raise RuntimeError("pefile library is required but not available")
         
         try:
             pe = pefile.PE(str(exe_path))
@@ -155,9 +114,10 @@ class DependencyAnalyzer:
                     dll_name = entry.dll.decode('utf-8').lower()
                     dependencies.add(dll_name)
             
+            pe.close()
             return dependencies
         except Exception as e:
-            print(f"pefile analysis failed: {e}")
+            print(f"pefile analysis failed for {exe_path}: {e}")
             return set()
     
     def find_dll_in_system(self, dll_name: str) -> Optional[Path]:
@@ -203,6 +163,28 @@ class DependencyAnalyzer:
         # Check against system DLL patterns
         return any(sys_dll in dll_lower for sys_dll in self.system_dlls)
     
+    def is_windows_system_dll(self, dll_path: Path) -> bool:
+        """Check if DLL is located in Windows system directories"""
+        try:
+            # Get the absolute path and resolve any symlinks
+            dll_abs_path = dll_path.resolve()
+            dll_path_str = str(dll_abs_path).lower()
+            
+            # Check if the DLL is in any Windows system directory
+            windows_dirs = [
+                r'c:\windows',
+                r'c:\program files\windows'
+            ]
+            
+            for windows_dir in windows_dirs:
+                if dll_path_str.startswith(windows_dir.lower()):
+                    return True
+            
+            return False
+        except Exception as e:
+            print(f"Error checking if {dll_path} is Windows system DLL: {e}")
+            return False
+    
     def analyze_dependencies(self, exe_path: Path, analyzed_files: Set[Path] = None) -> Set[Path]:
         """Analyze dependencies and return paths to DLLs that need to be copied"""
         if analyzed_files is None:
@@ -215,11 +197,8 @@ class DependencyAnalyzer:
         analyzed_files.add(exe_path)
         print(f"Analyzing dependencies for {exe_path}")
         
-        # Try dumpbin first, then pefile as fallback
-        deps = self.get_dependencies_dumpbin(exe_path)
-        if not deps:
-            print("Trying pefile as fallback...")
-            deps = self.get_dependencies_pefile(exe_path)
+        # Use pefile to analyze dependencies
+        deps = self.get_dependencies_pefile(exe_path)
         
         if not deps:
             print("No dependencies found or analysis failed")
@@ -240,6 +219,11 @@ class DependencyAnalyzer:
             
             dll_path = self.find_dll_in_system(dll_name)
             if dll_path:
+                # Check if DLL is in Windows directory (system DLL)
+                if self.is_windows_system_dll(dll_path):
+                    print(f"Skipping Windows system DLL: {dll_name} -> {dll_path}")
+                    continue
+                
                 dll_paths.add(dll_path)
                 print(f"Found: {dll_name} -> {dll_path}")
                 

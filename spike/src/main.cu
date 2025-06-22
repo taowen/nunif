@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include <NvInfer.h>
+#include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 
 // CUDA kernels
@@ -69,16 +70,26 @@ __global__ void chw_float_to_nv12_kernel(const float* __restrict__ src,
     }
 }
 
-// Simple logger
+// Enhanced logger with more detailed output
 class Logger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
+        const char* severity_str;
+        switch (severity) {
+            case Severity::kINTERNAL_ERROR: severity_str = "INTERNAL_ERROR"; break;
+            case Severity::kERROR: severity_str = "ERROR"; break;
+            case Severity::kWARNING: severity_str = "WARNING"; break;
+            case Severity::kINFO: severity_str = "INFO"; break;
+            case Severity::kVERBOSE: severity_str = "VERBOSE"; break;
+            default: severity_str = "UNKNOWN"; break;
+        }
+        
         if (severity <= Severity::kWARNING) {
-            std::cout << "TensorRT: " << msg << std::endl;
+            std::cout << "[TensorRT " << severity_str << "] " << msg << std::endl;
         }
     }
 };
 
-// Main processing class
+// Main processing class with ONNX support
 class VideoProcessor {
 private:
     std::unique_ptr<nvinfer1::IRuntime> runtime;
@@ -89,10 +100,169 @@ private:
     float* d_output = nullptr;
     size_t input_size = 0;
     size_t output_size = 0;
-    size_t max_input_size = 0;   // 添加最大尺寸限制
+    size_t max_input_size = 0;
     size_t max_output_size = 0;
     
     Logger logger;
+    
+    // Helper function to generate engine cache filename
+    std::string getEngineCachePath(const std::string& onnx_path) {
+        size_t last_dot = onnx_path.find_last_of('.');
+        if (last_dot != std::string::npos) {
+            return onnx_path.substr(0, last_dot) + ".trt";
+        }
+        return onnx_path + ".trt";
+    }
+    
+    // Build TensorRT engine from ONNX
+    bool buildEngineFromOnnx(const std::string& onnx_path) {
+        std::cout << "Building TensorRT engine from ONNX: " << onnx_path << std::endl;
+        
+        // Create builder and config
+        auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(logger));
+        if (!builder) {
+            std::cerr << "Failed to create TensorRT builder" << std::endl;
+            return false;
+        }
+        
+        auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+        if (!config) {
+            std::cerr << "Failed to create builder config" << std::endl;
+            return false;
+        }
+        
+        // Set builder config
+        config->setFlag(nvinfer1::BuilderFlag::kFP16);
+        
+        // Set memory pool size (adjust based on available GPU memory)
+        size_t total_mem, free_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        size_t workspace_size = std::min(free_mem / 4, 4ULL * 1024 * 1024 * 1024); // Max 4GB or 1/4 of free memory
+        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace_size);
+        
+        std::cout << "Setting workspace size: " << workspace_size / 1024 / 1024 << " MB" << std::endl;
+        
+        // Create network
+        const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+        auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
+        if (!network) {
+            std::cerr << "Failed to create network" << std::endl;
+            return false;
+        }
+        
+        // Create ONNX parser
+        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, logger));
+        if (!parser) {
+            std::cerr << "Failed to create ONNX parser" << std::endl;
+            return false;
+        }
+        
+        // Read ONNX file
+        std::ifstream onnx_file(onnx_path, std::ios::binary);
+        if (!onnx_file.good()) {
+            std::cerr << "Failed to open ONNX file: " << onnx_path << std::endl;
+            return false;
+        }
+        
+        onnx_file.seekg(0, onnx_file.end);
+        size_t file_size = onnx_file.tellg();
+        onnx_file.seekg(0, onnx_file.beg);
+        
+        std::vector<char> onnx_data(file_size);
+        onnx_file.read(onnx_data.data(), file_size);
+        onnx_file.close();
+        
+        // Parse ONNX model
+        if (!parser->parse(onnx_data.data(), file_size)) {
+            std::cerr << "Failed to parse ONNX model" << std::endl;
+            for (int i = 0; i < parser->getNbErrors(); ++i) {
+                std::cerr << "Parser error " << i << ": " << parser->getError(i)->desc() << std::endl;
+            }
+            return false;
+        }
+        
+        std::cout << "Successfully parsed ONNX model" << std::endl;
+        
+        // Print network information
+        std::cout << "Network has " << network->getNbInputs() << " inputs and " 
+                  << network->getNbOutputs() << " outputs" << std::endl;
+        
+        for (int i = 0; i < network->getNbInputs(); ++i) {
+            auto input = network->getInput(i);
+            auto dims = input->getDimensions();
+            std::cout << "Input " << i << " (" << input->getName() << "): ";
+            for (int j = 0; j < dims.nbDims; ++j) {
+                std::cout << dims.d[j];
+                if (j < dims.nbDims - 1) std::cout << "x";
+            }
+            std::cout << std::endl;
+        }
+        
+        // Set optimization profile for dynamic shapes
+        auto profile = builder->createOptimizationProfile();
+        auto input = network->getInput(0);
+        auto input_dims = input->getDimensions();
+        
+        // Set shape ranges (adjust based on your expected input sizes)
+        nvinfer1::Dims min_dims = input_dims;
+        nvinfer1::Dims opt_dims = input_dims;
+        nvinfer1::Dims max_dims = input_dims;
+        
+        // Example dynamic batch size and resolution
+        min_dims.d[0] = 1;    // min batch size
+        opt_dims.d[0] = 2;    // optimal batch size
+        max_dims.d[0] = 4;    // max batch size
+        
+        if (input_dims.nbDims == 4) { // NCHW format
+            min_dims.d[2] = 392;  min_dims.d[3] = 392;    // min resolution
+            opt_dims.d[2] = 1080; opt_dims.d[3] = 1920;   // optimal resolution  
+            max_dims.d[2] = 2160; max_dims.d[3] = 3840;   // max resolution (4K)
+        }
+        
+        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, min_dims);
+        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, opt_dims);
+        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, max_dims);
+        config->addOptimizationProfile(profile);
+        
+        std::cout << "Building engine... This may take several minutes." << std::endl;
+        
+        // Build engine
+        auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
+            builder->buildSerializedNetwork(*network, *config));
+        if (!serialized_engine) {
+            std::cerr << "Failed to build TensorRT engine" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Engine built successfully, size: " 
+                  << serialized_engine->size() / 1024 / 1024 << " MB" << std::endl;
+        
+        // Save engine to cache
+        std::string cache_path = getEngineCachePath(onnx_path);
+        std::ofstream cache_file(cache_path, std::ios::binary);
+        if (cache_file.good()) {
+            cache_file.write(static_cast<const char*>(serialized_engine->data()), 
+                           serialized_engine->size());
+            cache_file.close();
+            std::cout << "Engine cached to: " << cache_path << std::endl;
+        }
+        
+        // Create runtime and deserialize engine
+        runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+        if (!runtime) {
+            std::cerr << "Failed to create runtime" << std::endl;
+            return false;
+        }
+        
+        engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+            runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()));
+        if (!engine) {
+            std::cerr << "Failed to deserialize engine" << std::endl;
+            return false;
+        }
+        
+        return true;
+    }
     
 public:
     ~VideoProcessor() {
@@ -108,7 +278,62 @@ public:
         runtime.reset();
     }
     
-    bool loadEngine(const std::string& engine_path) {
+    // Modified to accept ONNX file and handle caching
+    bool loadModel(const std::string& model_path) {
+        std::string cache_path = getEngineCachePath(model_path);
+        
+        // Check if we have a cached engine that's newer than the ONNX file
+        std::ifstream onnx_file(model_path);
+        std::ifstream cache_file(cache_path);
+        
+        bool use_cache = false;
+        if (onnx_file.good() && cache_file.good()) {
+            // Simple timestamp check - you might want to implement a more robust check
+            onnx_file.close();
+            cache_file.close();
+            
+            // For now, always try to use cache if it exists
+            // You could add timestamp comparison here
+            use_cache = true;
+            std::cout << "Found cached engine: " << cache_path << std::endl;
+        }
+        
+        // Try to load from cache first
+        if (use_cache && loadEngineFromFile(cache_path)) {
+            std::cout << "Successfully loaded cached engine" << std::endl;
+        } else {
+            std::cout << "Building engine from ONNX..." << std::endl;
+            if (!buildEngineFromOnnx(model_path)) {
+                return false;
+            }
+        }
+        
+        // Create execution context
+        context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
+        if (!context) {
+            std::cerr << "Failed to create execution context" << std::endl;
+            return false;
+        }
+        
+        // Print memory usage
+        size_t total_mem, free_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        size_t engine_required = engine->getDeviceMemorySize();
+        size_t reserved_mem = std::max(1024ULL * 1024 * 1024, total_mem / 10);
+        size_t usable_mem = (free_mem > reserved_mem) ? (free_mem - reserved_mem) : 0;
+        
+        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Reserved Memory: " << reserved_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Usable Memory: " << usable_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+
+        return true;
+    }
+    
+private:
+    // Helper function to load engine from file
+    bool loadEngineFromFile(const std::string& engine_path) {
         std::ifstream file(engine_path, std::ios::binary);
         if (!file.good()) return false;
         
@@ -127,29 +352,11 @@ public:
             runtime->deserializeCudaEngine(buffer.data(), size));
         if (!engine) return false;
         
-        context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
-        if (!context) return false;
-        
-        // 更智能的内存管理策略
-        size_t total_mem, free_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        
-        size_t engine_required = engine->getDeviceMemorySize();
-        
-        // 预留给系统和其他操作的内存（至少1GB）
-        size_t reserved_mem = std::max(1024ULL * 1024 * 1024, total_mem / 10); // 1GB或总内存的10%，取较大值
-        size_t usable_mem = (free_mem > reserved_mem) ? (free_mem - reserved_mem) : 0;
-        
-        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Reserved Memory: " << reserved_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Usable Memory: " << usable_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
-
         return true;
     }
     
-    // 添加缓冲区大小限制方法
+public:
+    // ... rest of the existing methods remain the same ...
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
         max_input_size = max_input_mb * 1024 * 1024;
         max_output_size = max_output_mb * 1024 * 1024;
@@ -727,23 +934,23 @@ bool processNonVideoPacket(VideoContext& ctx, AVPacket* pkt) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <input_video> <output_video> [batch_size]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <onnx_model> <input_video> <output_video> [batch_size]" << std::endl;
         return 1;
     }
     
     // Record start time
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    std::string engine_path = "stereo_module_half_sbs.trt";  // 写死engine路径
-    int batch_size = (argc > 3) ? std::stoi(argv[3]) : 2;   // 调整参数索引
+    std::string onnx_path = argv[1];      // ONNX model path
+    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
     
     // Initialize video context
     VideoContext ctx;
-    ctx.input_path = argv[1];   // 调整参数索引
-    ctx.output_path = argv[2];  // 调整参数索引
+    ctx.input_path = argv[2];   // Input video
+    ctx.output_path = argv[3];  // Output video
     
     std::cout << "=== Video Processing Setup ===" << std::endl;
-    std::cout << "Engine: " << engine_path << std::endl;
+    std::cout << "ONNX Model: " << onnx_path << std::endl;
     std::cout << "Input: " << ctx.input_path << std::endl;
     std::cout << "Output: " << ctx.output_path << std::endl;
     std::cout << "Batch size: " << batch_size << std::endl;
@@ -767,8 +974,9 @@ int main(int argc, char** argv) {
     
     processor.setMaxBufferSize(max_input_mb, max_output_mb);
     
-    if (!processor.loadEngine(engine_path)) {
-        std::cerr << "\n❌ Failed to load engine" << std::endl;
+    // Load ONNX model and build/load TensorRT engine
+    if (!processor.loadModel(onnx_path)) {
+        std::cerr << "\n❌ Failed to load ONNX model and build TensorRT engine" << std::endl;
         return 1;
     }
     

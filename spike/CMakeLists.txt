@@ -228,3 +228,21 @@ if(WIN32)
     # Set runtime library to match CUDA requirements
     set_property(TARGET spike PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
+
+# 添加 ONNX Runtime
+set(ONNXRUNTIME_ROOT_PATH "" CACHE PATH "ONNX Runtime install path")
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+    HINTS ${ONNXRUNTIME_ROOT_PATH}/include
+)
+find_library(ONNXRUNTIME_LIB onnxruntime
+    HINTS ${ONNXRUNTIME_ROOT_PATH}/lib
+)
+
+if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+    target_include_directories(spike PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+    target_link_libraries(spike ${ONNXRUNTIME_LIB})
+    target_compile_definitions(spike PRIVATE ONNXRUNTIME_AVAILABLE)
+    message(STATUS "ONNX Runtime found: ${ONNXRUNTIME_LIB}")
+else()
+    message(WARNING "ONNX Runtime not found")
+endif()
