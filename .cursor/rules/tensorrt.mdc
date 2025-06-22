@@ -1,0 +1,90 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+直接回答
+TensorRT 10 的 executeV3 和 enqueueV3 API 相较于版本 8 的 executeV2 和 enqueueV2 有显著变化，主要体现在需要明确设置张量地址。
+研究表明，版本 10 要求在使用 executeV3（Python）或 enqueueV3（C++）之前，先通过 set_tensor_address 或 setTensorAddress 设置张量地址，而版本 8 则是直接传递绑定（bindings）。
+证据倾向于认为，这种变化提高了灵活性，特别适合处理动态形状模型，并通过名称-based 的张量寻址增强了代码的可读性。
+旧 API 与新 API 的对比
+在 TensorRT 8 中：
+Python 使用 context.execute_async_v2(bindings=[...], stream_handle=stream.handle)，直接传递绑定。
+C++ 使用 context->enqueueV2(buffers.getDeviceBindings().data(), stream, nullptr)，同样直接传递绑定。
+在 TensorRT 10 中：
+Python 需要先调用 context.set_tensor_address(tensor_name, tensor)，然后使用 context.execute_async_v3(stream_handle=stream.handle)。
+C++ 需要先调用 context->setTensorAddress(tensor_name.c_str(), tensor_ptr)，然后使用 context->enqueueV3(stream)。
+主要差异
+明确设置张量地址：TensorRT 10 要求在执行前明确设置张量地址，使用名称-based 的方法，而不是直接传递绑定数组。这减少了绑定索引管理的复杂性，特别适合动态形状模型。
+名称-based 寻址：新 API 使用张量名称（如 "input_tensor"）而非数值索引，使代码更直观，降低出错风险。
+移除旧 API：executeV2 和 enqueueV2 在 TensorRT 10 中已被移除，全部替换为 executeV3 和 enqueueV3。
+为什么进行这些更改
+这些更改似乎是为了提高 API 的灵活性和可维护性，特别是在处理复杂模型时。通过名称-based 寻址，开发者可以更轻松地管理多个输入和输出，尤其是在动态形状场景下。
+更多详细信息可参考官方文档和样本代码，例如 TensorRT 迁移指南 和 TensorRT 样本代码。
+详细报告
+TensorRT 是 NVIDIA 开发的高性能深度学习推理优化器和运行时，广泛用于在 NVIDIA GPU 上运行优化后的深度学习模型。从版本 8 到版本 10，API 发生了显著变化，特别是与推理执行相关的 executeV3 和 enqueueV3 API。以下是基于官方文档和相关资源的详细分析，涵盖了这些变化的背景、具体差异以及潜在的影响。
+背景与概述
+TensorRT 提供 C++ 和 Python API，用于构建和执行优化后的推理引擎。在版本 8 中，推理执行主要依赖 executeV2（Python）和 enqueueV2（C++）API，这些 API 允许用户直接传递设备指针（bindings）来指定输入和输出张量的内存地址。然而，在版本 10 中，这些 API 被 executeV3 和 enqueueV3 所取代，引入了更明确、更灵活的张量地址设置机制。
+根据 TensorRT 迁移指南，这些变化旨在提升 API 的可用性和适应性，特别是针对动态形状模型和复杂网络结构的需求。
+具体 API 变化
+以下是版本 8 和版本 10 中相关 API 的对比，基于迁移指南和相关文档的总结：
+API 类别
+TensorRT 8 (旧)
+TensorRT 10 (新)
+Python
+context.execute_async_v2(bindings=[int(d_inp) for d_inp in d_inputs] + [int(d_output)], stream_handle=stream.handle)
+context.execute_async_v3(stream_handle=stream.handle)（需先用 context.set_tensor_address 设置张量地址）
+C++
+context->enqueueV2(buffers.getDeviceBindings().data(), stream, nullptr)
+context->enqueueV3(stream)（需先用 context->setTensorAddress 设置张量地址）
+详细说明
+旧 API 的工作方式：
+在 TensorRT 8 中，executeV2 和 enqueueV2 要求用户提供一个绑定数组（bindings），其中包含输入和输出张量的设备指针。这些指针通常通过 getDeviceBindings() 方法获取，并按顺序排列以匹配引擎的绑定索引。
+例如，在 C++ 中，buffers.getDeviceBindings().data() 返回一个指针数组，用户需要确保绑定顺序与引擎定义的输入输出顺序一致。
+这种方法在静态形状模型中较为直观，但在动态形状或多个输入输出场景下，管理绑定索引可能变得复杂且容易出错。
+新 API 的工作方式：
+在 TensorRT 10 中，executeV3 和 enqueueV3 不直接接受绑定数组。相反，用户需要在调用这些 API 之前，明确设置每个张量的设备内存地址，使用名称-based 的方法。
+在 Python 中，调用 context.set_tensor_address(tensor_name, tensor)，其中 tensor_name 是张量的名称（如 "input_tensor"），tensor 是对应的设备内存地址。
+在 C++ 中，调用 context->setTensorAddress(tensor_name.c_str(), tensor_ptr)，同样使用张量名称和指针。
+设置完成后，调用 context.execute_async_v3(stream_handle=stream.handle)（Python）或 context->enqueueV3(stream)（C++）执行推理。
+移除的 API：
+根据迁移指南，IExecutionContext::execute() 在早期版本中已被移除，并由 executeV2 取代。而在 TensorRT 10 中，executeV2 和 enqueueV2 也被完全移除，分别由 executeV3 和 enqueueV3 取代。
+此外，安全 API（如 safe::IExecutionContext::enqueueV2）也已移除，统一采用新 API。
+主要差异与影响
+以下是新旧 API 之间的关键差异及其潜在影响：
+明确设置张量地址：
+旧 API 依赖绑定数组，用户需要手动管理绑定顺序，这在复杂模型中可能导致索引错误。新 API 要求在执行前明确设置每个张量的地址，减少了绑定管理的复杂性。
+例如，在 C++ 中，旧方法需要确保 buffers.getDeviceBindings().data() 的顺序正确，而新方法通过 setTensorAddress 直接关联名称和地址，降低了出错风险。
+名称-based 寻址：
+新 API 使用张量名称（如 "input_tensor"）而非数值索引，这与现代深度学习框架（如 ONNX、PyTorch）的命名惯例更一致。
+这种方法提高了代码的可读性和可维护性，特别适合处理多个输入输出或动态形状的模型。
+动态形状支持：
+迁移指南指出，新 API 的设计特别适合动态形状模型。在 TensorRT 10 中，通过名称-based 寻址，可以更灵活地处理运行时变化的张量大小，而无需重新计算绑定索引。
+性能与灵活性：
+虽然迁移指南未明确说明性能差异，但名称-based 寻址可能减少了绑定管理的开销，尤其是在多输入多输出场景下。此外，明确设置地址可能优化内存管理，特别是在 GPU 资源有限的情况下。
+样本代码示例
+虽然具体样本代码中未直接找到 enqueueV3 的使用示例，但根据迁移指南的指引，可以推测以下模式：
+Python 示例：
+python
+for tensor_name, tensor in tensors.items():
+    context.set_tensor_address(tensor_name, tensor)
+context.execute_async_v3(stream_handle=stream.handle)
+这里，tensors 是一个字典，键为张量名称，值为设备内存地址。
+C++ 示例：
+cpp
+for (const auto& tensor_name : tensor_names) {
+    context->setTensorAddress(tensor_name.c_str(), tensor_ptr);
+}
+context->enqueueV3(stream);
+这里，tensor_names 是一个包含张量名称的列表，tensor_ptr 是对应的设备指针。
+更多详细示例可参考 TensorRT 样本代码，其中包含多种场景的实现，特别是在 Python 和 C++ 的异步执行部分。
+潜在原因与未来方向
+这些更改似乎是为了适应深度学习模型的复杂性增加，特别是动态形状和多输入输出的需求。通过名称-based 寻址，TensorRT 10 的 API 更贴近现代框架的开发习惯，可能有助于降低开发者的学习曲线并提高生产效率。
+此外，移除旧 API 符合软件开发的版本控制原则，确保 API 的向前兼容性和一致性。根据 TensorRT 发布说明，TensorRT 10 的多个版本（如 10.12.0 GA）继续优化插件和解析器，表明 NVIDIA 致力于持续改进 API 的功能和性能。
+结论
+TensorRT 10 的 executeV3 和 enqueueV3 API 相较于版本 8 的 executeV2 和 enqueueV2 引入了更明确、更灵活的张量地址设置机制。通过名称-based 寻址，开发者可以更轻松地管理复杂模型，特别是在动态形状场景下。这种变化提高了代码的可读性和可维护性，同时可能优化了内存管理和性能。建议开发者参考官方迁移指南和样本代码以适应这些更改。
+关键引文
+TensorRT 迁移指南
+TensorRT 样本代码
+
+TensorRT 发布说明

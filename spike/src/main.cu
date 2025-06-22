@@ -27,17 +27,35 @@ class Logger : public nvinfer1::ILogger {
     }
 };
 
+// 添加异步处理结构
+struct AsyncFrame {
+    AVFrame* input_frame = nullptr;
+    AVFrame* output_frame = nullptr;
+    float* d_input_buffer = nullptr;
+    float* d_output_buffer = nullptr;
+    cudaEvent_t decode_event;
+    cudaEvent_t inference_event;
+    cudaEvent_t encode_event;
+    int64_t pts = 0;
+    bool in_use = false;
+};
+
 // Main processing class
 class VideoProcessor {
+public:
+    static const int PIPELINE_DEPTH = 3;  // pipeline深度
 private:
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     
-    float* d_input_nv12 = nullptr;
-    float* d_output_nv12 = nullptr;
-    size_t input_size = 0;
-    size_t output_size = 0;
+    // 异步处理相关
+    std::vector<AsyncFrame> async_frames;
+    cudaStream_t decode_stream;
+    cudaStream_t inference_stream;
+    cudaStream_t encode_stream;
+    
+    size_t buffer_size_per_frame = 0;
     size_t max_input_size = 0;
     size_t max_output_size = 0;
     
@@ -149,8 +167,24 @@ public:
     
     void cleanup() {
         cudaDeviceSynchronize();
-        if (d_input_nv12) cudaFree(d_input_nv12);
-        if (d_output_nv12) cudaFree(d_output_nv12);
+        
+        // 清理异步帧
+        for (auto& async_frame : async_frames) {
+            if (async_frame.d_input_buffer) cudaFree(async_frame.d_input_buffer);
+            if (async_frame.d_output_buffer) cudaFree(async_frame.d_output_buffer);
+            if (async_frame.input_frame) av_frame_free(&async_frame.input_frame);
+            if (async_frame.output_frame) av_frame_free(&async_frame.output_frame);
+            cudaEventDestroy(async_frame.decode_event);
+            cudaEventDestroy(async_frame.inference_event);
+            cudaEventDestroy(async_frame.encode_event);
+        }
+        async_frames.clear();
+        
+        // 清理CUDA流
+        cudaStreamDestroy(decode_stream);
+        cudaStreamDestroy(inference_stream);
+        cudaStreamDestroy(encode_stream);
+        
         context.reset();
         engine.reset();
         runtime.reset();
@@ -159,128 +193,148 @@ public:
     bool loadOnnx(const std::string& onnx_path) {
         std::string cache_path = getCacheFilePath(onnx_path);
         
-        // 首先尝试从缓存加载
         if (isCacheValid(onnx_path, cache_path)) {
             if (loadEngineFromCache(cache_path)) {
-                // 打印内存使用情况
-                size_t total_mem, free_mem;
-                cudaMemGetInfo(&free_mem, &total_mem);
-                size_t engine_required = engine->getDeviceMemorySize();
-                
-                std::cout << "Engine loaded from cache - GPU Memory:" << std::endl;
-                std::cout << "  Total: " << total_mem / 1024 / 1024 << " MB" << std::endl;
-                std::cout << "  Available: " << free_mem / 1024 / 1024 << " MB" << std::endl;
-                std::cout << "  Engine Required: " << engine_required / 1024 / 1024 << " MB" << std::endl;
-                
-                return true;
-            } else {
-                std::cout << "Failed to load from cache, will rebuild engine" << std::endl;
+                return initializeAsyncPipeline();
             }
-        } else {
-            std::cout << "No valid cache found, building new engine" << std::endl;
         }
         
-        // 缓存无效或加载失败，重新构建引擎
-        return buildEngineFromOnnx(onnx_path, cache_path);
+        if (buildEngineFromOnnx(onnx_path, cache_path)) {
+            return initializeAsyncPipeline();
+        }
+        return false;
     }
     
-    // 修改缓冲区大小限制方法
+    // 初始化异步pipeline
+    bool initializeAsyncPipeline() {
+        // 创建CUDA流
+        cudaStreamCreate(&decode_stream);
+        cudaStreamCreate(&inference_stream);
+        cudaStreamCreate(&encode_stream);
+        
+        // 初始化异步帧缓冲
+        async_frames.resize(PIPELINE_DEPTH);
+        for (int i = 0; i < PIPELINE_DEPTH; i++) {
+            AsyncFrame& frame = async_frames[i];
+            
+            // 创建事件
+            cudaEventCreate(&frame.decode_event);
+            cudaEventCreate(&frame.inference_event);
+            cudaEventCreate(&frame.encode_event);
+            
+            frame.in_use = false;
+        }
+        
+        std::cout << "Async pipeline initialized with depth " << PIPELINE_DEPTH << std::endl;
+        return true;
+    }
+    
+    // 设置缓冲区大小
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
         max_input_size = max_input_mb * 1024 * 1024;
         max_output_size = max_output_mb * 1024 * 1024;
     }
     
-    // 将 processBatch 改为 processFrame，处理单帧
-    AVFrame* processFrame(AVFrame* frame, AVBufferRef* hw_device_ctx) {
-        if (!frame) return nullptr;
+    // 获取可用的异步帧槽位
+    AsyncFrame* getAvailableFrame() {
+        for (auto& frame : async_frames) {
+            if (!frame.in_use) {
+                frame.in_use = true;
+                return &frame;
+            }
+        }
+        return nullptr;
+    }
+    
+    // 异步解码阶段
+    bool asyncDecode(AsyncFrame* async_frame, AVFrame* input_frame, AVBufferRef* hw_device_ctx) {
+        const int height = input_frame->height;
+        const int width = input_frame->width;
         
-        const int height = frame->height;
-        const int width = frame->width;
-        
-        // 计算NV12格式的数据大小：Y平面 + UV平面(高度的一半)
+        // 计算NV12格式的数据大小
         size_t nv12_elements = height * width + (height / 2) * width;
-        size_t nv12_size_uint8 = nv12_elements * sizeof(uint8_t);  // uint8 大小
+        size_t nv12_size_uint8 = nv12_elements * sizeof(uint8_t);
         
-        // 限制缓冲区大小
-        if (max_input_size > 0 && nv12_size_uint8 > max_input_size) {
-            std::cerr << "Warning: Required input size exceeds limit" << std::endl;
-            return nullptr;
+        // 分配或重用缓冲区
+        if (!async_frame->d_input_buffer || buffer_size_per_frame != nv12_size_uint8) {
+            if (async_frame->d_input_buffer) cudaFree(async_frame->d_input_buffer);
+            cudaMalloc(&async_frame->d_input_buffer, nv12_size_uint8);
+            buffer_size_per_frame = nv12_size_uint8;
         }
         
-        // 分配输入缓冲区 (直接使用 uint8_t)
-        if (nv12_size_uint8 > input_size) {
-            if (d_input_nv12) cudaFree(d_input_nv12);
-            cudaMalloc(&d_input_nv12, nv12_size_uint8);
-            input_size = nv12_size_uint8;
-            std::cout << "Allocated input buffer: " << nv12_size_uint8 / 1024 / 1024 << " MB" << std::endl;
-        }
-        
-        // 直接将NV12数据从AVFrame复制到GPU内存（无需类型转换）
+        // 异步复制NV12数据到GPU
         // Y平面
-        cudaMemcpy2D(d_input_nv12, width, 
-                     frame->data[0], frame->linesize[0], 
-                     width, height, 
-                     cudaMemcpyDeviceToDevice);
+        cudaMemcpy2DAsync(async_frame->d_input_buffer, width,
+                         input_frame->data[0], input_frame->linesize[0],
+                         width, height,
+                         cudaMemcpyDeviceToDevice, decode_stream);
         
         // UV平面
-        cudaMemcpy2D((uint8_t*)d_input_nv12 + height * width, width,
-                     frame->data[1], frame->linesize[1],
-                     width, height / 2,
-                     cudaMemcpyDeviceToDevice);
+        cudaMemcpy2DAsync((uint8_t*)async_frame->d_input_buffer + height * width, width,
+                         input_frame->data[1], input_frame->linesize[1],
+                         width, height / 2,
+                         cudaMemcpyDeviceToDevice, decode_stream);
         
-        cudaDeviceSynchronize();
+        // 记录解码完成事件
+        cudaEventRecord(async_frame->decode_event, decode_stream);
+        
+        // 保存帧信息
+        async_frame->pts = input_frame->pts;
+        
+        return true;
+    }
+    
+    // 异步推理阶段
+    bool asyncInference(AsyncFrame* async_frame, int width, int height) {
+        // 等待解码完成
+        cudaStreamWaitEvent(inference_stream, async_frame->decode_event, 0);
         
         // Setup TensorRT inference
         const char* input_name = engine->getIOTensorName(0);
         const char* output_name = engine->getIOTensorName(1);
         
-        // 设置输入形状：NV12格式为 (height + height/2, width)
+        // 设置输入形状
         nvinfer1::Dims input_shape;
         input_shape.nbDims = 2;
-        input_shape.d[0] = height + height / 2;  // Y平面高度 + UV平面高度
+        input_shape.d[0] = height + height / 2;
         input_shape.d[1] = width;
         
         context->setInputShape(input_name, input_shape);
         auto output_dims = context->getTensorShape(output_name);
         
-        // 计算输出大小 (也是 uint8)
+        // 计算输出大小
         size_t output_elements = 1;
         for(int j = 0; j < output_dims.nbDims; ++j) {
             output_elements *= output_dims.d[j];
         }
-        size_t required_output_size = output_elements * sizeof(uint8_t);  // 使用 uint8 大小
+        size_t required_output_size = output_elements * sizeof(uint8_t);
         
-        if (required_output_size > output_size) {
-            if (d_output_nv12) cudaFree(d_output_nv12);
-            cudaMalloc(&d_output_nv12, required_output_size);
-            output_size = required_output_size;
+        // 分配输出缓冲区
+        if (!async_frame->d_output_buffer) {
+            cudaMalloc(&async_frame->d_output_buffer, required_output_size);
         }
         
         // 设置tensor地址
-        context->setTensorAddress(input_name, d_input_nv12);
-        context->setTensorAddress(output_name, d_output_nv12);
+        context->setTensorAddress(input_name, async_frame->d_input_buffer);
+        context->setTensorAddress(output_name, async_frame->d_output_buffer);
         
-        // 创建bindings数组
-        std::vector<void*> bindings(engine->getNbIOTensors());
-        for (int32_t i = 0, e = engine->getNbIOTensors(); i < e; i++) {
-            auto const name = engine->getIOTensorName(i);
-            if (std::string(name) == std::string(input_name)) {
-                bindings[i] = d_input_nv12;
-            } else if (std::string(name) == std::string(output_name)) {
-                bindings[i] = d_output_nv12;
-            }
-        }
+        // 异步执行推理
+        context->enqueueV3(inference_stream);
         
-        // 执行推理
-        bool status = context->executeV2(bindings.data());
-        if (!status) {
-            std::cerr << "TensorRT synchronous execution failed" << std::endl;
-            return nullptr;
-        }
+        // 记录推理完成事件
+        cudaEventRecord(async_frame->inference_event, inference_stream);
+        
+        return true;
+    }
+    
+    // 异步编码准备阶段
+    AVFrame* asyncEncodePrep(AsyncFrame* async_frame, int width, int height, AVBufferRef* hw_device_ctx) {
+        // 等待推理完成
+        cudaStreamWaitEvent(encode_stream, async_frame->inference_event, 0);
         
         // 创建输出帧
-        int out_H = output_dims.d[0] * 2 / 3;  // 从NV12格式恢复原始高度
-        int out_W = output_dims.d[1];
+        int out_H = height;
+        int out_W = width;
         
         AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
         AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
@@ -291,26 +345,47 @@ public:
         hw_frames_ctx->initial_pool_size = 2;
         av_hwframe_ctx_init(hw_frames_ref);
         
-        AVFrame* output_frame = av_frame_alloc();
-        av_hwframe_get_buffer(hw_frames_ref, output_frame, 0);
+        if (!async_frame->output_frame) {
+            async_frame->output_frame = av_frame_alloc();
+        }
         
-        // 直接将推理结果复制到输出帧（无需类型转换）
+        av_hwframe_get_buffer(hw_frames_ref, async_frame->output_frame, 0);
+        
+        // 异步复制推理结果到输出帧
         // Y平面
-        cudaMemcpy2D(output_frame->data[0], output_frame->linesize[0],
-                     d_output_nv12, out_W,
-                     out_W, out_H,
-                     cudaMemcpyDeviceToDevice);
+        cudaMemcpy2DAsync(async_frame->output_frame->data[0], async_frame->output_frame->linesize[0],
+                         async_frame->d_output_buffer, out_W,
+                         out_W, out_H,
+                         cudaMemcpyDeviceToDevice, encode_stream);
         
         // UV平面
-        cudaMemcpy2D(output_frame->data[1], output_frame->linesize[1],
-                     (uint8_t*)d_output_nv12 + out_H * out_W, out_W,
-                     out_W, out_H / 2,
-                     cudaMemcpyDeviceToDevice);
+        cudaMemcpy2DAsync(async_frame->output_frame->data[1], async_frame->output_frame->linesize[1],
+                         (uint8_t*)async_frame->d_output_buffer + out_H * out_W, out_W,
+                         out_W, out_H / 2,
+                         cudaMemcpyDeviceToDevice, encode_stream);
+        
+        // 记录编码准备完成事件
+        cudaEventRecord(async_frame->encode_event, encode_stream);
+        
+        // 设置PTS
+        async_frame->output_frame->pts = async_frame->pts;
         
         av_buffer_unref(&hw_frames_ref);
-        cudaDeviceSynchronize();
-        
-        return output_frame;
+        return async_frame->output_frame;
+    }
+    
+    // 检查异步帧是否准备好编码
+    bool isFrameReadyForEncode(AsyncFrame* async_frame) {
+        return cudaEventQuery(async_frame->encode_event) == cudaSuccess;
+    }
+    
+    // 释放异步帧
+    void releaseAsyncFrame(AsyncFrame* async_frame) {
+        if (async_frame->output_frame) {
+            av_frame_free(&async_frame->output_frame);
+            async_frame->output_frame = nullptr;
+        }
+        async_frame->in_use = false;
     }
 
 private:
@@ -911,7 +986,7 @@ int main(int argc, char** argv) {
     ctx.input_path = argv[1];
     ctx.output_path = argv[2];
     
-    std::cout << "=== Video Processing Setup ===" << std::endl;
+    std::cout << "=== Async Pipeline Video Processing Setup ===" << std::endl;
     std::cout << "ONNX Model: " << onnx_path << std::endl;
     std::cout << "Input: " << ctx.input_path << std::endl;
     std::cout << "Output: " << ctx.output_path << std::endl;
@@ -924,13 +999,15 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
     printMemoryUsage();
     
+    // 为pipeline分配更多内存
     size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024;
     size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
     
-    size_t max_input_mb = std::min(128ULL, remaining_mem / 1024 / 1024 / 3);  // NV12占用更少内存
-    size_t max_output_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 2);
+    // 为3个pipeline阶段分配缓冲区
+    size_t max_input_mb = std::min(128ULL, remaining_mem / 1024 / 1024 / 6);
+    size_t max_output_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 4);
     
-    std::cout << "Setting buffer limits - Input: " << max_input_mb 
+    std::cout << "Setting async buffer limits - Input: " << max_input_mb 
               << "MB, Output: " << max_output_mb << "MB" << std::endl;
     
     processor.setMaxBufferSize(max_input_mb, max_output_mb);
@@ -947,85 +1024,79 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Setup input decoder
+    // Setup input decoder and output encoder
     if (!setupInputDecoder(ctx)) {
         cleanupVideoContext(ctx);
         return 1;
     }
     
-    // 输出输入文件的流信息
-    std::cout << "\n=== Input File Stream Information ===" << std::endl;
-    for (unsigned int i = 0; i < ctx.ifmt_ctx->nb_streams; i++) {
-        AVStream* stream = ctx.ifmt_ctx->streams[i];
-        const char* media_type = av_get_media_type_string(stream->codecpar->codec_type);
-        const char* codec_name = avcodec_get_name(stream->codecpar->codec_id);
-        std::cout << "Stream " << i << ": " << media_type << " (" << codec_name << ")";
-        
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            std::cout << ", " << stream->codecpar->ch_layout.nb_channels 
-                      << " channels, " << stream->codecpar->sample_rate << " Hz";
-        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            std::cout << ", " << stream->codecpar->width << "x" << stream->codecpar->height;
-        }
-        std::cout << std::endl;
-    }
-    
-    // Setup output encoder
     if (!setupOutputEncoder(ctx)) {
         cleanupVideoContext(ctx);
         return 1;
     }
     
-    // 修改处理循环，去掉批处理
+    // Pipeline处理循环
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     int frame_count = 0;
     bool encoder_initialized = false;
     int64_t next_pts = 0;
     
-    std::cout << "\n=== Processing Video ===" << std::endl;
+    std::vector<AsyncFrame*> pending_frames;  // 等待编码的帧
+    
+    std::cout << "\n=== Processing Video with Async Pipeline ===" << std::endl;
     
     while (av_read_frame(ctx.ifmt_ctx, pkt) >= 0) {
         if (pkt->stream_index == ctx.video_stream_idx) {
             // 处理视频流
             if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
                 while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
-                    // 保存原始PTS，并转换到编码器的时间基准
-                    int64_t original_pts = frame->pts;
-                    
-                    AVFrame* processed_frame = processor.processFrame(frame, ctx.hw_device_ctx);
-                    
-                    if (processed_frame) {
-                        if (!encoder_initialized) {
-                            if (!initializeEncoder(ctx, processed_frame)) {
-                                cleanupVideoContext(ctx);
-                                return 1;
+                    // 获取可用的异步帧槽位
+                    AsyncFrame* async_frame = processor.getAvailableFrame();
+                    if (async_frame) {
+                        // 启动异步解码
+                        if (processor.asyncDecode(async_frame, frame, ctx.hw_device_ctx)) {
+                            // 启动异步推理
+                            processor.asyncInference(async_frame, frame->width, frame->height);
+                            
+                            // 准备异步编码
+                            AVFrame* output_frame = processor.asyncEncodePrep(async_frame, frame->width, frame->height, ctx.hw_device_ctx);
+                            
+                            if (output_frame) {
+                                if (!encoder_initialized) {
+                                    if (!initializeEncoder(ctx, output_frame)) {
+                                        cleanupVideoContext(ctx);
+                                        return 1;
+                                    }
+                                    encoder_initialized = true;
+                                    std::cout << "Encoder initialized with async pipeline" << std::endl;
+                                }
+                                
+                                // 添加到待编码队列
+                                pending_frames.push_back(async_frame);
                             }
-                            encoder_initialized = true;
-                            std::cout << "Encoder initialized, processing streams..." << std::endl;
                         }
+                    } else {
+                        // 没有可用槽位，需要等待编码完成
+                        std::cout << "Pipeline full, waiting for encode completion..." << std::endl;
+                        cudaDeviceSynchronize();  // 强制同步，等待所有操作完成
                         
-                        // 使用原始PTS，转换到编码器时间基准
-                        if (original_pts != AV_NOPTS_VALUE) {
-                            processed_frame->pts = av_rescale_q(original_pts, 
-                                                              ctx.ifmt_ctx->streams[ctx.video_stream_idx]->time_base,
-                                                              ctx.enc_ctx->time_base);
-                        } else {
-                            processed_frame->pts = next_pts;
-                        }
-                        next_pts = processed_frame->pts + 1;  // 更新next_pts
-                        
-                        // 编码单帧
-                        std::vector<AVFrame*> single_frame = {processed_frame};
-                        encodeAndWriteFrames(ctx, single_frame, next_pts);
-                        
-                        // 清理
-                        av_frame_free(&processed_frame);
-                        frame_count++;
-                        
-                        // Display progress
-                        if (frame_count % 30 == 0) {  // 每30帧显示一次进度
-                            displayProgress(frame_count, ctx.total_frames, start_time);
+                        // 处理所有待编码帧
+                        for (auto it = pending_frames.begin(); it != pending_frames.end();) {
+                            AsyncFrame* pending_frame = *it;
+                            if (processor.isFrameReadyForEncode(pending_frame)) {
+                                // 编码帧
+                                pending_frame->output_frame->pts = next_pts++;
+                                std::vector<AVFrame*> single_frame = {pending_frame->output_frame};
+                                encodeAndWriteFrames(ctx, single_frame, next_pts);
+                                
+                                // 释放异步帧
+                                processor.releaseAsyncFrame(pending_frame);
+                                it = pending_frames.erase(it);
+                                frame_count++;
+                            } else {
+                                ++it;
+                            }
                         }
                     }
                 }
@@ -1037,12 +1108,47 @@ int main(int argc, char** argv) {
             }
         }
         
+        // 检查并编码已准备好的帧
+        for (auto it = pending_frames.begin(); it != pending_frames.end();) {
+            AsyncFrame* pending_frame = *it;
+            if (processor.isFrameReadyForEncode(pending_frame)) {
+                // 编码帧
+                pending_frame->output_frame->pts = next_pts++;
+                std::vector<AVFrame*> single_frame = {pending_frame->output_frame};
+                encodeAndWriteFrames(ctx, single_frame, next_pts);
+                
+                // 释放异步帧
+                processor.releaseAsyncFrame(pending_frame);
+                it = pending_frames.erase(it);
+                frame_count++;
+                
+                // Display progress
+                if (frame_count % 30 == 0) {
+                    displayProgress(frame_count, ctx.total_frames, start_time);
+                }
+            } else {
+                ++it;
+            }
+        }
+        
         av_packet_unref(pkt);
         
         // Memory check
         if (frame_count % 100 == 0) {
             printMemoryUsage();
         }
+    }
+    
+    // 处理剩余的待编码帧
+    std::cout << "Processing remaining frames..." << std::endl;
+    cudaDeviceSynchronize();  // 确保所有GPU操作完成
+    
+    for (AsyncFrame* pending_frame : pending_frames) {
+        pending_frame->output_frame->pts = next_pts++;
+        std::vector<AVFrame*> single_frame = {pending_frame->output_frame};
+        encodeAndWriteFrames(ctx, single_frame, next_pts);
+        processor.releaseAsyncFrame(pending_frame);
+        frame_count++;
     }
     
     // Finalize encoder
@@ -1055,20 +1161,21 @@ int main(int argc, char** argv) {
     av_frame_free(&frame);
     cleanupVideoContext(ctx);
     
-    // Print total processing time
+    // Print performance statistics
     auto end_time = std::chrono::high_resolution_clock::now();
     auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     double total_sec = total_elapsed.count() / 1000.0;
     int total_min = (int)(total_sec / 60);
     int total_sec_part = (int)(total_sec) % 60;
     
-    std::cout << "\n=== Processing Complete ===" << std::endl;
+    std::cout << "\n=== Async Pipeline Processing Complete ===" << std::endl;
     std::cout << "Total frames processed: " << frame_count << std::endl;
     std::cout << "Total time: " << total_min << "m" << total_sec_part << "s" << std::endl;
     if (frame_count > 0) {
         std::cout << "Average speed: " << std::fixed << std::setprecision(2) 
                   << (frame_count / total_sec) << " fps" << std::endl;
     }
+    std::cout << "Pipeline depth: " << VideoProcessor::PIPELINE_DEPTH << " frames" << std::endl;
     
     return 0;
 }
