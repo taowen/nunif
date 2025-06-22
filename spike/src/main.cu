@@ -18,59 +18,6 @@ extern "C" {
 #include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 
-// CUDA kernels
-__global__ void nv12_to_chw_float_kernel(const uint8_t* __restrict__ y_plane, const uint8_t* __restrict__ uv_plane, 
-                                          float* __restrict__ dst, int W, int H, int y_pitch, int uv_pitch) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= W * H) return;
-    
-    int h = idx / W;
-    int w = idx % W;
-    
-    float y = y_plane[h * y_pitch + w] / 255.0f;
-    int uv_h = h / 2;
-    int uv_w = (w / 2) * 2;
-    float u = uv_plane[uv_h * uv_pitch + uv_w] / 255.0f - 0.5f;
-    float v = uv_plane[uv_h * uv_pitch + uv_w + 1] / 255.0f - 0.5f;
-    
-    float r = fmaxf(0.0f, fminf(1.0f, y + 1.402f * v));
-    float g = fmaxf(0.0f, fminf(1.0f, y - 0.344136f * u - 0.714136f * v));
-    float b = fmaxf(0.0f, fminf(1.0f, y + 1.772f * u));
-    
-    dst[0 * H * W + h * W + w] = r;
-    dst[1 * H * W + h * W + w] = g;
-    dst[2 * H * W + h * W + w] = b;
-}
-
-__global__ void chw_float_to_nv12_kernel(const float* __restrict__ src, 
-                                          uint8_t* __restrict__ y_plane,
-                                          uint8_t* __restrict__ uv_plane,
-                                          int W, int H, int y_pitch, int uv_pitch) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= W * H) return;
-    
-    int h = idx / W;
-    int w = idx % W;
-    
-    float r = fmaxf(0.0f, fminf(1.0f, src[0 * H * W + h * W + w]));
-    float g = fmaxf(0.0f, fminf(1.0f, src[1 * H * W + h * W + w]));
-    float b = fmaxf(0.0f, fminf(1.0f, src[2 * H * W + h * W + w]));
-    
-    float y = 0.299f * r + 0.587f * g + 0.114f * b;
-    y_plane[h * y_pitch + w] = static_cast<uint8_t>(y * 255.0f + 0.5f);
-    
-    if (h % 2 == 0 && w % 2 == 0) {
-        float u = -0.169f * r - 0.331f * g + 0.5f * b + 0.5f;
-        float v = 0.5f * r - 0.419f * g - 0.081f * b + 0.5f;
-        
-        int uv_h = h / 2;
-        int uv_w = w / 2;
-        
-        uv_plane[uv_h * uv_pitch + uv_w * 2] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, u)) * 255.0f + 0.5f);
-        uv_plane[uv_h * uv_pitch + uv_w * 2 + 1] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, v)) * 255.0f + 0.5f);
-    }
-}
-
 // Simple logger
 class Logger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
@@ -87,8 +34,8 @@ private:
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     
-    float* d_input = nullptr;
-    float* d_output = nullptr;
+    float* d_input_nv12 = nullptr;
+    float* d_output_nv12 = nullptr;
     size_t input_size = 0;
     size_t output_size = 0;
     size_t max_input_size = 0;
@@ -202,8 +149,8 @@ public:
     
     void cleanup() {
         cudaDeviceSynchronize();
-        if (d_input) { cudaFree(d_input); d_input = nullptr; }
-        if (d_output) { cudaFree(d_output); d_output = nullptr; }
+        if (d_input_nv12) cudaFree(d_input_nv12);
+        if (d_output_nv12) cudaFree(d_output_nv12);
         context.reset();
         engine.reset();
         runtime.reset();
@@ -237,99 +184,103 @@ public:
         return buildEngineFromOnnx(onnx_path, cache_path);
     }
     
-    // 添加缓冲区大小限制方法
+    // 修改缓冲区大小限制方法
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
         max_input_size = max_input_mb * 1024 * 1024;
         max_output_size = max_output_mb * 1024 * 1024;
     }
     
-    std::vector<AVFrame*> processBatch(const std::vector<AVFrame*>& frames, AVBufferRef* hw_device_ctx) {
-        if (frames.empty()) return {};
+    // 将 processBatch 改为 processFrame，处理单帧
+    AVFrame* processFrame(AVFrame* frame, AVBufferRef* hw_device_ctx) {
+        if (!frame) return nullptr;
         
-        const int batch_size = frames.size();
-        const int height = frames[0]->height;
-        const int width = frames[0]->width;
-        const int channels = 3;
+        const int height = frame->height;
+        const int width = frame->width;
+        
+        // 计算NV12格式的数据大小：Y平面 + UV平面(高度的一半)
+        size_t nv12_elements = height * width + (height / 2) * width;
+        size_t nv12_size_uint8 = nv12_elements * sizeof(uint8_t);  // uint8 大小
         
         // 限制缓冲区大小
-        size_t required_input_size = batch_size * channels * height * width * sizeof(float);
-        if (max_input_size > 0 && required_input_size > max_input_size) {
-            std::cerr << "Warning: Required input size exceeds limit, processing smaller batches" << std::endl;
-            // 可以考虑分割batch或降低精度
+        if (max_input_size > 0 && nv12_size_uint8 > max_input_size) {
+            std::cerr << "Warning: Required input size exceeds limit" << std::endl;
+            return nullptr;
         }
         
-        if (required_input_size > input_size) {
-            if (d_input) cudaFree(d_input);
-            cudaMalloc(&d_input, required_input_size);
-            input_size = required_input_size;
-            
-            std::cout << "Allocated input buffer: " << required_input_size / 1024 / 1024 << " MB" << std::endl;
+        // 分配输入缓冲区 (直接使用 uint8_t)
+        if (nv12_size_uint8 > input_size) {
+            if (d_input_nv12) cudaFree(d_input_nv12);
+            cudaMalloc(&d_input_nv12, nv12_size_uint8);
+            input_size = nv12_size_uint8;
+            std::cout << "Allocated input buffer: " << nv12_size_uint8 / 1024 / 1024 << " MB" << std::endl;
         }
         
-        // Preprocess: NV12 -> CHW Float
-        for (int i = 0; i < batch_size; ++i) {
-            float* batch_offset = d_input + i * channels * height * width;
-            int threads = 256;
-            int blocks = (width * height + threads - 1) / threads;
-            
-            nv12_to_chw_float_kernel<<<blocks, threads>>>(
-                frames[i]->data[0], frames[i]->data[1], batch_offset, 
-                width, height, frames[i]->linesize[0], frames[i]->linesize[1]);
-        }
+        // 直接将NV12数据从AVFrame复制到GPU内存（无需类型转换）
+        // Y平面
+        cudaMemcpy2D(d_input_nv12, width, 
+                     frame->data[0], frame->linesize[0], 
+                     width, height, 
+                     cudaMemcpyDeviceToDevice);
+        
+        // UV平面
+        cudaMemcpy2D((uint8_t*)d_input_nv12 + height * width, width,
+                     frame->data[1], frame->linesize[1],
+                     width, height / 2,
+                     cudaMemcpyDeviceToDevice);
+        
         cudaDeviceSynchronize();
         
         // Setup TensorRT inference
         const char* input_name = engine->getIOTensorName(0);
         const char* output_name = engine->getIOTensorName(1);
         
+        // 设置输入形状：NV12格式为 (height + height/2, width)
         nvinfer1::Dims input_shape;
-        input_shape.nbDims = 4;
-        input_shape.d[0] = batch_size;
-        input_shape.d[1] = channels;
-        input_shape.d[2] = height;
-        input_shape.d[3] = width;
+        input_shape.nbDims = 2;
+        input_shape.d[0] = height + height / 2;  // Y平面高度 + UV平面高度
+        input_shape.d[1] = width;
         
         context->setInputShape(input_name, input_shape);
         auto output_dims = context->getTensorShape(output_name);
         
+        // 计算输出大小 (也是 uint8)
         size_t output_elements = 1;
         for(int j = 0; j < output_dims.nbDims; ++j) {
             output_elements *= output_dims.d[j];
         }
-        size_t required_output_size = output_elements * sizeof(float);
+        size_t required_output_size = output_elements * sizeof(uint8_t);  // 使用 uint8 大小
         
         if (required_output_size > output_size) {
-            if (d_output) cudaFree(d_output);
-            cudaMalloc(&d_output, required_output_size);
+            if (d_output_nv12) cudaFree(d_output_nv12);
+            cudaMalloc(&d_output_nv12, required_output_size);
             output_size = required_output_size;
         }
         
-        // 参考官方示例，设置tensor地址
-        context->setTensorAddress(input_name, d_input);
-        context->setTensorAddress(output_name, d_output);
+        // 设置tensor地址
+        context->setTensorAddress(input_name, d_input_nv12);
+        context->setTensorAddress(output_name, d_output_nv12);
         
-        // 创建bindings数组（参考官方示例）
+        // 创建bindings数组
         std::vector<void*> bindings(engine->getNbIOTensors());
         for (int32_t i = 0, e = engine->getNbIOTensors(); i < e; i++) {
             auto const name = engine->getIOTensorName(i);
             if (std::string(name) == std::string(input_name)) {
-                bindings[i] = d_input;
+                bindings[i] = d_input_nv12;
             } else if (std::string(name) == std::string(output_name)) {
-                bindings[i] = d_output;
+                bindings[i] = d_output_nv12;
             }
         }
         
-        // 使用同步 API 执行推理（参考官方示例）
+        // 执行推理
         bool status = context->executeV2(bindings.data());
         if (!status) {
             std::cerr << "TensorRT synchronous execution failed" << std::endl;
-            return {};
+            return nullptr;
         }
         
-        // Create output frames
-        int out_H = output_dims.d[2];
-        int out_W = output_dims.d[3];
-        int out_C = output_dims.d[1];
+        // 创建输出帧
+        int out_H = output_dims.d[0] * 2 / 3;  // 从NV12格式恢复原始高度
+        int out_W = output_dims.d[1];
         
         AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
         AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
@@ -337,29 +288,29 @@ public:
         hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
         hw_frames_ctx->width = out_W;
         hw_frames_ctx->height = out_H;
-        hw_frames_ctx->initial_pool_size = batch_size + 1;
+        hw_frames_ctx->initial_pool_size = 2;
         av_hwframe_ctx_init(hw_frames_ref);
         
-        std::vector<AVFrame*> output_frames;
-        for (int i = 0; i < batch_size; ++i) {
-            AVFrame* cuda_frame = av_frame_alloc();
-            av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0);
-            
-            float* frame_chw = d_output + i * out_C * out_H * out_W;
-            int threads = 256;
-            int blocks = (out_W * out_H + threads - 1) / threads;
-            
-            chw_float_to_nv12_kernel<<<blocks, threads>>>(
-                frame_chw, cuda_frame->data[0], cuda_frame->data[1], 
-                out_W, out_H, cuda_frame->linesize[0], cuda_frame->linesize[1]);
-            
-            output_frames.push_back(cuda_frame);
-        }
+        AVFrame* output_frame = av_frame_alloc();
+        av_hwframe_get_buffer(hw_frames_ref, output_frame, 0);
+        
+        // 直接将推理结果复制到输出帧（无需类型转换）
+        // Y平面
+        cudaMemcpy2D(output_frame->data[0], output_frame->linesize[0],
+                     d_output_nv12, out_W,
+                     out_W, out_H,
+                     cudaMemcpyDeviceToDevice);
+        
+        // UV平面
+        cudaMemcpy2D(output_frame->data[1], output_frame->linesize[1],
+                     (uint8_t*)d_output_nv12 + out_H * out_W, out_W,
+                     out_W, out_H / 2,
+                     cudaMemcpyDeviceToDevice);
         
         av_buffer_unref(&hw_frames_ref);
         cudaDeviceSynchronize();
         
-        return output_frames;
+        return output_frame;
     }
 
 private:
@@ -422,14 +373,14 @@ private:
             return false;
         }
         
-        // Set shape constraints for input tensor
         auto input = network->getInput(0);
         auto inputName = input->getName();
         
-        // Min: 1x3x392x392, Opt: 1x3x392x392, Max: 2x3x2160x3840
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{1, 3, 392, 392});
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{1, 3, 392, 392});
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{2, 3, 2160, 3840});
+        // NV12格式的形状约束：(height + height/2, width)
+        // Min: 392 + 196 = 588, Opt: 392 + 196 = 588, Max: 2160 + 1080 = 3240
+        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2{588, 392});
+        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2{588, 392});
+        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2{3240, 3840});
         
         config->addOptimizationProfile(profile);
         
@@ -946,15 +897,14 @@ bool processNonVideoPacket(VideoContext& ctx, AVPacket* pkt) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <input_video> <output_video> [batch_size]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_video> <output_video>" << std::endl;
         return 1;
     }
     
     // Record start time
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    std::string onnx_path = "stereo_module_half_sbs.onnx";
-    int batch_size = (argc > 3) ? std::stoi(argv[3]) : 2;
+    std::string onnx_path = "stereo_module_nv12.onnx";  // 使用新的NV12模型
     
     // Initialize video context
     VideoContext ctx;
@@ -965,7 +915,6 @@ int main(int argc, char** argv) {
     std::cout << "ONNX Model: " << onnx_path << std::endl;
     std::cout << "Input: " << ctx.input_path << std::endl;
     std::cout << "Output: " << ctx.output_path << std::endl;
-    std::cout << "Batch size: " << batch_size << std::endl;
     
     VideoProcessor processor;
     
@@ -978,8 +927,8 @@ int main(int argc, char** argv) {
     size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024;
     size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
     
-    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);
-    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);
+    size_t max_input_mb = std::min(128ULL, remaining_mem / 1024 / 1024 / 3);  // NV12占用更少内存
+    size_t max_output_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 2);
     
     std::cout << "Setting buffer limits - Input: " << max_input_mb 
               << "MB, Output: " << max_output_mb << "MB" << std::endl;
@@ -1027,10 +976,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // Process frames
+    // 修改处理循环，去掉批处理
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
-    std::vector<AVFrame*> frame_buffer;
     int frame_count = 0;
     bool encoder_initialized = false;
     int64_t next_pts = 0;
@@ -1042,16 +990,13 @@ int main(int argc, char** argv) {
             // 处理视频流
             if (avcodec_send_packet(ctx.dec_ctx, pkt) == 0) {
                 while (avcodec_receive_frame(ctx.dec_ctx, frame) == 0) {
-                    AVFrame* ref_frame = av_frame_alloc();
-                    av_frame_ref(ref_frame, frame);
-                    frame_buffer.push_back(ref_frame);
+                    // 直接处理单帧，不再批处理
+                    AVFrame* processed_frame = processor.processFrame(frame, ctx.hw_device_ctx);
                     
-                    if (frame_buffer.size() >= batch_size) {
-                        auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
-                        
-                        // Initialize encoder on first batch
+                    if (processed_frame) {
+                        // Initialize encoder on first frame
                         if (!encoder_initialized) {
-                            if (!initializeEncoder(ctx, processed_frames[0])) {
+                            if (!initializeEncoder(ctx, processed_frame)) {
                                 cleanupVideoContext(ctx);
                                 return 1;
                             }
@@ -1059,23 +1004,25 @@ int main(int argc, char** argv) {
                             std::cout << "Encoder initialized, processing streams..." << std::endl;
                         }
                         
-                        // Encode frames
-                        encodeAndWriteFrames(ctx, processed_frames, next_pts);
+                        // 编码单帧
+                        processed_frame->pts = next_pts++;
+                        std::vector<AVFrame*> single_frame = {processed_frame};
+                        encodeAndWriteFrames(ctx, single_frame, next_pts);
                         
-                        // Cleanup processed frames
-                        for (auto f : processed_frames) av_frame_free(&f);
-                        for (auto f : frame_buffer) av_frame_free(&f);
-                        frame_buffer.clear();
-                        frame_count += processed_frames.size();
+                        // 清理
+                        av_frame_free(&processed_frame);
+                        frame_count++;
                         
                         // Display progress
-                        displayProgress(frame_count, ctx.total_frames, start_time);
+                        if (frame_count % 30 == 0) {  // 每30帧显示一次进度
+                            displayProgress(frame_count, ctx.total_frames, start_time);
+                        }
                     }
                 }
             }
         } else {
             // 处理音频、字幕等其他流
-            if (encoder_initialized) {  // 只有在编码器初始化后才开始写入其他流
+            if (encoder_initialized) {
                 processNonVideoPacket(ctx, pkt);
             }
         }
@@ -1086,18 +1033,6 @@ int main(int argc, char** argv) {
         if (frame_count % 100 == 0) {
             printMemoryUsage();
         }
-    }
-    
-    // Process remaining frames
-    if (!frame_buffer.empty() && encoder_initialized) {
-        auto processed_frames = processor.processBatch(frame_buffer, ctx.hw_device_ctx);
-        encodeAndWriteFrames(ctx, processed_frames, next_pts);
-        
-        for (auto f : processed_frames) av_frame_free(&f);
-        for (auto f : frame_buffer) av_frame_free(&f);
-        
-        frame_count += processed_frames.size();
-        std::cout << "Processed remaining " << processed_frames.size() << " frames" << std::endl;
     }
     
     // Finalize encoder
