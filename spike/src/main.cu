@@ -726,21 +726,21 @@ bool processNonVideoPacket(VideoContext& ctx, AVPacket* pkt) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <engine_path> <input_video> <output_video> [batch_size]" << std::endl;
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <input_video> <output_video> [batch_size]" << std::endl;
         return 1;
     }
     
     // Record start time
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    std::string engine_path = argv[1];
-    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
+    std::string engine_path = "stereo_module_half_sbs.trt";  // 写死engine路径
+    int batch_size = (argc > 3) ? std::stoi(argv[3]) : 2;   // 调整参数索引
     
     // Initialize video context
     VideoContext ctx;
-    ctx.input_path = argv[2];
-    ctx.output_path = argv[3];
+    ctx.input_path = argv[1];   // 调整参数索引
+    ctx.output_path = argv[2];  // 调整参数索引
     
     std::cout << "=== Video Processing Setup ===" << std::endl;
     std::cout << "Engine: " << engine_path << std::endl;

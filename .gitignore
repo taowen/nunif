@@ -16,6 +16,7 @@ tmp
 *.onnx
 *.trt
 /data
+/deploy
 !/data/.keep
 /models
 !/models/.keep
