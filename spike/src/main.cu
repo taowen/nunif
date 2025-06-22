@@ -358,8 +358,10 @@ private:
 public:
     // ... rest of the existing methods remain the same ...
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
-        max_input_size = max_input_mb * 1024 * 1024;
-        max_output_size = max_output_mb * 1024 * 1024;
+        // 移除限制，仅保留接口兼容性
+        // max_input_size = max_input_mb * 1024 * 1024;
+        // max_output_size = max_output_mb * 1024 * 1024;
+        std::cout << "Memory limits removed - will allocate as needed" << std::endl;
     }
     
     std::vector<AVFrame*> processBatch(const std::vector<AVFrame*>& frames, AVBufferRef* hw_device_ctx) {
@@ -370,12 +372,8 @@ public:
         const int width = frames[0]->width;
         const int channels = 3;
         
-        // 限制缓冲区大小
+        // 直接按需分配内存，不进行限制检查
         size_t required_input_size = batch_size * channels * height * width * sizeof(float);
-        if (max_input_size > 0 && required_input_size > max_input_size) {
-            std::cerr << "Warning: Required input size exceeds limit, processing smaller batches" << std::endl;
-            // 可以考虑分割batch或降低精度
-        }
         
         if (required_input_size > input_size) {
             if (d_input) cudaFree(d_input);
@@ -963,16 +961,10 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
     printMemoryUsage();
     
-    size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024;
-    size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
+    std::cout << "Using specified batch size: " << batch_size << " (no memory limits)" << std::endl;
     
-    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);
-    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);
-    
-    std::cout << "Setting buffer limits - Input: " << max_input_mb 
-              << "MB, Output: " << max_output_mb << "MB" << std::endl;
-    
-    processor.setMaxBufferSize(max_input_mb, max_output_mb);
+    // 调用但不设置实际限制
+    processor.setMaxBufferSize(0, 0);
     
     // Load ONNX model and build/load TensorRT engine
     if (!processor.loadModel(onnx_path)) {

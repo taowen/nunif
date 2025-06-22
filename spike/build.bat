@@ -7,4 +7,4 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 popd
-spike\build\Debug\spike.exe sim.onnx "C:\Users\taowen\Downloads\06 4k.mp4" "C:\Users\taowen\Downloads\test.mkv"
+spike\build\Debug\spike.exe sim.onnx "C:\Users\taowen\Downloads\06 4k.mp4" "C:\Users\taowen\Downloads\test.mkv" 4
