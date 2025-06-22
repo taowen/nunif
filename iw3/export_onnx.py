@@ -55,7 +55,7 @@ class StereoDepthModule(nn.Module):
     def forward(self, x):
         # x: BCHW, float32, 0-1, on correct device
         depth = self.depth_model_wrapper.infer(
-            x, tta=False, low_vram=False, enable_amp=True, edge_dilation=1, depth_aa=False
+            x, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
         )
         depth = self.depth_model_wrapper.minmax_normalize_chw(depth)  # BCHW
         depth = mapper(depth)
@@ -70,7 +70,7 @@ class StereoDepthModule(nn.Module):
             mapper='none',
             synthetic_view='both',
             preserve_screen_border=False,
-            enable_amp=True
+            enable_amp=False
         )
         # resize left/right to half width
         B, C, H, W = left.shape
@@ -115,7 +115,7 @@ print('done')
 import onnxruntime as ort
 import numpy as np
 
-ort_session = ort.InferenceSession("sim.onnx", providers=['CPUExecutionProvider'])
+ort_session = ort.InferenceSession("stereo_module_half_sbs.onnx", providers=['CPUExecutionProvider'])
 x_numpy = x.cpu().numpy()
 onnx_outputs = ort_session.run(None, {"input": x_numpy})
 onnx_half_sbs = onnx_outputs[0]

@@ -14,254 +14,85 @@ extern "C" {
 }
 
 #include <NvInfer.h>
-#include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 
-// CUDA kernel for NV12 data copying/batching
-__global__ void copy_nv12_kernel(const uint8_t* __restrict__ src_y, const uint8_t* __restrict__ src_uv,
-                                  uint8_t* __restrict__ dst, int W, int H, 
-                                  int src_y_pitch, int src_uv_pitch, int batch_idx) {
+// CUDA kernels
+__global__ void nv12_to_chw_float_kernel(const uint8_t* __restrict__ y_plane, const uint8_t* __restrict__ uv_plane, 
+                                          float* __restrict__ dst, int W, int H, int y_pitch, int uv_pitch) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pixels = W * H;
-    int nv12_size = H + H / 2; // Total height in NV12 format
+    if (idx >= W * H) return;
     
-    if (idx >= W * nv12_size) return;
+    int h = idx / W;
+    int w = idx % W;
     
-    int dst_offset = batch_idx * W * nv12_size;
+    float y = y_plane[h * y_pitch + w] / 255.0f;
+    int uv_h = h / 2;
+    int uv_w = (w / 2) * 2;
+    float u = uv_plane[uv_h * uv_pitch + uv_w] / 255.0f - 0.5f;
+    float v = uv_plane[uv_h * uv_pitch + uv_w + 1] / 255.0f - 0.5f;
     
-    if (idx < total_pixels) {
-        // Copy Y plane
-        int h = idx / W;
-        int w = idx % W;
-        dst[dst_offset + idx] = src_y[h * src_y_pitch + w];
-    } else {
-        // Copy UV plane
-        int uv_idx = idx - total_pixels;
-        int uv_h = uv_idx / W;
-        int uv_w = uv_idx % W;
-        dst[dst_offset + total_pixels + uv_idx] = src_uv[uv_h * src_uv_pitch + uv_w];
+    float r = fmaxf(0.0f, fminf(1.0f, y + 1.402f * v));
+    float g = fmaxf(0.0f, fminf(1.0f, y - 0.344136f * u - 0.714136f * v));
+    float b = fmaxf(0.0f, fminf(1.0f, y + 1.772f * u));
+    
+    dst[0 * H * W + h * W + w] = r;
+    dst[1 * H * W + h * W + w] = g;
+    dst[2 * H * W + h * W + w] = b;
+}
+
+__global__ void chw_float_to_nv12_kernel(const float* __restrict__ src, 
+                                          uint8_t* __restrict__ y_plane,
+                                          uint8_t* __restrict__ uv_plane,
+                                          int W, int H, int y_pitch, int uv_pitch) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= W * H) return;
+    
+    int h = idx / W;
+    int w = idx % W;
+    
+    float r = fmaxf(0.0f, fminf(1.0f, src[0 * H * W + h * W + w]));
+    float g = fmaxf(0.0f, fminf(1.0f, src[1 * H * W + h * W + w]));
+    float b = fmaxf(0.0f, fminf(1.0f, src[2 * H * W + h * W + w]));
+    
+    float y = 0.299f * r + 0.587f * g + 0.114f * b;
+    y_plane[h * y_pitch + w] = static_cast<uint8_t>(y * 255.0f + 0.5f);
+    
+    if (h % 2 == 0 && w % 2 == 0) {
+        float u = -0.169f * r - 0.331f * g + 0.5f * b + 0.5f;
+        float v = 0.5f * r - 0.419f * g - 0.081f * b + 0.5f;
+        
+        int uv_h = h / 2;
+        int uv_w = w / 2;
+        
+        uv_plane[uv_h * uv_pitch + uv_w * 2] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, u)) * 255.0f + 0.5f);
+        uv_plane[uv_h * uv_pitch + uv_w * 2 + 1] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, v)) * 255.0f + 0.5f);
     }
 }
 
-// CUDA kernel for NV12 data extraction from batch
-__global__ void extract_nv12_kernel(const uint8_t* __restrict__ src, 
-                                     uint8_t* __restrict__ dst_y, uint8_t* __restrict__ dst_uv,
-                                     int W, int H, int dst_y_pitch, int dst_uv_pitch, int batch_idx) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pixels = W * H;
-    int nv12_size = H + H / 2;
-    
-    if (idx >= W * nv12_size) return;
-    
-    int src_offset = batch_idx * W * nv12_size;
-    
-    if (idx < total_pixels) {
-        // Extract Y plane
-        int h = idx / W;
-        int w = idx % W;
-        dst_y[h * dst_y_pitch + w] = src[src_offset + idx];
-    } else {
-        // Extract UV plane
-        int uv_idx = idx - total_pixels;
-        int uv_h = uv_idx / W;
-        int uv_w = uv_idx % W;
-        dst_uv[uv_h * dst_uv_pitch + uv_w] = src[src_offset + total_pixels + uv_idx];
-    }
-}
-
-// Enhanced logger with more detailed output
+// Simple logger
 class Logger : public nvinfer1::ILogger {
     void log(Severity severity, const char* msg) noexcept override {
-        const char* severity_str;
-        switch (severity) {
-            case Severity::kINTERNAL_ERROR: severity_str = "INTERNAL_ERROR"; break;
-            case Severity::kERROR: severity_str = "ERROR"; break;
-            case Severity::kWARNING: severity_str = "WARNING"; break;
-            case Severity::kINFO: severity_str = "INFO"; break;
-            case Severity::kVERBOSE: severity_str = "VERBOSE"; break;
-            default: severity_str = "UNKNOWN"; break;
-        }
-        
         if (severity <= Severity::kWARNING) {
-            std::cout << "[TensorRT " << severity_str << "] " << msg << std::endl;
+            std::cout << "TensorRT: " << msg << std::endl;
         }
     }
 };
 
-// Main processing class with ONNX support
+// Main processing class
 class VideoProcessor {
 private:
     std::unique_ptr<nvinfer1::IRuntime> runtime;
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     
-    uint8_t* d_input = nullptr;   // Changed to uint8_t for NV12 data
-    uint8_t* d_output = nullptr;  // Changed to uint8_t for NV12 data
+    float* d_input = nullptr;
+    float* d_output = nullptr;
     size_t input_size = 0;
     size_t output_size = 0;
-    size_t max_input_size = 0;
+    size_t max_input_size = 0;   // 添加最大尺寸限制
     size_t max_output_size = 0;
     
     Logger logger;
-    
-    // Helper function to generate engine cache filename
-    std::string getEngineCachePath(const std::string& onnx_path) {
-        size_t last_dot = onnx_path.find_last_of('.');
-        if (last_dot != std::string::npos) {
-            return onnx_path.substr(0, last_dot) + ".trt";
-        }
-        return onnx_path + ".trt";
-    }
-    
-    // Build TensorRT engine from ONNX
-    bool buildEngineFromOnnx(const std::string& onnx_path) {
-        std::cout << "Building TensorRT engine from ONNX: " << onnx_path << std::endl;
-        
-        // Create builder and config
-        auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(logger));
-        if (!builder) {
-            std::cerr << "Failed to create TensorRT builder" << std::endl;
-            return false;
-        }
-        
-        auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-        if (!config) {
-            std::cerr << "Failed to create builder config" << std::endl;
-            return false;
-        }
-        
-        // Set builder config
-        config->setFlag(nvinfer1::BuilderFlag::kFP16);
-        
-        // Set memory pool size (adjust based on available GPU memory)
-        size_t total_mem, free_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        size_t workspace_size = std::min(free_mem / 4, 4ULL * 1024 * 1024 * 1024); // Max 4GB or 1/4 of free memory
-        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace_size);
-        
-        std::cout << "Setting workspace size: " << workspace_size / 1024 / 1024 << " MB" << std::endl;
-        
-        // Create network
-        const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-        auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
-        if (!network) {
-            std::cerr << "Failed to create network" << std::endl;
-            return false;
-        }
-        
-        // Create ONNX parser
-        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, logger));
-        if (!parser) {
-            std::cerr << "Failed to create ONNX parser" << std::endl;
-            return false;
-        }
-        
-        // Read ONNX file
-        std::ifstream onnx_file(onnx_path, std::ios::binary);
-        if (!onnx_file.good()) {
-            std::cerr << "Failed to open ONNX file: " << onnx_path << std::endl;
-            return false;
-        }
-        
-        onnx_file.seekg(0, onnx_file.end);
-        size_t file_size = onnx_file.tellg();
-        onnx_file.seekg(0, onnx_file.beg);
-        
-        std::vector<char> onnx_data(file_size);
-        onnx_file.read(onnx_data.data(), file_size);
-        onnx_file.close();
-        
-        // Parse ONNX model
-        if (!parser->parse(onnx_data.data(), file_size)) {
-            std::cerr << "Failed to parse ONNX model" << std::endl;
-            for (int i = 0; i < parser->getNbErrors(); ++i) {
-                std::cerr << "Parser error " << i << ": " << parser->getError(i)->desc() << std::endl;
-            }
-            return false;
-        }
-        
-        std::cout << "Successfully parsed ONNX model" << std::endl;
-        
-        // Print network information
-        std::cout << "Network has " << network->getNbInputs() << " inputs and " 
-                  << network->getNbOutputs() << " outputs" << std::endl;
-        
-        for (int i = 0; i < network->getNbInputs(); ++i) {
-            auto input = network->getInput(i);
-            auto dims = input->getDimensions();
-            std::cout << "Input " << i << " (" << input->getName() << "): ";
-            for (int j = 0; j < dims.nbDims; ++j) {
-                std::cout << dims.d[j];
-                if (j < dims.nbDims - 1) std::cout << "x";
-            }
-            std::cout << std::endl;
-        }
-        
-        // Set optimization profile for dynamic shapes
-        auto profile = builder->createOptimizationProfile();
-        auto input = network->getInput(0);
-        auto input_dims = input->getDimensions();
-        
-        // Set shape ranges for NV12 format (B, H + H//2, W)
-        nvinfer1::Dims min_dims = input_dims;
-        nvinfer1::Dims opt_dims = input_dims;
-        nvinfer1::Dims max_dims = input_dims;
-        
-        // Example dynamic batch size and resolution
-        min_dims.d[0] = 1;    // min batch size
-        opt_dims.d[0] = 2;    // optimal batch size
-        max_dims.d[0] = 4;    // max batch size
-        
-        if (input_dims.nbDims == 3) { // NV12 format: (B, H + H/2, W)
-            min_dims.d[1] = 392 + 392/2;  min_dims.d[2] = 392;    // min resolution
-            opt_dims.d[1] = 1080 + 1080/2; opt_dims.d[2] = 1920;   // optimal resolution  
-            max_dims.d[1] = 2160 + 2160/2; max_dims.d[2] = 3840;   // max resolution (4K)
-        }
-        
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, min_dims);
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, opt_dims);
-        profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, max_dims);
-        config->addOptimizationProfile(profile);
-        
-        std::cout << "Building engine... This may take several minutes." << std::endl;
-        
-        // Build engine
-        auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
-            builder->buildSerializedNetwork(*network, *config));
-        if (!serialized_engine) {
-            std::cerr << "Failed to build TensorRT engine" << std::endl;
-            return false;
-        }
-        
-        std::cout << "Engine built successfully, size: " 
-                  << serialized_engine->size() / 1024 / 1024 << " MB" << std::endl;
-        
-        // Save engine to cache
-        std::string cache_path = getEngineCachePath(onnx_path);
-        std::ofstream cache_file(cache_path, std::ios::binary);
-        if (cache_file.good()) {
-            cache_file.write(static_cast<const char*>(serialized_engine->data()), 
-                           serialized_engine->size());
-            cache_file.close();
-            std::cout << "Engine cached to: " << cache_path << std::endl;
-        }
-        
-        // Create runtime and deserialize engine
-        runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
-        if (!runtime) {
-            std::cerr << "Failed to create runtime" << std::endl;
-            return false;
-        }
-        
-        engine = std::unique_ptr<nvinfer1::ICudaEngine>(
-            runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()));
-        if (!engine) {
-            std::cerr << "Failed to deserialize engine" << std::endl;
-            return false;
-        }
-        
-        return true;
-    }
     
 public:
     ~VideoProcessor() {
@@ -277,57 +108,7 @@ public:
         runtime.reset();
     }
     
-    bool loadModel(const std::string& model_path) {
-        std::string cache_path = getEngineCachePath(model_path);
-        
-        // Check if we have a cached engine that's newer than the ONNX file
-        std::ifstream onnx_file(model_path);
-        std::ifstream cache_file(cache_path);
-        
-        bool use_cache = false;
-        if (onnx_file.good() && cache_file.good()) {
-            onnx_file.close();
-            cache_file.close();
-            use_cache = true;
-            std::cout << "Found cached engine: " << cache_path << std::endl;
-        }
-        
-        // Try to load from cache first
-        if (use_cache && loadEngineFromFile(cache_path)) {
-            std::cout << "Successfully loaded cached engine" << std::endl;
-        } else {
-            std::cout << "Building engine from ONNX..." << std::endl;
-            if (!buildEngineFromOnnx(model_path)) {
-                return false;
-            }
-        }
-        
-        // Create execution context
-        context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
-        if (!context) {
-            std::cerr << "Failed to create execution context" << std::endl;
-            return false;
-        }
-        
-        // Print memory usage
-        size_t total_mem, free_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        size_t engine_required = engine->getDeviceMemorySize();
-        size_t reserved_mem = std::max(1024ULL * 1024 * 1024, total_mem / 10);
-        size_t usable_mem = (free_mem > reserved_mem) ? (free_mem - reserved_mem) : 0;
-        
-        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Reserved Memory: " << reserved_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Usable Memory: " << usable_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
-
-        return true;
-    }
-    
-private:
-    // Helper function to load engine from file
-    bool loadEngineFromFile(const std::string& engine_path) {
+    bool loadEngine(const std::string& engine_path) {
         std::ifstream file(engine_path, std::ios::binary);
         if (!file.good()) return false;
         
@@ -346,12 +127,32 @@ private:
             runtime->deserializeCudaEngine(buffer.data(), size));
         if (!engine) return false;
         
+        context = std::unique_ptr<nvinfer1::IExecutionContext>(engine->createExecutionContext());
+        if (!context) return false;
+        
+        // 更智能的内存管理策略
+        size_t total_mem, free_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        
+        size_t engine_required = engine->getDeviceMemorySize();
+        
+        // 预留给系统和其他操作的内存（至少1GB）
+        size_t reserved_mem = std::max(1024ULL * 1024 * 1024, total_mem / 10); // 1GB或总内存的10%，取较大值
+        size_t usable_mem = (free_mem > reserved_mem) ? (free_mem - reserved_mem) : 0;
+        
+        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Reserved Memory: " << reserved_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Usable Memory: " << usable_mem / 1024 / 1024 << " MB" << std::endl;
+        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+
         return true;
     }
     
-public:
+    // 添加缓冲区大小限制方法
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
-        std::cout << "Memory limits removed - will allocate as needed" << std::endl;
+        max_input_size = max_input_mb * 1024 * 1024;
+        max_output_size = max_output_mb * 1024 * 1024;
     }
     
     std::vector<AVFrame*> processBatch(const std::vector<AVFrame*>& frames, AVBufferRef* hw_device_ctx) {
@@ -360,12 +161,14 @@ public:
         const int batch_size = frames.size();
         const int height = frames[0]->height;
         const int width = frames[0]->width;
+        const int channels = 3;
         
-        // Calculate NV12 size: Y plane (H*W) + UV plane (H/2*W)
-        const int nv12_height = height + height / 2;
-        
-        // Allocate input buffer for NV12 data
-        size_t required_input_size = batch_size * nv12_height * width * sizeof(uint8_t);
+        // 限制缓冲区大小
+        size_t required_input_size = batch_size * channels * height * width * sizeof(float);
+        if (max_input_size > 0 && required_input_size > max_input_size) {
+            std::cerr << "Warning: Required input size exceeds limit, processing smaller batches" << std::endl;
+            // 可以考虑分割batch或降低精度
+        }
         
         if (required_input_size > input_size) {
             if (d_input) cudaFree(d_input);
@@ -375,14 +178,15 @@ public:
             std::cout << "Allocated input buffer: " << required_input_size / 1024 / 1024 << " MB" << std::endl;
         }
         
-        // Copy NV12 data from frames to input buffer
+        // Preprocess: NV12 -> CHW Float
         for (int i = 0; i < batch_size; ++i) {
+            float* batch_offset = d_input + i * channels * height * width;
             int threads = 256;
-            int blocks = (width * nv12_height + threads - 1) / threads;
+            int blocks = (width * height + threads - 1) / threads;
             
-            copy_nv12_kernel<<<blocks, threads>>>(
-                frames[i]->data[0], frames[i]->data[1], d_input,
-                width, height, frames[i]->linesize[0], frames[i]->linesize[1], i);
+            nv12_to_chw_float_kernel<<<blocks, threads>>>(
+                frames[i]->data[0], frames[i]->data[1], batch_offset, 
+                width, height, frames[i]->linesize[0], frames[i]->linesize[1]);
         }
         cudaDeviceSynchronize();
         
@@ -391,10 +195,11 @@ public:
         const char* output_name = engine->getIOTensorName(1);
         
         nvinfer1::Dims input_shape;
-        input_shape.nbDims = 3;  // NV12 format: (B, H + H/2, W)
+        input_shape.nbDims = 4;
         input_shape.d[0] = batch_size;
-        input_shape.d[1] = nv12_height;
-        input_shape.d[2] = width;
+        input_shape.d[1] = channels;
+        input_shape.d[2] = height;
+        input_shape.d[3] = width;
         
         context->setInputShape(input_name, input_shape);
         auto output_dims = context->getTensorShape(output_name);
@@ -403,7 +208,7 @@ public:
         for(int j = 0; j < output_dims.nbDims; ++j) {
             output_elements *= output_dims.d[j];
         }
-        size_t required_output_size = output_elements * sizeof(uint8_t);
+        size_t required_output_size = output_elements * sizeof(float);
         
         if (required_output_size > output_size) {
             if (d_output) cudaFree(d_output);
@@ -422,16 +227,16 @@ public:
         cudaStreamDestroy(stream);
         
         // Create output frames
-        int out_nv12_height = output_dims.d[1];
-        int out_width = output_dims.d[2];
-        int out_height = (out_nv12_height * 2) / 3;  // Convert back from NV12 height to actual height
+        int out_H = output_dims.d[2];
+        int out_W = output_dims.d[3];
+        int out_C = output_dims.d[1];
         
         AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
         AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
         hw_frames_ctx->format = AV_PIX_FMT_CUDA;
         hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-        hw_frames_ctx->width = out_width;
-        hw_frames_ctx->height = out_height;
+        hw_frames_ctx->width = out_W;
+        hw_frames_ctx->height = out_H;
         hw_frames_ctx->initial_pool_size = batch_size + 1;
         av_hwframe_ctx_init(hw_frames_ref);
         
@@ -440,12 +245,13 @@ public:
             AVFrame* cuda_frame = av_frame_alloc();
             av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0);
             
+            float* frame_chw = d_output + i * out_C * out_H * out_W;
             int threads = 256;
-            int blocks = (out_width * out_nv12_height + threads - 1) / threads;
+            int blocks = (out_W * out_H + threads - 1) / threads;
             
-            extract_nv12_kernel<<<blocks, threads>>>(
-                d_output, cuda_frame->data[0], cuda_frame->data[1],
-                out_width, out_height, cuda_frame->linesize[0], cuda_frame->linesize[1], i);
+            chw_float_to_nv12_kernel<<<blocks, threads>>>(
+                frame_chw, cuda_frame->data[0], cuda_frame->data[1], 
+                out_W, out_H, cuda_frame->linesize[0], cuda_frame->linesize[1]);
             
             output_frames.push_back(cuda_frame);
         }
@@ -921,23 +727,23 @@ bool processNonVideoPacket(VideoContext& ctx, AVPacket* pkt) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <onnx_model> <input_video> <output_video> [batch_size]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <input_video> <output_video> [batch_size]" << std::endl;
         return 1;
     }
     
     // Record start time
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    std::string onnx_path = argv[1];      // ONNX model path
-    int batch_size = (argc > 4) ? std::stoi(argv[4]) : 2;
+    std::string engine_path = "stereo_module_half_sbs.trt";  // 写死engine路径
+    int batch_size = (argc > 3) ? std::stoi(argv[3]) : 2;   // 调整参数索引
     
     // Initialize video context
     VideoContext ctx;
-    ctx.input_path = argv[2];   // Input video
-    ctx.output_path = argv[3];  // Output video
+    ctx.input_path = argv[1];   // 调整参数索引
+    ctx.output_path = argv[2];  // 调整参数索引
     
     std::cout << "=== Video Processing Setup ===" << std::endl;
-    std::cout << "ONNX Model: " << onnx_path << std::endl;
+    std::cout << "Engine: " << engine_path << std::endl;
     std::cout << "Input: " << ctx.input_path << std::endl;
     std::cout << "Output: " << ctx.output_path << std::endl;
     std::cout << "Batch size: " << batch_size << std::endl;
@@ -950,14 +756,19 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Initial GPU Memory Status ===" << std::endl;
     printMemoryUsage();
     
-    std::cout << "Using specified batch size: " << batch_size << " (no memory limits)" << std::endl;
+    size_t estimated_engine_mem = 2ULL * 1024 * 1024 * 1024;
+    size_t remaining_mem = (free_mem > estimated_engine_mem) ? (free_mem - estimated_engine_mem) : (free_mem / 4);
     
-    // 调用但不设置实际限制
-    processor.setMaxBufferSize(0, 0);
+    size_t max_input_mb = std::min(256ULL, remaining_mem / 1024 / 1024 / 3);
+    size_t max_output_mb = std::min(512ULL, remaining_mem / 1024 / 1024 / 2);
     
-    // Load ONNX model and build/load TensorRT engine
-    if (!processor.loadModel(onnx_path)) {
-        std::cerr << "\n❌ Failed to load ONNX model and build TensorRT engine" << std::endl;
+    std::cout << "Setting buffer limits - Input: " << max_input_mb 
+              << "MB, Output: " << max_output_mb << "MB" << std::endl;
+    
+    processor.setMaxBufferSize(max_input_mb, max_output_mb);
+    
+    if (!processor.loadEngine(engine_path)) {
+        std::cerr << "\n❌ Failed to load engine" << std::endl;
         return 1;
     }
     

@@ -7,4 +7,4 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 popd
-spike\build\Debug\spike.exe stereo_module_nv12.onnx "C:\Users\taowen\Downloads\06 4k.mp4" "C:\Users\taowen\Downloads\test.mkv" 4
+spike\build\Debug\spike.exe "C:\Users\taowen\Downloads\06 4k.mp4" "C:\Users\taowen\Downloads\test.mkv" 1
