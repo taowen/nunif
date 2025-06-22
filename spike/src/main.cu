@@ -20,378 +20,373 @@ extern "C" {
 
 #include "context.h"
 
-// Main processing class - now stateless, uses external context
-class VideoProcessor {
-private:
-    // 缓存相关方法
-    std::string getCacheFilePath(const std::string& onnx_path) {
-        // 基于ONNX文件路径生成缓存文件路径
-        std::string cache_path = onnx_path;
-        size_t pos = cache_path.find_last_of('.');
-        if (pos != std::string::npos) {
-            cache_path = cache_path.substr(0, pos);
-        }
-        cache_path += ".trt_cache";
-        return cache_path;
+// 缓存相关函数
+std::string getCacheFilePath(const std::string& onnx_path) {
+    // 基于ONNX文件路径生成缓存文件路径
+    std::string cache_path = onnx_path;
+    size_t pos = cache_path.find_last_of('.');
+    if (pos != std::string::npos) {
+        cache_path = cache_path.substr(0, pos);
+    }
+    cache_path += ".trt_cache";
+    return cache_path;
+}
+
+bool isCacheValid(const std::string& onnx_path, const std::string& cache_path) {
+    // 检查缓存文件是否存在
+    std::ifstream cache_file(cache_path, std::ios::binary);
+    if (!cache_file.good()) {
+        return false;
+    }
+    cache_file.close();
+    
+    // 检查ONNX文件和缓存文件的修改时间
+    struct stat onnx_stat, cache_stat;
+    if (stat(onnx_path.c_str(), &onnx_stat) != 0 || stat(cache_path.c_str(), &cache_stat) != 0) {
+        return false;
     }
     
-    bool isCacheValid(const std::string& onnx_path, const std::string& cache_path) {
-        // 检查缓存文件是否存在
-        std::ifstream cache_file(cache_path, std::ios::binary);
-        if (!cache_file.good()) {
-            return false;
-        }
-        cache_file.close();
-        
-        // 检查ONNX文件和缓存文件的修改时间
-        struct stat onnx_stat, cache_stat;
-        if (stat(onnx_path.c_str(), &onnx_stat) != 0 || stat(cache_path.c_str(), &cache_stat) != 0) {
-            return false;
-        }
-        
-        // 如果ONNX文件比缓存文件新，则缓存无效
-        return cache_stat.st_mtime >= onnx_stat.st_mtime;
+    // 如果ONNX文件比缓存文件新，则缓存无效
+    return cache_stat.st_mtime >= onnx_stat.st_mtime;
+}
+
+bool loadEngineFromCache(ProcessorContext& ctx, const std::string& cache_path) {
+    std::cout << "Loading TensorRT engine from cache: " << cache_path << std::endl;
+    
+    std::ifstream cache_file(cache_path, std::ios::binary);
+    if (!cache_file.good()) {
+        std::cerr << "Failed to open cache file for reading" << std::endl;
+        return false;
     }
     
-    bool loadEngineFromCache(ProcessorContext& ctx, const std::string& cache_path) {
-        std::cout << "Loading TensorRT engine from cache: " << cache_path << std::endl;
-        
-        std::ifstream cache_file(cache_path, std::ios::binary);
-        if (!cache_file.good()) {
-            std::cerr << "Failed to open cache file for reading" << std::endl;
-            return false;
-        }
-        
-        // 读取文件大小
-        cache_file.seekg(0, std::ios::end);
-        size_t engine_size = cache_file.tellg();
-        cache_file.seekg(0, std::ios::beg);
-        
-        if (engine_size == 0) {
-            std::cerr << "Cache file is empty" << std::endl;
-            return false;
-        }
-        
-        // 读取引擎数据
-        std::vector<char> engine_data(engine_size);
-        cache_file.read(engine_data.data(), engine_size);
-        cache_file.close();
-        
-        // 创建runtime并反序列化引擎
-        ctx.runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(ctx.logger));
-        if (!ctx.runtime) {
-            std::cerr << "Failed to create TensorRT runtime" << std::endl;
-            return false;
-        }
-        
-        ctx.engine = std::unique_ptr<nvinfer1::ICudaEngine>(
-            ctx.runtime->deserializeCudaEngine(engine_data.data(), engine_size));
-        if (!ctx.engine) {
-            std::cerr << "Failed to deserialize cached engine" << std::endl;
-            return false;
-        }
-        
-        ctx.context = std::unique_ptr<nvinfer1::IExecutionContext>(ctx.engine->createExecutionContext());
-        if (!ctx.context) {
-            std::cerr << "Failed to create execution context from cached engine" << std::endl;
-            return false;
-        }
-        
-        std::cout << "Successfully loaded engine from cache" << std::endl;
+    // 读取文件大小
+    cache_file.seekg(0, std::ios::end);
+    size_t engine_size = cache_file.tellg();
+    cache_file.seekg(0, std::ios::beg);
+    
+    if (engine_size == 0) {
+        std::cerr << "Cache file is empty" << std::endl;
+        return false;
+    }
+    
+    // 读取引擎数据
+    std::vector<char> engine_data(engine_size);
+    cache_file.read(engine_data.data(), engine_size);
+    cache_file.close();
+    
+    // 创建runtime并反序列化引擎
+    ctx.runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(ctx.logger));
+    if (!ctx.runtime) {
+        std::cerr << "Failed to create TensorRT runtime" << std::endl;
+        return false;
+    }
+    
+    ctx.engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+        ctx.runtime->deserializeCudaEngine(engine_data.data(), engine_size));
+    if (!ctx.engine) {
+        std::cerr << "Failed to deserialize cached engine" << std::endl;
+        return false;
+    }
+    
+    ctx.context = std::unique_ptr<nvinfer1::IExecutionContext>(ctx.engine->createExecutionContext());
+    if (!ctx.context) {
+        std::cerr << "Failed to create execution context from cached engine" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Successfully loaded engine from cache" << std::endl;
+    return true;
+}
+
+bool saveEngineToCache(const std::string& cache_path, nvinfer1::IHostMemory* serialized_engine) {
+    std::cout << "Saving TensorRT engine to cache: " << cache_path << std::endl;
+    
+    std::ofstream cache_file(cache_path, std::ios::binary);
+    if (!cache_file.good()) {
+        std::cerr << "Failed to create cache file for writing" << std::endl;
+        return false;
+    }
+    
+    cache_file.write(static_cast<const char*>(serialized_engine->data()), serialized_engine->size());
+    cache_file.close();
+    
+    if (cache_file.good()) {
+        std::cout << "Engine cached successfully (" << serialized_engine->size() / 1024 / 1024 << " MB)" << std::endl;
         return true;
+    } else {
+        std::cerr << "Failed to write engine cache" << std::endl;
+        return false;
+    }
+}
+
+bool buildEngineFromOnnx(ProcessorContext& ctx, const std::string& onnx_path, const std::string& cache_path) {
+    // Create builder, network and parser
+    auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(ctx.logger));
+    if (!builder) {
+        std::cerr << "Failed to create TensorRT builder" << std::endl;
+        return false;
     }
     
-    bool saveEngineToCache(const std::string& cache_path, nvinfer1::IHostMemory* serialized_engine) {
-        std::cout << "Saving TensorRT engine to cache: " << cache_path << std::endl;
-        
-        std::ofstream cache_file(cache_path, std::ios::binary);
-        if (!cache_file.good()) {
-            std::cerr << "Failed to create cache file for writing" << std::endl;
-            return false;
+    const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
+    if (!network) {
+        std::cerr << "Failed to create TensorRT network" << std::endl;
+        return false;
+    }
+    
+    auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, ctx.logger));
+    if (!parser) {
+        std::cerr << "Failed to create ONNX parser" << std::endl;
+        return false;
+    }
+    
+    // Parse ONNX file
+    std::cout << "Parsing ONNX file: " << onnx_path << std::endl;
+    if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+        std::cerr << "Failed to parse ONNX file" << std::endl;
+        for (int i = 0; i < parser->getNbErrors(); ++i) {
+            std::cerr << "Parser error: " << parser->getError(i)->desc() << std::endl;
         }
-        
-        cache_file.write(static_cast<const char*>(serialized_engine->data()), serialized_engine->size());
-        cache_file.close();
-        
-        if (cache_file.good()) {
-            std::cout << "Engine cached successfully (" << serialized_engine->size() / 1024 / 1024 << " MB)" << std::endl;
+        return false;
+    }
+    
+    // Build engine
+    auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    if (!config) {
+        std::cerr << "Failed to create builder config" << std::endl;
+        return false;
+    }
+    
+    // Get GPU memory info for better memory management
+    size_t total_mem, free_mem;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    
+    // Set memory pool size (use 80% of available memory, leave some for other operations)
+    size_t workspace_size = (free_mem * 8) / 10;
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace_size);
+    
+    // Enable FP16 precision
+    if (builder->platformHasFastFp16()) {
+        config->setFlag(nvinfer1::BuilderFlag::kFP16);
+        std::cout << "FP16 mode enabled" << std::endl;
+    }
+    
+    // Set optimization profile for dynamic shapes
+    auto profile = builder->createOptimizationProfile();
+    if (!profile) {
+        std::cerr << "Failed to create optimization profile" << std::endl;
+        return false;
+    }
+    
+    auto input = network->getInput(0);
+    auto inputName = input->getName();
+    
+    // NV12格式的形状约束：(height + height/2, width)
+    // Min: 392 + 196 = 588, Opt: 392 + 196 = 588, Max: 2160 + 1080 = 3240
+    profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2{588, 392});
+    profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2{588, 392});
+    profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2{3240, 3840});
+    
+    config->addOptimizationProfile(profile);
+    
+    std::cout << "Building TensorRT engine (this may take several minutes)..." << std::endl;
+    auto start_build = std::chrono::high_resolution_clock::now();
+    
+    auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+    if (!serialized_engine) {
+        std::cerr << "Failed to build TensorRT engine" << std::endl;
+        return false;
+    }
+    
+    auto end_build = std::chrono::high_resolution_clock::now();
+    auto build_time = std::chrono::duration_cast<std::chrono::seconds>(end_build - start_build);
+    std::cout << "Engine built successfully in " << build_time.count() << " seconds" << std::endl;
+    
+    // Save engine to cache
+    saveEngineToCache(cache_path, serialized_engine.get());
+    
+    // Create runtime and deserialize engine
+    ctx.runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(ctx.logger));
+    if (!ctx.runtime) {
+        std::cerr << "Failed to create TensorRT runtime" << std::endl;
+        return false;
+    }
+    
+    ctx.engine = std::unique_ptr<nvinfer1::ICudaEngine>(
+        ctx.runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()));
+    if (!ctx.engine) {
+        std::cerr << "Failed to deserialize engine" << std::endl;
+        return false;
+    }
+    
+    ctx.context = std::unique_ptr<nvinfer1::IExecutionContext>(ctx.engine->createExecutionContext());
+    if (!ctx.context) {
+        std::cerr << "Failed to create execution context" << std::endl;
+        return false;
+    }
+    
+    // Print memory usage after engine creation
+    cudaMemGetInfo(&free_mem, &total_mem);
+    size_t engine_required = ctx.engine->getDeviceMemorySize();
+    
+    std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
+    std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+    std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+
+    return true;
+}
+
+bool loadOnnxModel(ProcessorContext& ctx, const std::string& onnx_path) {
+    std::string cache_path = getCacheFilePath(onnx_path);
+    
+    // 首先尝试从缓存加载
+    if (isCacheValid(onnx_path, cache_path)) {
+        if (loadEngineFromCache(ctx, cache_path)) {
+            // 打印内存使用情况
+            size_t total_mem, free_mem;
+            cudaMemGetInfo(&free_mem, &total_mem);
+            size_t engine_required = ctx.engine->getDeviceMemorySize();
+            
+            std::cout << "Engine loaded from cache - GPU Memory:" << std::endl;
+            std::cout << "  Total: " << total_mem / 1024 / 1024 << " MB" << std::endl;
+            std::cout << "  Available: " << free_mem / 1024 / 1024 << " MB" << std::endl;
+            std::cout << "  Engine Required: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+            
             return true;
         } else {
-            std::cerr << "Failed to write engine cache" << std::endl;
-            return false;
+            std::cout << "Failed to load from cache, will rebuild engine" << std::endl;
         }
+    } else {
+        std::cout << "No valid cache found, building new engine" << std::endl;
     }
     
-    bool buildEngineFromOnnx(ProcessorContext& ctx, const std::string& onnx_path, const std::string& cache_path) {
-        // Create builder, network and parser
-        auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(ctx.logger));
-        if (!builder) {
-            std::cerr << "Failed to create TensorRT builder" << std::endl;
-            return false;
-        }
-        
-        const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-        auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
-        if (!network) {
-            std::cerr << "Failed to create TensorRT network" << std::endl;
-            return false;
-        }
-        
-        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, ctx.logger));
-        if (!parser) {
-            std::cerr << "Failed to create ONNX parser" << std::endl;
-            return false;
-        }
-        
-        // Parse ONNX file
-        std::cout << "Parsing ONNX file: " << onnx_path << std::endl;
-        if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
-            std::cerr << "Failed to parse ONNX file" << std::endl;
-            for (int i = 0; i < parser->getNbErrors(); ++i) {
-                std::cerr << "Parser error: " << parser->getError(i)->desc() << std::endl;
-            }
-            return false;
-        }
-        
-        // Build engine
-        auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-        if (!config) {
-            std::cerr << "Failed to create builder config" << std::endl;
-            return false;
-        }
-        
-        // Get GPU memory info for better memory management
-        size_t total_mem, free_mem;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        
-        // Set memory pool size (use 80% of available memory, leave some for other operations)
-        size_t workspace_size = (free_mem * 8) / 10;
-        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, workspace_size);
-        
-        // Enable FP16 precision
-        if (builder->platformHasFastFp16()) {
-            config->setFlag(nvinfer1::BuilderFlag::kFP16);
-            std::cout << "FP16 mode enabled" << std::endl;
-        }
-        
-        // Set optimization profile for dynamic shapes
-        auto profile = builder->createOptimizationProfile();
-        if (!profile) {
-            std::cerr << "Failed to create optimization profile" << std::endl;
-            return false;
-        }
-        
-        auto input = network->getInput(0);
-        auto inputName = input->getName();
-        
-        // NV12格式的形状约束：(height + height/2, width)
-        // Min: 392 + 196 = 588, Opt: 392 + 196 = 588, Max: 2160 + 1080 = 3240
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2{588, 392});
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2{588, 392});
-        profile->setDimensions(inputName, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2{3240, 3840});
-        
-        config->addOptimizationProfile(profile);
-        
-        std::cout << "Building TensorRT engine (this may take several minutes)..." << std::endl;
-        auto start_build = std::chrono::high_resolution_clock::now();
-        
-        auto serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(
-            builder->buildSerializedNetwork(*network, *config));
-        if (!serialized_engine) {
-            std::cerr << "Failed to build TensorRT engine" << std::endl;
-            return false;
-        }
-        
-        auto end_build = std::chrono::high_resolution_clock::now();
-        auto build_time = std::chrono::duration_cast<std::chrono::seconds>(end_build - start_build);
-        std::cout << "Engine built successfully in " << build_time.count() << " seconds" << std::endl;
-        
-        // Save engine to cache
-        saveEngineToCache(cache_path, serialized_engine.get());
-        
-        // Create runtime and deserialize engine
-        ctx.runtime = std::unique_ptr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(ctx.logger));
-        if (!ctx.runtime) {
-            std::cerr << "Failed to create TensorRT runtime" << std::endl;
-            return false;
-        }
-        
-        ctx.engine = std::unique_ptr<nvinfer1::ICudaEngine>(
-            ctx.runtime->deserializeCudaEngine(serialized_engine->data(), serialized_engine->size()));
-        if (!ctx.engine) {
-            std::cerr << "Failed to deserialize engine" << std::endl;
-            return false;
-        }
-        
-        ctx.context = std::unique_ptr<nvinfer1::IExecutionContext>(ctx.engine->createExecutionContext());
-        if (!ctx.context) {
-            std::cerr << "Failed to create execution context" << std::endl;
-            return false;
-        }
-        
-        // Print memory usage after engine creation
-        cudaMemGetInfo(&free_mem, &total_mem);
-        size_t engine_required = ctx.engine->getDeviceMemorySize();
-        
-        std::cout << "Total GPU Memory: " << total_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Available GPU Memory: " << free_mem / 1024 / 1024 << " MB" << std::endl;
-        std::cout << "Engine Required Memory: " << engine_required / 1024 / 1024 << " MB" << std::endl;
+    // 缓存无效或加载失败，重新构建引擎
+    return buildEngineFromOnnx(ctx, onnx_path, cache_path);
+}
 
-        return true;
+// 处理单帧的函数
+AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_device_ctx) {
+    if (!frame) return nullptr;
+    
+    const int height = frame->height;
+    const int width = frame->width;
+    
+    // 计算NV12格式的数据大小：Y平面 + UV平面(高度的一半)
+    size_t nv12_elements = height * width + (height / 2) * width;
+    size_t nv12_size_uint8 = nv12_elements * sizeof(uint8_t);  // uint8 大小
+    
+    // 限制缓冲区大小
+    if (ctx.max_input_size > 0 && nv12_size_uint8 > ctx.max_input_size) {
+        std::cerr << "Warning: Required input size exceeds limit" << std::endl;
+        return nullptr;
     }
     
-public:
-    bool loadOnnx(ProcessorContext& ctx, const std::string& onnx_path) {
-        std::string cache_path = getCacheFilePath(onnx_path);
-        
-        // 首先尝试从缓存加载
-        if (isCacheValid(onnx_path, cache_path)) {
-            if (loadEngineFromCache(ctx, cache_path)) {
-                // 打印内存使用情况
-                size_t total_mem, free_mem;
-                cudaMemGetInfo(&free_mem, &total_mem);
-                size_t engine_required = ctx.engine->getDeviceMemorySize();
-                
-                std::cout << "Engine loaded from cache - GPU Memory:" << std::endl;
-                std::cout << "  Total: " << total_mem / 1024 / 1024 << " MB" << std::endl;
-                std::cout << "  Available: " << free_mem / 1024 / 1024 << " MB" << std::endl;
-                std::cout << "  Engine Required: " << engine_required / 1024 / 1024 << " MB" << std::endl;
-                
-                return true;
-            } else {
-                std::cout << "Failed to load from cache, will rebuild engine" << std::endl;
-            }
-        } else {
-            std::cout << "No valid cache found, building new engine" << std::endl;
-        }
-        
-        // 缓存无效或加载失败，重新构建引擎
-        return buildEngineFromOnnx(ctx, onnx_path, cache_path);
+    // 分配输入缓冲区 (直接使用 uint8_t)
+    if (nv12_size_uint8 > ctx.input_size) {
+        if (ctx.d_input_nv12) cudaFree(ctx.d_input_nv12);
+        cudaMalloc(&ctx.d_input_nv12, nv12_size_uint8);
+        ctx.input_size = nv12_size_uint8;
+        std::cout << "Allocated input buffer: " << nv12_size_uint8 / 1024 / 1024 << " MB" << std::endl;
     }
     
-    // 将 processBatch 改为 processFrame，处理单帧
-    AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_device_ctx) {
-        if (!frame) return nullptr;
-        
-        const int height = frame->height;
-        const int width = frame->width;
-        
-        // 计算NV12格式的数据大小：Y平面 + UV平面(高度的一半)
-        size_t nv12_elements = height * width + (height / 2) * width;
-        size_t nv12_size_uint8 = nv12_elements * sizeof(uint8_t);  // uint8 大小
-        
-        // 限制缓冲区大小
-        if (ctx.max_input_size > 0 && nv12_size_uint8 > ctx.max_input_size) {
-            std::cerr << "Warning: Required input size exceeds limit" << std::endl;
-            return nullptr;
-        }
-        
-        // 分配输入缓冲区 (直接使用 uint8_t)
-        if (nv12_size_uint8 > ctx.input_size) {
-            if (ctx.d_input_nv12) cudaFree(ctx.d_input_nv12);
-            cudaMalloc(&ctx.d_input_nv12, nv12_size_uint8);
-            ctx.input_size = nv12_size_uint8;
-            std::cout << "Allocated input buffer: " << nv12_size_uint8 / 1024 / 1024 << " MB" << std::endl;
-        }
-        
-        // 直接将NV12数据从AVFrame复制到GPU内存（无需类型转换）
-        // Y平面
-        cudaMemcpy2D(ctx.d_input_nv12, width, 
-                     frame->data[0], frame->linesize[0], 
-                     width, height, 
-                     cudaMemcpyDeviceToDevice);
-        
-        // UV平面
-        cudaMemcpy2D((uint8_t*)ctx.d_input_nv12 + height * width, width,
-                     frame->data[1], frame->linesize[1],
-                     width, height / 2,
-                     cudaMemcpyDeviceToDevice);
-        
-        cudaDeviceSynchronize();
-        
-        // Setup TensorRT inference
-        const char* input_name = ctx.engine->getIOTensorName(0);
-        const char* output_name = ctx.engine->getIOTensorName(1);
-        
-        // 设置输入形状：NV12格式为 (height + height/2, width)
-        nvinfer1::Dims input_shape;
-        input_shape.nbDims = 2;
-        input_shape.d[0] = height + height / 2;  // Y平面高度 + UV平面高度
-        input_shape.d[1] = width;
-        
-        ctx.context->setInputShape(input_name, input_shape);
-        auto output_dims = ctx.context->getTensorShape(output_name);
-        
-        // 计算输出大小 (也是 uint8)
-        size_t output_elements = 1;
-        for(int j = 0; j < output_dims.nbDims; ++j) {
-            output_elements *= output_dims.d[j];
-        }
-        size_t required_output_size = output_elements * sizeof(uint8_t);  // 使用 uint8 大小
-        
-        if (required_output_size > ctx.output_size) {
-            if (ctx.d_output_nv12) cudaFree(ctx.d_output_nv12);
-            cudaMalloc(&ctx.d_output_nv12, required_output_size);
-            ctx.output_size = required_output_size;
-        }
-        
-        // 设置tensor地址
-        ctx.context->setTensorAddress(input_name, ctx.d_input_nv12);
-        ctx.context->setTensorAddress(output_name, ctx.d_output_nv12);
-        
-        // 创建bindings数组
-        std::vector<void*> bindings(ctx.engine->getNbIOTensors());
-        for (int32_t i = 0, e = ctx.engine->getNbIOTensors(); i < e; i++) {
-            auto const name = ctx.engine->getIOTensorName(i);
-            if (std::string(name) == std::string(input_name)) {
-                bindings[i] = ctx.d_input_nv12;
-            } else if (std::string(name) == std::string(output_name)) {
-                bindings[i] = ctx.d_output_nv12;
-            }
-        }
-        
-        // 执行推理
-        bool status = ctx.context->executeV2(bindings.data());
-        if (!status) {
-            std::cerr << "TensorRT synchronous execution failed" << std::endl;
-            return nullptr;
-        }
-        
-        // 创建输出帧
-        int out_H = output_dims.d[0] * 2 / 3;  // 从NV12格式恢复原始高度
-        int out_W = output_dims.d[1];
-        
-        AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
-        AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
-        hw_frames_ctx->format = AV_PIX_FMT_CUDA;
-        hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-        hw_frames_ctx->width = out_W;
-        hw_frames_ctx->height = out_H;
-        hw_frames_ctx->initial_pool_size = 2;
-        av_hwframe_ctx_init(hw_frames_ref);
-        
-        AVFrame* output_frame = av_frame_alloc();
-        av_hwframe_get_buffer(hw_frames_ref, output_frame, 0);
-        
-        // 直接将推理结果复制到输出帧（无需类型转换）
-        // Y平面
-        cudaMemcpy2D(output_frame->data[0], output_frame->linesize[0],
-                     ctx.d_output_nv12, out_W,
-                     out_W, out_H,
-                     cudaMemcpyDeviceToDevice);
-        
-        // UV平面
-        cudaMemcpy2D(output_frame->data[1], output_frame->linesize[1],
-                     (uint8_t*)ctx.d_output_nv12 + out_H * out_W, out_W,
-                     out_W, out_H / 2,
-                     cudaMemcpyDeviceToDevice);
-        
-        av_buffer_unref(&hw_frames_ref);
-        cudaDeviceSynchronize();
-        
-        return output_frame;
+    // 直接将NV12数据从AVFrame复制到GPU内存（无需类型转换）
+    // Y平面
+    cudaMemcpy2D(ctx.d_input_nv12, width, 
+                 frame->data[0], frame->linesize[0], 
+                 width, height, 
+                 cudaMemcpyDeviceToDevice);
+    
+    // UV平面
+    cudaMemcpy2D((uint8_t*)ctx.d_input_nv12 + height * width, width,
+                 frame->data[1], frame->linesize[1],
+                 width, height / 2,
+                 cudaMemcpyDeviceToDevice);
+    
+    cudaDeviceSynchronize();
+    
+    // Setup TensorRT inference
+    const char* input_name = ctx.engine->getIOTensorName(0);
+    const char* output_name = ctx.engine->getIOTensorName(1);
+    
+    // 设置输入形状：NV12格式为 (height + height/2, width)
+    nvinfer1::Dims input_shape;
+    input_shape.nbDims = 2;
+    input_shape.d[0] = height + height / 2;  // Y平面高度 + UV平面高度
+    input_shape.d[1] = width;
+    
+    ctx.context->setInputShape(input_name, input_shape);
+    auto output_dims = ctx.context->getTensorShape(output_name);
+    
+    // 计算输出大小 (也是 uint8)
+    size_t output_elements = 1;
+    for(int j = 0; j < output_dims.nbDims; ++j) {
+        output_elements *= output_dims.d[j];
     }
-};
+    size_t required_output_size = output_elements * sizeof(uint8_t);  // 使用 uint8 大小
+    
+    if (required_output_size > ctx.output_size) {
+        if (ctx.d_output_nv12) cudaFree(ctx.d_output_nv12);
+        cudaMalloc(&ctx.d_output_nv12, required_output_size);
+        ctx.output_size = required_output_size;
+    }
+    
+    // 设置tensor地址
+    ctx.context->setTensorAddress(input_name, ctx.d_input_nv12);
+    ctx.context->setTensorAddress(output_name, ctx.d_output_nv12);
+    
+    // 创建bindings数组
+    std::vector<void*> bindings(ctx.engine->getNbIOTensors());
+    for (int32_t i = 0, e = ctx.engine->getNbIOTensors(); i < e; i++) {
+        auto const name = ctx.engine->getIOTensorName(i);
+        if (std::string(name) == std::string(input_name)) {
+            bindings[i] = ctx.d_input_nv12;
+        } else if (std::string(name) == std::string(output_name)) {
+            bindings[i] = ctx.d_output_nv12;
+        }
+    }
+    
+    // 执行推理
+    bool status = ctx.context->executeV2(bindings.data());
+    if (!status) {
+        std::cerr << "TensorRT synchronous execution failed" << std::endl;
+        return nullptr;
+    }
+    
+    // 创建输出帧
+    int out_H = output_dims.d[0] * 2 / 3;  // 从NV12格式恢复原始高度
+    int out_W = output_dims.d[1];
+    
+    AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
+    AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
+    hw_frames_ctx->format = AV_PIX_FMT_CUDA;
+    hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+    hw_frames_ctx->width = out_W;
+    hw_frames_ctx->height = out_H;
+    hw_frames_ctx->initial_pool_size = 2;
+    av_hwframe_ctx_init(hw_frames_ref);
+    
+    AVFrame* output_frame = av_frame_alloc();
+    av_hwframe_get_buffer(hw_frames_ref, output_frame, 0);
+    
+    // 直接将推理结果复制到输出帧（无需类型转换）
+    // Y平面
+    cudaMemcpy2D(output_frame->data[0], output_frame->linesize[0],
+                 ctx.d_output_nv12, out_W,
+                 out_W, out_H,
+                 cudaMemcpyDeviceToDevice);
+    
+    // UV平面
+    cudaMemcpy2D(output_frame->data[1], output_frame->linesize[1],
+                 (uint8_t*)ctx.d_output_nv12 + out_H * out_W, out_W,
+                 out_W, out_H / 2,
+                 cudaMemcpyDeviceToDevice);
+    
+    av_buffer_unref(&hw_frames_ref);
+    cudaDeviceSynchronize();
+    
+    return output_frame;
+}
 
 // Helper function to calculate bitrate based on resolution
 int calculateBitrate(int width, int height) {
@@ -876,7 +871,6 @@ int main(int argc, char** argv) {
     std::cout << "Input: " << ctx.input_path << std::endl;
     std::cout << "Output: " << ctx.output_path << std::endl;
     
-    VideoProcessor processor;
     ProcessorContext proc_ctx;  // 创建处理器上下文
     
     // Setup memory management
@@ -897,7 +891,7 @@ int main(int argc, char** argv) {
     proc_ctx.setMaxBufferSize(max_input_mb, max_output_mb);  // 使用 ProcessorContext 方法
     
     std::cout << "\n=== Loading/Building TensorRT Engine ===" << std::endl;
-    if (!processor.loadOnnx(proc_ctx, onnx_path)) {  // 传递 ProcessorContext
+    if (!loadOnnxModel(proc_ctx, onnx_path)) {  // 使用新的全局函数
         std::cerr << "\n❌ Failed to load ONNX model" << std::endl;
         return 1;
     }
@@ -937,7 +931,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     
-    // 修改处理循环，传递 ProcessorContext
+    // 修改处理循环，使用全局函数
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     int frame_count = 0;
@@ -954,7 +948,7 @@ int main(int argc, char** argv) {
                     // 保存原始PTS，并转换到编码器的时间基准
                     int64_t original_pts = frame->pts;
                     
-                    AVFrame* processed_frame = processor.processFrame(proc_ctx, frame, ctx.hw_device_ctx);  // 传递 ProcessorContext
+                    AVFrame* processed_frame = processFrame(proc_ctx, frame, ctx.hw_device_ctx);  // 使用全局函数
                     
                     if (processed_frame) {
                         if (!encoder_initialized) {
