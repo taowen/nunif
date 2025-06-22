@@ -17,56 +17,55 @@ extern "C" {
 #include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 
-// CUDA kernels
-__global__ void nv12_to_chw_float_kernel(const uint8_t* __restrict__ y_plane, const uint8_t* __restrict__ uv_plane, 
-                                          float* __restrict__ dst, int W, int H, int y_pitch, int uv_pitch) {
+// CUDA kernel for NV12 data copying/batching
+__global__ void copy_nv12_kernel(const uint8_t* __restrict__ src_y, const uint8_t* __restrict__ src_uv,
+                                  uint8_t* __restrict__ dst, int W, int H, 
+                                  int src_y_pitch, int src_uv_pitch, int batch_idx) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= W * H) return;
+    int total_pixels = W * H;
+    int nv12_size = H + H / 2; // Total height in NV12 format
     
-    int h = idx / W;
-    int w = idx % W;
+    if (idx >= W * nv12_size) return;
     
-    float y = y_plane[h * y_pitch + w] / 255.0f;
-    int uv_h = h / 2;
-    int uv_w = (w / 2) * 2;
-    float u = uv_plane[uv_h * uv_pitch + uv_w] / 255.0f - 0.5f;
-    float v = uv_plane[uv_h * uv_pitch + uv_w + 1] / 255.0f - 0.5f;
+    int dst_offset = batch_idx * W * nv12_size;
     
-    float r = fmaxf(0.0f, fminf(1.0f, y + 1.402f * v));
-    float g = fmaxf(0.0f, fminf(1.0f, y - 0.344136f * u - 0.714136f * v));
-    float b = fmaxf(0.0f, fminf(1.0f, y + 1.772f * u));
-    
-    dst[0 * H * W + h * W + w] = r;
-    dst[1 * H * W + h * W + w] = g;
-    dst[2 * H * W + h * W + w] = b;
+    if (idx < total_pixels) {
+        // Copy Y plane
+        int h = idx / W;
+        int w = idx % W;
+        dst[dst_offset + idx] = src_y[h * src_y_pitch + w];
+    } else {
+        // Copy UV plane
+        int uv_idx = idx - total_pixels;
+        int uv_h = uv_idx / W;
+        int uv_w = uv_idx % W;
+        dst[dst_offset + total_pixels + uv_idx] = src_uv[uv_h * src_uv_pitch + uv_w];
+    }
 }
 
-__global__ void chw_float_to_nv12_kernel(const float* __restrict__ src, 
-                                          uint8_t* __restrict__ y_plane,
-                                          uint8_t* __restrict__ uv_plane,
-                                          int W, int H, int y_pitch, int uv_pitch) {
+// CUDA kernel for NV12 data extraction from batch
+__global__ void extract_nv12_kernel(const uint8_t* __restrict__ src, 
+                                     uint8_t* __restrict__ dst_y, uint8_t* __restrict__ dst_uv,
+                                     int W, int H, int dst_y_pitch, int dst_uv_pitch, int batch_idx) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= W * H) return;
+    int total_pixels = W * H;
+    int nv12_size = H + H / 2;
     
-    int h = idx / W;
-    int w = idx % W;
+    if (idx >= W * nv12_size) return;
     
-    float r = fmaxf(0.0f, fminf(1.0f, src[0 * H * W + h * W + w]));
-    float g = fmaxf(0.0f, fminf(1.0f, src[1 * H * W + h * W + w]));
-    float b = fmaxf(0.0f, fminf(1.0f, src[2 * H * W + h * W + w]));
+    int src_offset = batch_idx * W * nv12_size;
     
-    float y = 0.299f * r + 0.587f * g + 0.114f * b;
-    y_plane[h * y_pitch + w] = static_cast<uint8_t>(y * 255.0f + 0.5f);
-    
-    if (h % 2 == 0 && w % 2 == 0) {
-        float u = -0.169f * r - 0.331f * g + 0.5f * b + 0.5f;
-        float v = 0.5f * r - 0.419f * g - 0.081f * b + 0.5f;
-        
-        int uv_h = h / 2;
-        int uv_w = w / 2;
-        
-        uv_plane[uv_h * uv_pitch + uv_w * 2] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, u)) * 255.0f + 0.5f);
-        uv_plane[uv_h * uv_pitch + uv_w * 2 + 1] = static_cast<uint8_t>(fmaxf(0.0f, fminf(1.0f, v)) * 255.0f + 0.5f);
+    if (idx < total_pixels) {
+        // Extract Y plane
+        int h = idx / W;
+        int w = idx % W;
+        dst_y[h * dst_y_pitch + w] = src[src_offset + idx];
+    } else {
+        // Extract UV plane
+        int uv_idx = idx - total_pixels;
+        int uv_h = uv_idx / W;
+        int uv_w = uv_idx % W;
+        dst_uv[uv_h * dst_uv_pitch + uv_w] = src[src_offset + total_pixels + uv_idx];
     }
 }
 
@@ -96,8 +95,8 @@ private:
     std::unique_ptr<nvinfer1::ICudaEngine> engine;
     std::unique_ptr<nvinfer1::IExecutionContext> context;
     
-    float* d_input = nullptr;
-    float* d_output = nullptr;
+    uint8_t* d_input = nullptr;   // Changed to uint8_t for NV12 data
+    uint8_t* d_output = nullptr;  // Changed to uint8_t for NV12 data
     size_t input_size = 0;
     size_t output_size = 0;
     size_t max_input_size = 0;
@@ -203,7 +202,7 @@ private:
         auto input = network->getInput(0);
         auto input_dims = input->getDimensions();
         
-        // Set shape ranges (adjust based on your expected input sizes)
+        // Set shape ranges for NV12 format (B, H + H//2, W)
         nvinfer1::Dims min_dims = input_dims;
         nvinfer1::Dims opt_dims = input_dims;
         nvinfer1::Dims max_dims = input_dims;
@@ -213,10 +212,10 @@ private:
         opt_dims.d[0] = 2;    // optimal batch size
         max_dims.d[0] = 4;    // max batch size
         
-        if (input_dims.nbDims == 4) { // NCHW format
-            min_dims.d[2] = 392;  min_dims.d[3] = 392;    // min resolution
-            opt_dims.d[2] = 1080; opt_dims.d[3] = 1920;   // optimal resolution  
-            max_dims.d[2] = 2160; max_dims.d[3] = 3840;   // max resolution (4K)
+        if (input_dims.nbDims == 3) { // NV12 format: (B, H + H/2, W)
+            min_dims.d[1] = 392 + 392/2;  min_dims.d[2] = 392;    // min resolution
+            opt_dims.d[1] = 1080 + 1080/2; opt_dims.d[2] = 1920;   // optimal resolution  
+            max_dims.d[1] = 2160 + 2160/2; max_dims.d[2] = 3840;   // max resolution (4K)
         }
         
         profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, min_dims);
@@ -278,7 +277,6 @@ public:
         runtime.reset();
     }
     
-    // Modified to accept ONNX file and handle caching
     bool loadModel(const std::string& model_path) {
         std::string cache_path = getEngineCachePath(model_path);
         
@@ -288,12 +286,8 @@ public:
         
         bool use_cache = false;
         if (onnx_file.good() && cache_file.good()) {
-            // Simple timestamp check - you might want to implement a more robust check
             onnx_file.close();
             cache_file.close();
-            
-            // For now, always try to use cache if it exists
-            // You could add timestamp comparison here
             use_cache = true;
             std::cout << "Found cached engine: " << cache_path << std::endl;
         }
@@ -356,11 +350,7 @@ private:
     }
     
 public:
-    // ... rest of the existing methods remain the same ...
     void setMaxBufferSize(size_t max_input_mb, size_t max_output_mb) {
-        // 移除限制，仅保留接口兼容性
-        // max_input_size = max_input_mb * 1024 * 1024;
-        // max_output_size = max_output_mb * 1024 * 1024;
         std::cout << "Memory limits removed - will allocate as needed" << std::endl;
     }
     
@@ -370,10 +360,12 @@ public:
         const int batch_size = frames.size();
         const int height = frames[0]->height;
         const int width = frames[0]->width;
-        const int channels = 3;
         
-        // 直接按需分配内存，不进行限制检查
-        size_t required_input_size = batch_size * channels * height * width * sizeof(float);
+        // Calculate NV12 size: Y plane (H*W) + UV plane (H/2*W)
+        const int nv12_height = height + height / 2;
+        
+        // Allocate input buffer for NV12 data
+        size_t required_input_size = batch_size * nv12_height * width * sizeof(uint8_t);
         
         if (required_input_size > input_size) {
             if (d_input) cudaFree(d_input);
@@ -383,15 +375,14 @@ public:
             std::cout << "Allocated input buffer: " << required_input_size / 1024 / 1024 << " MB" << std::endl;
         }
         
-        // Preprocess: NV12 -> CHW Float
+        // Copy NV12 data from frames to input buffer
         for (int i = 0; i < batch_size; ++i) {
-            float* batch_offset = d_input + i * channels * height * width;
             int threads = 256;
-            int blocks = (width * height + threads - 1) / threads;
+            int blocks = (width * nv12_height + threads - 1) / threads;
             
-            nv12_to_chw_float_kernel<<<blocks, threads>>>(
-                frames[i]->data[0], frames[i]->data[1], batch_offset, 
-                width, height, frames[i]->linesize[0], frames[i]->linesize[1]);
+            copy_nv12_kernel<<<blocks, threads>>>(
+                frames[i]->data[0], frames[i]->data[1], d_input,
+                width, height, frames[i]->linesize[0], frames[i]->linesize[1], i);
         }
         cudaDeviceSynchronize();
         
@@ -400,11 +391,10 @@ public:
         const char* output_name = engine->getIOTensorName(1);
         
         nvinfer1::Dims input_shape;
-        input_shape.nbDims = 4;
+        input_shape.nbDims = 3;  // NV12 format: (B, H + H/2, W)
         input_shape.d[0] = batch_size;
-        input_shape.d[1] = channels;
-        input_shape.d[2] = height;
-        input_shape.d[3] = width;
+        input_shape.d[1] = nv12_height;
+        input_shape.d[2] = width;
         
         context->setInputShape(input_name, input_shape);
         auto output_dims = context->getTensorShape(output_name);
@@ -413,7 +403,7 @@ public:
         for(int j = 0; j < output_dims.nbDims; ++j) {
             output_elements *= output_dims.d[j];
         }
-        size_t required_output_size = output_elements * sizeof(float);
+        size_t required_output_size = output_elements * sizeof(uint8_t);
         
         if (required_output_size > output_size) {
             if (d_output) cudaFree(d_output);
@@ -432,16 +422,16 @@ public:
         cudaStreamDestroy(stream);
         
         // Create output frames
-        int out_H = output_dims.d[2];
-        int out_W = output_dims.d[3];
-        int out_C = output_dims.d[1];
+        int out_nv12_height = output_dims.d[1];
+        int out_width = output_dims.d[2];
+        int out_height = (out_nv12_height * 2) / 3;  // Convert back from NV12 height to actual height
         
         AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
         AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
         hw_frames_ctx->format = AV_PIX_FMT_CUDA;
         hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-        hw_frames_ctx->width = out_W;
-        hw_frames_ctx->height = out_H;
+        hw_frames_ctx->width = out_width;
+        hw_frames_ctx->height = out_height;
         hw_frames_ctx->initial_pool_size = batch_size + 1;
         av_hwframe_ctx_init(hw_frames_ref);
         
@@ -450,13 +440,12 @@ public:
             AVFrame* cuda_frame = av_frame_alloc();
             av_hwframe_get_buffer(hw_frames_ref, cuda_frame, 0);
             
-            float* frame_chw = d_output + i * out_C * out_H * out_W;
             int threads = 256;
-            int blocks = (out_W * out_H + threads - 1) / threads;
+            int blocks = (out_width * out_nv12_height + threads - 1) / threads;
             
-            chw_float_to_nv12_kernel<<<blocks, threads>>>(
-                frame_chw, cuda_frame->data[0], cuda_frame->data[1], 
-                out_W, out_H, cuda_frame->linesize[0], cuda_frame->linesize[1]);
+            extract_nv12_kernel<<<blocks, threads>>>(
+                d_output, cuda_frame->data[0], cuda_frame->data[1],
+                out_width, out_height, cuda_frame->linesize[0], cuda_frame->linesize[1], i);
             
             output_frames.push_back(cuda_frame);
         }
