@@ -24,7 +24,7 @@ extern "C" {
 
 
 // 处理单帧的函数
-AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_device_ctx) {
+AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_frames_ref) {
     if (!frame) return nullptr;
     
     const int height = frame->height;
@@ -115,17 +115,21 @@ AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_dev
     int out_H = output_dims.d[0] * 2 / 3;  // 从NV12格式恢复原始高度
     int out_W = output_dims.d[1];
     
-    AVBufferRef* hw_frames_ref = av_hwframe_ctx_alloc(hw_device_ctx);
-    AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref->data;
-    hw_frames_ctx->format = AV_PIX_FMT_CUDA;
-    hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
-    hw_frames_ctx->width = out_W;
-    hw_frames_ctx->height = out_H;
-    hw_frames_ctx->initial_pool_size = 2;
-    av_hwframe_ctx_init(hw_frames_ref);
-    
     AVFrame* output_frame = av_frame_alloc();
-    av_hwframe_get_buffer(hw_frames_ref, output_frame, 0);
+    if (!output_frame) {
+        std::cerr << "Failed to allocate output frame" << std::endl;
+        return nullptr;
+    }
+    
+    output_frame->width = out_W;
+    output_frame->height = out_H;
+    output_frame->format = AV_PIX_FMT_NV12; // Should be this format
+    
+    if (av_hwframe_get_buffer(hw_frames_ref, output_frame, 0) < 0) {
+        std::cerr << "Failed to get buffer for output frame" << std::endl;
+        av_frame_free(&output_frame);
+        return nullptr;
+    }
     
     // 直接将推理结果复制到输出帧（无需类型转换）
     // Y平面
@@ -140,7 +144,6 @@ AVFrame* processFrame(ProcessorContext& ctx, AVFrame* frame, AVBufferRef* hw_dev
                  out_W, out_H / 2,
                  cudaMemcpyDeviceToDevice);
     
-    av_buffer_unref(&hw_frames_ref);
     cudaDeviceSynchronize();
     
     return output_frame;
@@ -382,6 +385,25 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    // Create hw_frames_ref for output frames
+    AVBufferRef* hw_frames_ref_out = nullptr;
+    if (ctx.video_stream_idx >= 0) {
+        hw_frames_ref_out = av_hwframe_ctx_alloc(ctx.hw_device_ctx);
+        AVHWFramesContext* hw_frames_ctx = (AVHWFramesContext*)hw_frames_ref_out->data;
+        AVStream* video_stream = ctx.ifmt_ctx->streams[ctx.video_stream_idx];
+        hw_frames_ctx->format = AV_PIX_FMT_CUDA;
+        hw_frames_ctx->sw_format = AV_PIX_FMT_NV12;
+        hw_frames_ctx->width = video_stream->codecpar->width;   // Initial size, will be updated by TRT
+        hw_frames_ctx->height = video_stream->codecpar->height; // Initial size, will be updated by TRT
+        hw_frames_ctx->initial_pool_size = 5;
+        if (av_hwframe_ctx_init(hw_frames_ref_out) < 0) {
+            std::cerr << "Failed to initialize output CUDA frame context" << std::endl;
+            av_buffer_unref(&hw_frames_ref_out);
+            cleanupVideoContext(ctx);
+            return 1;
+        }
+    }
+    
     // 修改处理循环，使用全局函数
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
@@ -399,7 +421,8 @@ int main(int argc, char** argv) {
                     // 保存原始PTS，并转换到编码器的时间基准
                     int64_t original_pts = frame->pts;
                     
-                    AVFrame* processed_frame = processFrame(proc_ctx, frame, ctx.hw_device_ctx);  // 使用全局函数
+                    AVFrame* processed_frame = processFrame(proc_ctx, frame, hw_frames_ref_out);
+                    av_frame_unref(frame); // Unref the input frame
                     
                     if (processed_frame) {
                         if (!encoder_initialized) {
@@ -446,7 +469,7 @@ int main(int argc, char** argv) {
         av_packet_unref(pkt);
         
         // Memory check
-        if (frame_count % 100 == 0) {
+        if (frame_count > 0 && frame_count % 100 == 0) {
             printMemoryUsage();
         }
     }
@@ -454,6 +477,10 @@ int main(int argc, char** argv) {
     // Finalize encoder
     if (encoder_initialized) {
         finalizeEncoder(ctx);
+    }
+    
+    if (hw_frames_ref_out) {
+        av_buffer_unref(&hw_frames_ref_out);
     }
     
     // Cleanup
