@@ -15,8 +15,8 @@ class D3D11VAPreprocessModule(nn.Module):
     """
     预处理模块：将 D3D11VA 解码的视频帧转换为深度估计模型的输入格式
     
-    输入：NV12 格式的视频帧 (来自D3D11VA解码后传输到系统内存)
-    输出：RGB 格式的 BCHW tensor，float32，值范围 0-1
+    输入：NV12 格式的视频帧 (来自D3D11VA解码后传输到系统内存) + 目标尺寸模板
+    输出：RGB 格式的 BCHW tensor，float32，值范围 0-1，尺寸与目标模板一致
     """
     
     def __init__(self):
@@ -66,30 +66,39 @@ class D3D11VAPreprocessModule(nn.Module):
         
         return rgb
     
-    def forward(self, y_plane, uv_plane, target_height, target_width):
+    def crop_to_target_size(self, rgb, target_template):
+        """
+        从左上角裁切到目标尺寸（去除 NVIDIA 解码的右/下 padding）
+        
+        Args:
+            rgb: (1, 3, H, W) - 源 RGB tensor（带 padding）
+            target_template: (1, 3, target_H, target_W) - 目标尺寸模板
+        
+        Returns:
+            裁切后的 RGB tensor: (1, 3, target_H, target_W)
+        """
+        _, _, target_h, target_w = target_template.shape
+        
+        # 直接从左上角裁切到目标尺寸
+        return rgb[:, :, :target_h, :target_w]
+    
+    def forward(self, y_plane, uv_plane, target_template):
         """
         前向传播
         
         Args:
             y_plane: (1, 1, H, W) - Y 分量，uint8 格式
             uv_plane: (1, 1, H//2, W) - UV 分量，uint8 格式，交错存储
-            target_height: 目标输出高度 (tensor scalar)
-            target_width: 目标输出宽度 (tensor scalar)
+            target_template: (1, 3, target_H, target_W) - 目标输出尺寸模板
         
         Returns:
-            RGB tensor: (1, 3, target_height, target_width), float32, 0-1
+            RGB tensor: (1, 3, target_H, target_W), float32, 0-1
         """
         # 转换 NV12 到 RGB
-        rgb = self.nv12_to_rgb(y_plane, uv_plane)
-            
-        # 动态调整到目标尺寸
-        # 将 scalar tensor 转换为 int (ONNX 兼容)
-        target_h = int(target_height.item()) if isinstance(target_height, torch.Tensor) else int(target_height)
-        target_w = int(target_width.item()) if isinstance(target_width, torch.Tensor) else int(target_width)
+        rgb = self.nv12_to_rgb(y_plane.float(), uv_plane.float())
         
-        if rgb.shape[2] != target_h or rgb.shape[3] != target_w:
-            rgb = F.interpolate(rgb, size=(target_h, target_w), 
-                              mode='bilinear', align_corners=False)
+        # 从左上角裁切到目标尺寸（去除右/下 padding）
+        rgb = self.crop_to_target_size(rgb, target_template)
         
         return rgb
 
@@ -101,19 +110,21 @@ def export_nv12_preprocess():
     model = D3D11VAPreprocessModule()
     model.eval()
     
-    # 创建示例输入 (模拟 NV12 格式)
-    # 假设输入分辨率是 3840x1634 (来自你的测试视频)
+    # 创建示例输入 (模拟 NV12 格式 + 目标尺寸模板)
+    # 假设输入分辨率是 3840x1634 (来自你的测试视频，可能带 padding)
     input_h, input_w = 1634, 3840
-    y_plane = torch.randint(0, 256, (1, 1, input_h, input_w), dtype=torch.float32)
-    uv_plane = torch.randint(0, 256, (1, 1, input_h//2, input_w), dtype=torch.float32)  # NV12: UV交错存储
+    y_plane = torch.randint(0, 256, (1, 1, input_h, input_w), dtype=torch.uint8)
+    uv_plane = torch.randint(0, 256, (1, 1, input_h//2, input_w), dtype=torch.uint8)
     
-    # 动态尺寸参数
-    target_height = torch.tensor(392, dtype=torch.int64)
-    target_width = torch.tensor(392, dtype=torch.int64)
+    # 目标输出尺寸模板 (假设实际想要的尺寸是 3840x1608，去掉了 padding)
+    target_h, target_w = 1608, 3840  # 根据你的需求调整
+    target_template = torch.zeros((1, 3, target_h, target_w), dtype=torch.float32)
     
     # 测试前向传播
     with torch.inference_mode():
-        output = model(y_plane, uv_plane, target_height, target_width)
+        output = model(y_plane, uv_plane, target_template)
+        logger.info(f"Input shape: Y={y_plane.shape}, UV={uv_plane.shape}")
+        logger.info(f"Target template shape: {target_template.shape}")
         logger.info(f"Output shape: {output.shape}, dtype: {output.dtype}")
         logger.info(f"Output range: [{output.min():.3f}, {output.max():.3f}]")
     
@@ -123,15 +134,16 @@ def export_nv12_preprocess():
     
     torch.onnx.export(
         model,
-        (y_plane, uv_plane, target_height, target_width),
+        (y_plane, uv_plane, target_template),
         output_path,
         opset_version=18,
-        input_names=["y_plane", "uv_plane", "target_height", "target_width"],
+        input_names=["y_plane", "uv_plane", "target_template"],
         output_names=["rgb_output"],
         dynamic_axes={
-            "y_plane": {2: "height", 3: "width"},
-            "uv_plane": {2: "height_half", 3: "width"},  # NV12: UV平面宽度和Y相同
-            "rgb_output": {0: "batch_size", 2: "target_height", 3: "target_width"}
+            "y_plane": {2: "input_height", 3: "input_width"},
+            "uv_plane": {2: "input_height_half", 3: "input_width"},
+            "target_template": {2: "target_height", 3: "target_width"},
+            "rgb_output": {2: "target_height", 3: "target_width"}
         }
     )
     
@@ -152,17 +164,15 @@ if __name__ == "__main__":
         # 测试 NV12 模型
         session = ort.InferenceSession(nv12_model_path, providers=['CPUExecutionProvider'])
         
-        # 模拟 NV12 输入 (3840x1634)
-        test_y = np.random.randint(0, 256, (1, 1, 1634, 3840), dtype=np.float32)
-        test_uv = np.random.randint(0, 256, (1, 1, 817, 3840), dtype=np.float32)  # height//2, width相同
-        target_h = np.array(320, dtype=np.int64) 
-        target_w = np.array(240, dtype=np.int64)
+        # 模拟 NV12 输入 (3840x1634，带 padding) + 目标尺寸模板 (3840x1608，去 padding)
+        test_y = np.random.randint(0, 256, (1, 1, 1634, 3840), dtype=np.uint8)
+        test_uv = np.random.randint(0, 256, (1, 1, 817, 3840), dtype=np.uint8)
+        test_target = np.zeros((1, 3, 1608, 3840), dtype=np.float32)
         
         outputs = session.run(None, {
             "y_plane": test_y,
-            "uv_plane": test_uv, 
-            "target_height": target_h, 
-            "target_width": target_w
+            "uv_plane": test_uv,
+            "target_template": test_target
         })
         logger.info(f"ONNX NV12 model test - output shape: {outputs[0].shape}")
         
