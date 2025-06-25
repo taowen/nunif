@@ -1,8 +1,9 @@
 #include <iostream>
-#include <format>
 #include <string_view>
 #include <memory>
 #include <stdexcept>
+#include <sstream>
+#include <iomanip>
 
 // CUDA D3D11 interop headers
 #include <cuda_d3d11_interop.h>
@@ -21,7 +22,7 @@ extern "C" {
 // 替代 helper_cuda.h 中的 checkCudaErrors 函数
 inline void checkCudaErrors(cudaError_t result) {
     if (result != cudaSuccess) {
-        std::cerr << std::format("CUDA error: {} ({})\n", cudaGetErrorString(result), static_cast<int>(result));
+        std::cerr << "CUDA error: " << cudaGetErrorString(result) << " (" << static_cast<int>(result) << ")\n";
         throw std::runtime_error("CUDA error occurred");
     }
 }
@@ -93,7 +94,7 @@ public:
         // 创建D3D11VA硬件设备上下文
         int ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
         if (ret < 0) {
-            std::cerr << std::format("Failed to create D3D11VA device context: {}\n", av_err_to_string(ret));
+            std::cerr << "Failed to create D3D11VA device context: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
@@ -154,7 +155,7 @@ public:
         dxgi_adapter->Release();
         
         if (cuda_status != cudaSuccess) {
-            std::cerr << std::format("Failed to get CUDA device for D3D11 adapter: {}\n", cudaGetErrorString(cuda_status));
+            std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(cuda_status) << "\n";
             return false;
         }
         
@@ -176,14 +177,14 @@ public:
         // 打开视频文件
         int ret = avformat_open_input(&format_ctx, filename.c_str(), nullptr, nullptr);
         if (ret < 0) {
-            std::cerr << std::format("Failed to open video file: {}\n", av_err_to_string(ret));
+            std::cerr << "Failed to open video file: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
         // 获取流信息
         ret = avformat_find_stream_info(format_ctx, nullptr);
         if (ret < 0) {
-            std::cerr << std::format("Failed to find stream info: {}\n", av_err_to_string(ret));
+            std::cerr << "Failed to find stream info: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
@@ -257,7 +258,7 @@ public:
         // 复制流参数到解码器上下文
         int ret = avcodec_parameters_to_context(codec_ctx, video_stream->codecpar);
         if (ret < 0) {
-            std::cerr << std::format("Failed to copy codec parameters: {}\n", av_err_to_string(ret));
+            std::cerr << "Failed to copy codec parameters: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
@@ -282,7 +283,7 @@ public:
         // 打开解码器
         ret = avcodec_open2(codec_ctx, decoder, nullptr);
         if (ret < 0) {
-            std::cerr << std::format("Failed to open codec: {}\n", av_err_to_string(ret));
+            std::cerr << "Failed to open codec: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
@@ -326,7 +327,7 @@ public:
         
         HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &cuda_interop_texture);
         if (FAILED(hr)) {
-            std::cerr << std::format("Failed to create CUDA interop texture: 0x{:x}\n", hr);
+            std::cerr << "Failed to create CUDA interop texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
             return false;
         }
         
@@ -338,8 +339,7 @@ public:
             &cuda_resource, cuda_interop_texture, cudaGraphicsRegisterFlagsNone);
         
         if (cuda_status != cudaSuccess) {
-            std::cerr << std::format("Failed to register interop texture with CUDA: {}\n", 
-                                    cudaGetErrorString(cuda_status));
+            std::cerr << "Failed to register interop texture with CUDA: " << cudaGetErrorString(cuda_status) << "\n";
             return false;
         }
         
@@ -394,11 +394,13 @@ public:
         // 映射 CUDA 资源
         // Mapping CUDA resource...
         checkCudaErrors(cudaGraphicsMapResources(1, &cuda_resource, cuda_stream));
+        std::cout << "✓ CUDA resource mapped successfully\n";
         
         // 查询CUDA资源信息（调试用，不输出）
         cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream);
         // query_cuda_resource_info();
         checkCudaErrors(cudaGraphicsMapResources(1, &cuda_resource, cuda_stream));
+        std::cout << "✓ CUDA resource remapped successfully\n";
         
         // 处理NV12格式的CUDA数据
         try {
@@ -406,6 +408,7 @@ public:
             cudaArray_t cuda_array;
             checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0));
             // Successfully mapped to CUDA array
+            std::cout << "✓ CUDA array obtained successfully - Address: 0x" << std::hex << reinterpret_cast<uintptr_t>(cuda_array) << std::dec << "\n";
 
             // 创建surface对象来访问NV12数据
             cudaResourceDesc resDesc = {};
@@ -416,25 +419,37 @@ public:
             cudaError_t surf_status = cudaCreateSurfaceObject(&surface, &resDesc);
             if (surf_status == cudaSuccess) {
                 // Created CUDA surface object for NV12 processing
+                std::cout << "✓ CUDA surface object created successfully - Handle: 0x" << std::hex << static_cast<unsigned int>(surface) << std::dec << "\n";
                 
                 // 这里可以添加实际的CUDA kernel处理代码
                 // 现在可以通过surface访问完整的NV12数据
                 
+                // 获取CUDA数组的详细信息作为映射成功的进一步证据
+                cudaChannelFormatDesc desc;
+                cudaExtent extent;
+                unsigned int flags;
+                if (cudaArrayGetInfo(&desc, &extent, &flags, cuda_array) == cudaSuccess) {
+                    std::cout << "✓ CUDA array info retrieved - Size: " << static_cast<int>(extent.width) << "x" << static_cast<int>(extent.height) << "x" << static_cast<int>(extent.depth) << ", Channels: " << (desc.x + desc.y + desc.z + desc.w) << ", Format: " << static_cast<int>(desc.f) << "\n";
+                }
+                
                 // 处理完成后销毁surface
                 cudaDestroySurfaceObject(surface);
+                std::cout << "✓ CUDA surface object destroyed successfully\n";
             } else {
-                std::cerr << std::format("Failed to create surface object: {}\n", cudaGetErrorString(surf_status));
+                std::cerr << "Failed to create surface object: " << cudaGetErrorString(surf_status) << "\n";
             }
             
             // 同步 CUDA 流
             checkCudaErrors(cudaStreamSynchronize(cuda_stream));
+            std::cout << "✓ CUDA stream synchronized successfully\n";
             
         } catch (const std::exception& e) {
-            std::cerr << std::format("Error processing CUDA arrays: {}\n", e.what());
+            std::cerr << "Error processing CUDA arrays: " << e.what() << "\n";
         }
         
         // 取消映射资源
         checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+        std::cout << "✓ CUDA resource unmapped successfully\n";
         
         // D3D11 frame processed with CUDA successfully
         return true;
@@ -452,7 +467,7 @@ public:
         // 尝试映射资源来获取信息
         cudaError_t map_status = cudaGraphicsMapResources(1, &cuda_resource, cuda_stream);
         if (map_status != cudaSuccess) {
-            std::cerr << std::format("Failed to map resource for query: {}\n", cudaGetErrorString(map_status));
+            std::cerr << "Failed to map resource for query: " << cudaGetErrorString(map_status) << "\n";
             return;
         }
         
@@ -479,9 +494,8 @@ public:
     void decode_frames() {
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
-        AVFrame* sw_frame = av_frame_alloc();
         
-        if (!packet || !frame || !sw_frame) {
+        if (!packet || !frame) {
             std::cerr << "Failed to allocate packet or frame\n";
             return;
         }
@@ -493,7 +507,7 @@ public:
             if (packet->stream_index == video_stream_index) {
                 int ret = avcodec_send_packet(codec_ctx, packet);
                 if (ret < 0) {
-                    std::cerr << std::format("Error sending packet: {}\n", av_err_to_string(ret));
+                    std::cerr << "Error sending packet: " << av_err_to_string(ret) << "\n";
                     break;
                 }
                 
@@ -502,7 +516,7 @@ public:
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                         break;
                     } else if (ret < 0) {
-                        std::cerr << std::format("Error receiving frame: {}\n", av_err_to_string(ret));
+                        std::cerr << "Error receiving frame: " << av_err_to_string(ret) << "\n";
                         break;
                     }
                     
@@ -518,19 +532,9 @@ public:
                         if (cuda_d3d11_initialized) {
                             process_d3d11_frame_with_cuda(frame);
                         }
-                        
-                        // 也可以传输到系统内存进行其他处理
-                        ret = av_hwframe_transfer_data(sw_frame, frame, 0);
-                        if (ret < 0) {
-                            std::cerr << std::format("Error transferring frame data: {}\n", av_err_to_string(ret));
-                            continue;
-                        }
-                        
-                        // Transferred to system memory: format_name (format_id)
                     } else {
                         // 如果不是D3D11格式，说明硬件解码失败
-                        std::cerr << std::format("Unexpected frame format: {} - hardware decoding may have failed\n", 
-                                                av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+                        std::cerr << "Unexpected frame format: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " - hardware decoding may have failed\n";
                         continue;
                     }
                     
@@ -546,7 +550,6 @@ public:
         
     cleanup_decode:
         av_frame_free(&frame);
-        av_frame_free(&sw_frame);
         av_packet_free(&packet);
         
         // Total frames decoded: N
@@ -588,10 +591,8 @@ int main(int argc, char* argv[]) {
         // 解码视频帧
         decoder.decode_frames();
         
-        // Video decoding with CUDA D3D11 interop completed successfully!
-        
     } catch (const std::exception& e) {
-        std::cerr << std::format("Error: {}\n", e.what());
+        std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
     
