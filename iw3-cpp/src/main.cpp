@@ -141,6 +141,19 @@ public:
                                 codec_ctx->width, codec_ctx->height, 
                                 av_get_pix_fmt_name(codec_ctx->pix_fmt));
         
+        // === 添加详细的像素格式日志 ===
+        std::cout << std::format("=== PIXEL FORMAT DEBUG INFO ===\n");
+        std::cout << std::format("Codec context pix_fmt: {} ({})\n", 
+                                av_get_pix_fmt_name(codec_ctx->pix_fmt), 
+                                static_cast<int>(codec_ctx->pix_fmt));
+        
+        // 检查是否是硬件格式
+        if (codec_ctx->pix_fmt == AV_PIX_FMT_D3D11) {
+            std::cout << "Hardware format: D3D11 detected\n";
+        } else {
+            std::cout << "Software format detected\n";
+        }
+        
         return true;
     }
     
@@ -176,27 +189,66 @@ public:
                     
                     frame_count++;
                     
+                    // === 添加帧格式详细日志 ===
+                    std::cout << std::format("=== FRAME {} FORMAT DEBUG ===\n", frame_count);
+                    std::cout << std::format("Frame format: {} ({})\n", 
+                                            av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)), 
+                                            frame->format);
+                    std::cout << std::format("Frame size: {}x{}\n", frame->width, frame->height);
+                    
                     // 如果是硬件帧，需要传输到系统内存
                     if (frame->format == AV_PIX_FMT_D3D11) {
+                        std::cout << "D3D11 hardware frame detected, transferring to system memory...\n";
+                        
                         ret = av_hwframe_transfer_data(sw_frame, frame, 0);
                         if (ret < 0) {
                             std::cerr << std::format("Error transferring frame data: {}\n", av_err_to_string(ret));
                             continue;
                         }
                         
+                        // === 添加传输后格式日志 ===
+                        std::cout << std::format("After transfer - SW frame format: {} ({})\n", 
+                                                av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_frame->format)), 
+                                                sw_frame->format);
+                        std::cout << std::format("SW frame size: {}x{}\n", sw_frame->width, sw_frame->height);
+                        
+                        // 检查具体的像素格式
+                        if (sw_frame->format == AV_PIX_FMT_YUV420P) {
+                            std::cout << ">>> DETECTED FORMAT: YUV420P <<<\n";
+                        } else if (sw_frame->format == AV_PIX_FMT_NV12) {
+                            std::cout << ">>> DETECTED FORMAT: NV12 <<<\n";
+                        } else if (sw_frame->format == AV_PIX_FMT_YUV444P) {
+                            std::cout << ">>> DETECTED FORMAT: YUV444P <<<\n";
+                        } else {
+                            std::cout << std::format(">>> DETECTED FORMAT: OTHER ({}) <<<\n", 
+                                                    av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_frame->format)));
+                        }
+                        
                         std::cout << std::format("Frame {}: {}x{} (D3D11VA decoded, transferred to system memory)\n", 
                                                 frame_count, sw_frame->width, sw_frame->height);
                     } else {
+                        // 软件解码的情况
+                        if (frame->format == AV_PIX_FMT_YUV420P) {
+                            std::cout << ">>> DETECTED FORMAT: YUV420P (Software) <<<\n";
+                        } else if (frame->format == AV_PIX_FMT_NV12) {
+                            std::cout << ">>> DETECTED FORMAT: NV12 (Software) <<<\n";
+                        } else {
+                            std::cout << std::format(">>> DETECTED FORMAT: OTHER (Software) ({}) <<<\n", 
+                                                    av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+                        }
+                        
                         std::cout << std::format("Frame {}: {}x{} (Software decoded)\n", 
                                                 frame_count, frame->width, frame->height);
                     }
+                    
+                    std::cout << "================================\n";
                     
                     // 这里可以处理解码后的帧数据
                     // sw_frame 包含了解码后的原始视频数据
                     
                     // 限制解码帧数，避免处理整个视频
-                    if (frame_count >= 10) {
-                        std::cout << "Processed 10 frames, stopping...\n";
+                    if (frame_count >= 3) {  // 减少到3帧，方便查看日志
+                        std::cout << "Processed 3 frames, stopping...\n";
                         goto cleanup_decode;
                     }
                 }
@@ -210,6 +262,7 @@ public:
         av_packet_free(&packet);
         
         std::cout << std::format("Total frames decoded: {}\n", frame_count);
+        std::cout << "=== END OF PIXEL FORMAT DEBUG ===\n";
     }
 };
 
