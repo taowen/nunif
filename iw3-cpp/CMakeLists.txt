@@ -30,3 +30,8 @@ copy_ffmpeg_dlls(iw3_cpp)
 include(FindCUDA)
 target_link_cuda(iw3_cpp)
 copy_cuda_dlls(iw3_cpp)
+
+# Link TensorRT to target
+include(FindTensorRT)
+target_link_tensorrt(iw3_cpp)
+copy_tensorrt_dlls(iw3_cpp)
