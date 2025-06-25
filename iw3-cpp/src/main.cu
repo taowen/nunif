@@ -97,7 +97,7 @@ public:
             return false;
         }
         
-        std::cout << "D3D11VA hardware acceleration initialized successfully\n";
+        // D3D11VA hardware acceleration initialized successfully
         return true;
     }
     
@@ -116,7 +116,7 @@ public:
         d3d11_device->AddRef();
         d3d11_context->AddRef();
         
-        std::cout << std::format("Retrieved D3D11 device from FFmpeg context\n");
+        // Retrieved D3D11 device from FFmpeg context
         
         // 查找 CUDA 设备
         int deviceCount = 0;
@@ -127,7 +127,7 @@ public:
             return false;
         }
         
-        std::cout << std::format("Found {} CUDA capable device(s)\n", deviceCount);
+        // Found N CUDA capable device(s)
         
         // 查找与 D3D11 设备对应的 CUDA 设备
         int cuda_device = -1;
@@ -158,7 +158,7 @@ public:
             return false;
         }
         
-        std::cout << std::format("Found matching CUDA device: {}\n", cuda_device);
+        // Found matching CUDA device: N
         
         // 设置 CUDA 设备
         checkCudaErrors(cudaSetDevice(cuda_device));
@@ -167,7 +167,7 @@ public:
         checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
         
         cuda_d3d11_initialized = true;
-        std::cout << "CUDA D3D11 interop initialized successfully\n";
+        // CUDA D3D11 interop initialized successfully
         
         return true;
     }
@@ -194,16 +194,14 @@ public:
             return false;
         }
         
-        std::cout << std::format("Found video stream at index: {}\n", video_stream_index);
+        // Found video stream at index: N
         return true;
     }
     
     bool setup_decoder() {
         AVStream* video_stream = format_ctx->streams[video_stream_index];
         
-        std::cout << std::format("Video codec: {} ({})\n", 
-                                avcodec_get_name(video_stream->codecpar->codec_id),
-                                static_cast<int>(video_stream->codecpar->codec_id));
+        // Video codec: name (id)
         
         // 只查找D3D11VA硬件解码器
         const AVCodec* decoder = nullptr;
@@ -213,7 +211,7 @@ public:
             return false;
         }
         
-        std::cout << "Looking for D3D11VA capable decoders...\n";
+        // Looking for D3D11VA capable decoders...
         
         // 枚举所有可用的解码器，查找支持D3D11VA的
         const AVCodec* codec = nullptr;
@@ -232,7 +230,7 @@ public:
                     }
                     if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
                         decoder = codec;
-                        std::cout << std::format("Found D3D11VA capable decoder: {}\n", codec->name);
+                        // Found D3D11VA capable decoder: name
                         break;
                     }
                 }
@@ -247,7 +245,7 @@ public:
             return false;
         }
         
-        std::cout << std::format("Using hardware decoder: {}\n", decoder->name);
+        // Using hardware decoder: name
         
         // 创建解码器上下文
         codec_ctx = avcodec_alloc_context3(decoder);
@@ -271,7 +269,7 @@ public:
             const enum AVPixelFormat* p;
             for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                 if (*p == AV_PIX_FMT_D3D11) {
-                    std::cout << "Selected D3D11 pixel format for hardware decoding\n";
+                    // Selected D3D11 pixel format for hardware decoding
                     return *p;
                 }
             }
@@ -279,7 +277,7 @@ public:
             return AV_PIX_FMT_NONE;  // 返回错误格式
         };
         
-        std::cout << "Set hardware device context and format callback for D3D11VA decoder\n";
+        // Set hardware device context and format callback for D3D11VA decoder
         
         // 打开解码器
         ret = avcodec_open2(codec_ctx, decoder, nullptr);
@@ -288,42 +286,27 @@ public:
             return false;
         }
         
-        std::cout << std::format("Decoder setup completed - Resolution: {}x{}, Pixel Format: {}\n", 
-                                codec_ctx->width, codec_ctx->height, 
-                                av_get_pix_fmt_name(codec_ctx->pix_fmt));
+        // Decoder setup completed - Resolution: WxH, Pixel Format: format
         
         return true;
     }
     
-    // 添加纹理调试信息的辅助函数
+    // 纹理调试信息的辅助函数 - 现在只用于内部调试，不输出日志
     void log_texture_info(ID3D11Texture2D* texture, const std::string& texture_name) {
         D3D11_TEXTURE2D_DESC desc;
         texture->GetDesc(&desc);
         
-        std::cout << std::format("=== {} Info ===\n", texture_name);
-        std::cout << std::format("  Size: {}x{}\n", desc.Width, desc.Height);
-        std::cout << std::format("  Format: {} (DXGI_FORMAT)\n", static_cast<uint32_t>(desc.Format));
-        std::cout << std::format("  MipLevels: {}\n", desc.MipLevels);
-        std::cout << std::format("  ArraySize: {}\n", desc.ArraySize);
-        std::cout << std::format("  Usage: {} (D3D11_USAGE)\n", static_cast<uint32_t>(desc.Usage));
-        std::cout << std::format("  BindFlags: 0x{:x}\n", desc.BindFlags);
-        std::cout << std::format("  CPUAccessFlags: 0x{:x}\n", desc.CPUAccessFlags);
-        std::cout << std::format("  MiscFlags: 0x{:x}\n", desc.MiscFlags);
-        
-        // 详细解释绑定标志
-        std::cout << "  BindFlags details:\n";
-        if (desc.BindFlags & D3D11_BIND_VERTEX_BUFFER) std::cout << "    - VERTEX_BUFFER\n";
-        if (desc.BindFlags & D3D11_BIND_INDEX_BUFFER) std::cout << "    - INDEX_BUFFER\n";
-        if (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) std::cout << "    - CONSTANT_BUFFER\n";
-        if (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) std::cout << "    - SHADER_RESOURCE\n";
-        if (desc.BindFlags & D3D11_BIND_STREAM_OUTPUT) std::cout << "    - STREAM_OUTPUT\n";
-        if (desc.BindFlags & D3D11_BIND_RENDER_TARGET) std::cout << "    - RENDER_TARGET\n";
-        if (desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) std::cout << "    - DEPTH_STENCIL\n";
-        if (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) std::cout << "    - UNORDERED_ACCESS\n";
-        if (desc.BindFlags & D3D11_BIND_DECODER) std::cout << "    - DECODER\n";
-        if (desc.BindFlags & D3D11_BIND_VIDEO_ENCODER) std::cout << "    - VIDEO_ENCODER\n";
-        
-        std::cout << "===================\n";
+        // === Texture Info ===
+        // Size: WxH
+        // Format: N (DXGI_FORMAT)
+        // MipLevels: N
+        // ArraySize: N
+        // Usage: N (D3D11_USAGE)
+        // BindFlags: 0xN
+        // CPUAccessFlags: 0xN
+        // MiscFlags: 0xN
+        // BindFlags details: VERTEX_BUFFER, INDEX_BUFFER, etc.
+        // ===================
     }
     
     bool create_cuda_interop_texture(UINT width, UINT height, DXGI_FORMAT format) {
@@ -347,8 +330,8 @@ public:
             return false;
         }
         
-        std::cout << "Created CUDA interop texture successfully\n";
-        log_texture_info(cuda_interop_texture, "CUDA Interop Texture");
+        // Created CUDA interop texture successfully
+        // Log texture info for debugging
         
         // 注册纹理到 CUDA
         cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
@@ -360,7 +343,7 @@ public:
             return false;
         }
         
-        std::cout << "Successfully registered interop texture with CUDA\n";
+        // Successfully registered interop texture with CUDA
         return true;
     }
     
@@ -374,11 +357,10 @@ public:
         ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
         int texture_index = (int)(intptr_t)d3d11_frame->data[1];
         
-        std::cout << std::format("Processing D3D11 texture: {}, index: {}\n", 
-                                (void*)d3d11_texture, texture_index);
+        // Processing D3D11 texture: address, index: N
         
-        // 记录源纹理信息
-        log_texture_info(d3d11_texture, "FFmpeg Source Texture");
+        // 记录源纹理信息（调试用，不输出）
+        // log_texture_info(d3d11_texture, "FFmpeg Source Texture");
         
         // 获取纹理描述
         D3D11_TEXTURE2D_DESC texture_desc;
@@ -386,19 +368,19 @@ public:
         
         // 如果还没有创建中间纹理，创建新的
         if (!cuda_interop_texture) {
-            std::cout << "Creating CUDA interop texture...\n";
+            // Creating CUDA interop texture...
             if (!create_cuda_interop_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format)) {
                 return false;
             }
         }
         
         // 复制纹理内容到中间纹理
-        std::cout << "Copying texture to CUDA interop texture...\n";
+        // Copying texture to CUDA interop texture...
         
         UINT src_subresource = D3D11CalcSubresource(0, texture_index, 1);
         UINT dst_subresource = D3D11CalcSubresource(0, 0, 1);
         
-        std::cout << std::format("Copying subresource {} to {}\n", src_subresource, dst_subresource);
+        // Copying subresource N to N
         
         d3d11_context->CopySubresourceRegion(
             cuda_interop_texture, dst_subresource, 0, 0, 0,
@@ -407,15 +389,15 @@ public:
         // 等待复制完成
         d3d11_context->Flush();
         
-        std::cout << "Texture copy completed\n";
+        // Texture copy completed
         
         // 映射 CUDA 资源
-        std::cout << "Mapping CUDA resource...\n";
+        // Mapping CUDA resource...
         checkCudaErrors(cudaGraphicsMapResources(1, &cuda_resource, cuda_stream));
         
-        // 查询CUDA资源信息
+        // 查询CUDA资源信息（调试用，不输出）
         cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream);
-        query_cuda_resource_info();
+        // query_cuda_resource_info();
         checkCudaErrors(cudaGraphicsMapResources(1, &cuda_resource, cuda_stream));
         
         // 处理NV12格式的CUDA数据
@@ -423,7 +405,7 @@ public:
             // 获取 CUDA 数组
             cudaArray_t cuda_array;
             checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0));
-            std::cout << "Successfully mapped to CUDA array\n";
+            // Successfully mapped to CUDA array
 
             // 创建surface对象来访问NV12数据
             cudaResourceDesc resDesc = {};
@@ -433,7 +415,7 @@ public:
             cudaSurfaceObject_t surface;
             cudaError_t surf_status = cudaCreateSurfaceObject(&surface, &resDesc);
             if (surf_status == cudaSuccess) {
-                std::cout << "Created CUDA surface object for NV12 processing\n";
+                // Created CUDA surface object for NV12 processing
                 
                 // 这里可以添加实际的CUDA kernel处理代码
                 // 现在可以通过surface访问完整的NV12数据
@@ -454,18 +436,18 @@ public:
         // 取消映射资源
         checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
         
-        std::cout << "D3D11 frame processed with CUDA successfully\n";
+        // D3D11 frame processed with CUDA successfully
         return true;
     }
     
-    // 添加一个函数来查询CUDA图形资源的信息
+    // 查询CUDA图形资源的信息 - 调试用，不输出日志
     void query_cuda_resource_info() {
         if (!cuda_resource) {
-            std::cout << "No CUDA resource to query\n";
+            // No CUDA resource to query
             return;
         }
         
-        std::cout << "=== CUDA Resource Info ===\n";
+        // === CUDA Resource Info ===
         
         // 尝试映射资源来获取信息
         cudaError_t map_status = cudaGraphicsMapResources(1, &cuda_resource, cuda_stream);
@@ -484,16 +466,14 @@ public:
                     cudaExtent extent;
                     unsigned int flags;
                     if (cudaArrayGetInfo(&desc, &extent, &flags, array) == cudaSuccess) {
-                        std::cout << std::format("  Subresource {}, Mip {}: {}x{}x{}, channels: {}\n",
-                                                subresource, miplevel, extent.width, extent.height, extent.depth,
-                                                desc.x + desc.y + desc.z + desc.w);
+                        // Subresource N, Mip N: WxHxD, channels: N
                     }
                 }
             }
         }
         
         cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream);
-        std::cout << "===========================\n";
+        // ===========================
     }
     
     void decode_frames() {
@@ -528,14 +508,12 @@ public:
                     
                     frame_count++;
                     
-                    std::cout << std::format("=== FRAME {} ===\n", frame_count);
-                    std::cout << std::format("Frame format: {} ({})\n", 
-                                            av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)), 
-                                            frame->format);
+                    // === FRAME N ===
+                    // Frame format: format_name (format_id)
                     
                     // 只处理D3D11硬件帧
                     if (frame->format == AV_PIX_FMT_D3D11) {
-                        std::cout << "Processing D3D11 hardware frame with CUDA...\n";
+                        // Processing D3D11 hardware frame with CUDA...
                         
                         if (cuda_d3d11_initialized) {
                             process_d3d11_frame_with_cuda(frame);
@@ -548,9 +526,7 @@ public:
                             continue;
                         }
                         
-                        std::cout << std::format("Transferred to system memory: {} ({})\n", 
-                                                av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_frame->format)), 
-                                                sw_frame->format);
+                        // Transferred to system memory: format_name (format_id)
                     } else {
                         // 如果不是D3D11格式，说明硬件解码失败
                         std::cerr << std::format("Unexpected frame format: {} - hardware decoding may have failed\n", 
@@ -560,7 +536,7 @@ public:
                     
                     // 限制解码帧数
                     if (frame_count >= 5) {
-                        std::cout << "Processed 5 frames, stopping...\n";
+                        // Processed 5 frames, stopping...
                         goto cleanup_decode;
                     }
                 }
@@ -573,7 +549,7 @@ public:
         av_frame_free(&sw_frame);
         av_packet_free(&packet);
         
-        std::cout << std::format("Total frames decoded: {}\n", frame_count);
+        // Total frames decoded: N
     }
 };
 
@@ -612,7 +588,7 @@ int main(int argc, char* argv[]) {
         // 解码视频帧
         decoder.decode_frames();
         
-        std::cout << "Video decoding with CUDA D3D11 interop completed successfully!\n";
+        // Video decoding with CUDA D3D11 interop completed successfully!
         
     } catch (const std::exception& e) {
         std::cerr << std::format("Error: {}\n", e.what());
