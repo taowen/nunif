@@ -25,3 +25,8 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT i
 include(FindFFmpeg)
 target_link_ffmpeg(iw3_cpp)
 copy_ffmpeg_dlls(iw3_cpp)
+
+# Link CUDA to target
+include(FindCUDA)
+target_link_cuda(iw3_cpp)
+copy_cuda_dlls(iw3_cpp)
