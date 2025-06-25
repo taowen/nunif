@@ -205,53 +205,49 @@ public:
                                 avcodec_get_name(video_stream->codecpar->codec_id),
                                 static_cast<int>(video_stream->codecpar->codec_id));
         
-        // 简化的解码器查找逻辑
+        // 只查找D3D11VA硬件解码器
         const AVCodec* decoder = nullptr;
         
-        if (hw_device_ctx) {
-            std::cout << "Looking for D3D11VA capable decoders...\n";
-            
-            // 枚举所有可用的解码器，查找支持D3D11VA的
-            const AVCodec* codec = nullptr;
-            void* opaque = nullptr;
-            
-            while ((codec = av_codec_iterate(&opaque))) {
-                if (codec->type == AVMEDIA_TYPE_VIDEO && 
-                    av_codec_is_decoder(codec) &&
-                    codec->id == video_stream->codecpar->codec_id) {
-                    
-                    // 检查是否支持 D3D11VA
-                    for (int i = 0; ; i++) {
-                        const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
-                        if (!config) {
-                            break;
-                        }
-                        if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
-                            decoder = codec;
-                            std::cout << std::format("Found D3D11VA capable decoder: {}\n", codec->name);
-                            break;
-                        }
-                    }
-                    
-                    if (decoder) break;
-                }
-            }
-        }
-        
-        // 如果没有找到硬件解码器，使用软件解码器
-        if (!decoder) {
-            decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
-            if (decoder) {
-                std::cout << std::format("Using software decoder: {}\n", decoder->name);
-            }
-        } else {
-            std::cout << std::format("Using hardware decoder: {}\n", decoder->name);
-        }
-        
-        if (!decoder) {
-            std::cerr << "Decoder not found\n";
+        if (!hw_device_ctx) {
+            std::cerr << "D3D11VA device context not initialized\n";
             return false;
         }
+        
+        std::cout << "Looking for D3D11VA capable decoders...\n";
+        
+        // 枚举所有可用的解码器，查找支持D3D11VA的
+        const AVCodec* codec = nullptr;
+        void* opaque = nullptr;
+        
+        while ((codec = av_codec_iterate(&opaque))) {
+            if (codec->type == AVMEDIA_TYPE_VIDEO && 
+                av_codec_is_decoder(codec) &&
+                codec->id == video_stream->codecpar->codec_id) {
+                
+                // 检查是否支持 D3D11VA
+                for (int i = 0; ; i++) {
+                    const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+                    if (!config) {
+                        break;
+                    }
+                    if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
+                        decoder = codec;
+                        std::cout << std::format("Found D3D11VA capable decoder: {}\n", codec->name);
+                        break;
+                    }
+                }
+                
+                if (decoder) break;
+            }
+        }
+        
+        // 如果没有找到硬件解码器，直接失败
+        if (!decoder) {
+            std::cerr << "No D3D11VA capable decoder found\n";
+            return false;
+        }
+        
+        std::cout << std::format("Using hardware decoder: {}\n", decoder->name);
         
         // 创建解码器上下文
         codec_ctx = avcodec_alloc_context3(decoder);
@@ -268,41 +264,22 @@ public:
         }
         
         // 设置硬件设备上下文
-        if (hw_device_ctx) {
-            // 检查解码器是否支持D3D11VA
-            bool is_hw_decoder = false;
-            for (int i = 0; ; i++) {
-                const AVCodecHWConfig* config = avcodec_get_hw_config(decoder, i);
-                if (!config) {
-                    break;
-                }
-                if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
-                    is_hw_decoder = true;
-                    break;
+        codec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+        
+        // 设置硬件帧获取回调
+        codec_ctx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
+            const enum AVPixelFormat* p;
+            for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+                if (*p == AV_PIX_FMT_D3D11) {
+                    std::cout << "Selected D3D11 pixel format for hardware decoding\n";
+                    return *p;
                 }
             }
-            
-            if (is_hw_decoder) {
-                codec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
-                
-                // 设置硬件帧获取回调
-                codec_ctx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
-                    const enum AVPixelFormat* p;
-                    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-                        if (*p == AV_PIX_FMT_D3D11) {
-                            std::cout << "Selected D3D11 pixel format for hardware decoding\n";
-                            return *p;
-                        }
-                    }
-                    std::cout << "D3D11 format not available, using first available format\n";
-                    return pix_fmts[0];
-                };
-                
-                std::cout << "Set hardware device context and format callback for D3D11VA decoder\n";
-            } else {
-                std::cout << "Decoder does not support D3D11VA, using software decoding\n";
-            }
-        }
+            std::cerr << "D3D11 format not available\n";
+            return AV_PIX_FMT_NONE;  // 返回错误格式
+        };
+        
+        std::cout << "Set hardware device context and format callback for D3D11VA decoder\n";
         
         // 打开解码器
         ret = avcodec_open2(codec_ctx, decoder, nullptr);
@@ -556,7 +533,7 @@ public:
                                             av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)), 
                                             frame->format);
                     
-                    // 如果是硬件帧，直接用 CUDA 处理
+                    // 只处理D3D11硬件帧
                     if (frame->format == AV_PIX_FMT_D3D11) {
                         std::cout << "Processing D3D11 hardware frame with CUDA...\n";
                         
@@ -575,8 +552,10 @@ public:
                                                 av_get_pix_fmt_name(static_cast<AVPixelFormat>(sw_frame->format)), 
                                                 sw_frame->format);
                     } else {
-                        // 软件解码的情况
-                        std::cout << "Software decoded frame\n";
+                        // 如果不是D3D11格式，说明硬件解码失败
+                        std::cerr << std::format("Unexpected frame format: {} - hardware decoding may have failed\n", 
+                                                av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
+                        continue;
                     }
                     
                     // 限制解码帧数
