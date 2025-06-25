@@ -14,61 +14,111 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
-#include <NvInfer.h>
-#include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 #include <cuda_d3d11_interop.h>
 
-// TensorRT Logger
-class Logger : public nvinfer1::ILogger {
-public:
-    void log(Severity severity, const char* msg) noexcept override {
-        if (severity <= Severity::kWARNING) {
-            std::cout << msg << std::endl;
-        }
-    }
-};
-
-static Logger gLogger;
-
-// TensorRT上下文结构
-struct TensorRTContext {
-    nvinfer1::IRuntime* runtime = nullptr;
-    nvinfer1::ICudaEngine* engine = nullptr;
-    nvinfer1::IExecutionContext* context = nullptr;
-    
+// CUDA预处理上下文结构
+struct CudaPreprocessContext {
     // CUDA内存
-    void* d_input_nv12 = nullptr;      // NV12纹理
-    void* d_target_template = nullptr; // 目标尺寸模板
-    void* d_output_rgb = nullptr;   // RGB输出
+    void* d_input_nv12 = nullptr;      // NV12纹理数据
+    void* d_output_rgb = nullptr;      // RGB输出 (float32)
     
     // D3D11-CUDA互操作
     cudaGraphicsResource_t cuda_nv12_resource = nullptr;
     
     // 张量尺寸
-    int input_h = 0, input_w = 0;
-    int target_h = 0, target_w = 0;
+    int input_h = 0, input_w = 0;      // 输入NV12尺寸(带padding)
+    int target_h = 0, target_w = 0;    // 目标输出尺寸(去padding)
     
-    ~TensorRTContext() {
+    ~CudaPreprocessContext() {
         cleanup();
     }
     
     void cleanup() {
         if (d_input_nv12) cudaFree(d_input_nv12);
-        if (d_target_template) cudaFree(d_target_template);
         if (d_output_rgb) cudaFree(d_output_rgb);
         
         if (cuda_nv12_resource) {
             cudaGraphicsUnregisterResource(cuda_nv12_resource);
         }
-        
-        // In TensorRT 10, these objects are automatically managed
-        // No need to call destroy() explicitly
-        delete context;
-        delete engine;
-        delete runtime;
     }
 };
+
+// CUDA kernel 声明
+extern "C" {
+    void launch_nv12_to_rgb_kernel(
+        const uint8_t* nv12_data,
+        float* rgb_output,
+        int input_width, int input_height,
+        int target_width, int target_height,
+        cudaStream_t stream = 0
+    );
+}
+
+// CUDA kernel 实现 (内联在同一文件中)
+__global__ void nv12_to_rgb_kernel(
+    const uint8_t* nv12_data,
+    float* rgb_output,
+    int input_width, int input_height,
+    int target_width, int target_height
+) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= target_width || y >= target_height) return;
+    
+    // NV12 格式布局：
+    // - Y 平面：前 input_height 行
+    // - UV 平面：后 input_height/2 行，交错存储 (UVUV...)
+    
+    // 获取 Y 值
+    uint8_t Y = nv12_data[y * input_width + x];
+    
+    // 获取对应的 U, V 值 (UV平面在Y平面之后)
+    int uv_y = y / 2;  // UV平面高度是Y平面的一半
+    int uv_x = (x / 2) * 2;  // UV是2x2子采样，且交错存储
+    int uv_offset = input_height * input_width + uv_y * input_width + uv_x;
+    
+    uint8_t U = nv12_data[uv_offset];     // U在偶数位置
+    uint8_t V = nv12_data[uv_offset + 1]; // V在奇数位置
+    
+    // YUV to RGB 转换 (BT.709)
+    float y_norm = Y / 255.0f;
+    float u_norm = (U / 255.0f) - 0.5f;
+    float v_norm = (V / 255.0f) - 0.5f;
+    
+    float r = y_norm + 1.5748f * v_norm;
+    float g = y_norm - 0.1873f * u_norm - 0.4681f * v_norm;
+    float b = y_norm + 1.8556f * u_norm;
+    
+    // 钳制到 [0, 1] 范围
+    r = fmaxf(0.0f, fminf(1.0f, r));
+    g = fmaxf(0.0f, fminf(1.0f, g));
+    b = fmaxf(0.0f, fminf(1.0f, b));
+    
+    // 输出为 CHW 格式 (channels first)
+    int pixel_idx = y * target_width + x;
+    rgb_output[pixel_idx] = r;                                          // R channel
+    rgb_output[target_height * target_width + pixel_idx] = g;           // G channel  
+    rgb_output[2 * target_height * target_width + pixel_idx] = b;       // B channel
+}
+
+// CUDA kernel 启动函数
+extern "C" void launch_nv12_to_rgb_kernel(
+    const uint8_t* nv12_data,
+    float* rgb_output,
+    int input_width, int input_height,
+    int target_width, int target_height,
+    cudaStream_t stream
+) {
+    dim3 blockSize(16, 16);
+    dim3 gridSize((target_width + blockSize.x - 1) / blockSize.x,
+                  (target_height + blockSize.y - 1) / blockSize.y);
+    
+    nv12_to_rgb_kernel<<<gridSize, blockSize, 0, stream>>>(
+        nv12_data, rgb_output, input_width, input_height, target_width, target_height
+    );
+}
 
 // 辅助函数：处理 av_err2str 在 MSVC 中的问题
 std::string av_err_to_string(int errnum) {
@@ -84,7 +134,7 @@ private:
     AVBufferRef* hw_device_ctx = nullptr;
     int video_stream_index = -1;
     
-    TensorRTContext trt_ctx;
+    CudaPreprocessContext cuda_ctx;
     
 public:
     VideoDecoder() = default;
@@ -215,32 +265,31 @@ public:
         return true;
     }
     
-    bool initialize_tensorrt(const std::string& onnx_model_path) {
-        // 1. 创建TensorRT运行时
-        trt_ctx.runtime = nvinfer1::createInferRuntime(gLogger);
-        if (!trt_ctx.runtime) {
-            std::cerr << "Failed to create TensorRT runtime\n";
+    bool initialize_cuda_preprocess() {
+        // 设置张量尺寸
+        cuda_ctx.input_h = 1634;   // 带padding的高度
+        cuda_ctx.input_w = 3840;   // 宽度
+        cuda_ctx.target_h = 1608;  // 目标高度（去padding）
+        cuda_ctx.target_w = 3840;  // 目标宽度
+        
+        // NV12 完整纹理尺寸 (H*1.5)
+        int nv12_total_h = static_cast<int>(cuda_ctx.input_h * 1.5);
+        
+        // 分配输入内存（完整的NV12纹理）
+        size_t nv12_texture_size = nv12_total_h * cuda_ctx.input_w * sizeof(uint8_t);
+        size_t output_size = cuda_ctx.target_h * cuda_ctx.target_w * 3 * sizeof(float);
+        
+        if (cudaMalloc(&cuda_ctx.d_input_nv12, nv12_texture_size) != cudaSuccess) {
+            std::cerr << "Failed to allocate NV12 texture memory\n";
             return false;
         }
         
-        // 2. 加载ONNX模型并构建引擎
-        if (!build_engine_from_onnx(onnx_model_path)) {
+        if (cudaMalloc(&cuda_ctx.d_output_rgb, output_size) != cudaSuccess) {
+            std::cerr << "Failed to allocate output RGB memory\n";
             return false;
         }
         
-        // 3. 创建执行上下文
-        trt_ctx.context = trt_ctx.engine->createExecutionContext();
-        if (!trt_ctx.context) {
-            std::cerr << "Failed to create execution context\n";
-            return false;
-        }
-        
-        // 4. 分配GPU内存
-        if (!allocate_gpu_memory()) {
-            return false;
-        }
-        
-        std::cout << "TensorRT initialized successfully\n";
+        std::cout << "CUDA preprocessing initialized successfully\n";
         return true;
     }
     
@@ -278,11 +327,11 @@ public:
                     
                     // 如果是硬件帧，直接处理
                     if (frame->format == AV_PIX_FMT_D3D11) {
-                        std::cout << std::format("Processing D3D11 frame {} with TensorRT...\n", frame_count);
+                        std::cout << std::format("Processing D3D11 frame {} with CUDA...\n", frame_count);
                         
-                        // 使用TensorRT处理帧
-                        if (!process_frame_with_tensorrt(frame)) {
-                            std::cerr << "Failed to process frame with TensorRT\n";
+                        // 使用CUDA处理帧
+                        if (!process_frame_with_cuda(frame)) {
+                            std::cerr << "Failed to process frame with CUDA\n";
                             continue;
                         }
                     } else {
@@ -301,9 +350,6 @@ public:
                     }
                     
                     std::cout << "================================\n";
-                    
-                    // 这里可以处理解码后的帧数据
-                    // sw_frame 包含了解码后的原始视频数据
                     
                     // 限制解码帧数，避免处理整个视频
                     if (frame_count >= 3) {  // 减少到3帧，方便查看日志
@@ -325,94 +371,7 @@ public:
     }
     
 private:
-    bool build_engine_from_onnx(const std::string& onnx_path) {
-        // 创建构建器
-        auto builder = std::unique_ptr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(gLogger));
-        if (!builder) {
-            std::cerr << "Failed to create builder\n";
-            return false;
-        }
-        
-        // 创建网络
-        const auto explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-        auto network = std::unique_ptr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(explicitBatch));
-        if (!network) {
-            std::cerr << "Failed to create network\n";
-            return false;
-        }
-        
-        // 创建ONNX解析器
-        auto parser = std::unique_ptr<nvonnxparser::IParser>(nvonnxparser::createParser(*network, gLogger));
-        if (!parser) {
-            std::cerr << "Failed to create ONNX parser\n";
-            return false;
-        }
-        
-        // 解析ONNX模型
-        if (!parser->parseFromFile(onnx_path.c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
-            std::cerr << "Failed to parse ONNX model\n";
-            return false;
-        }
-        
-        // 配置构建器
-        auto config = std::unique_ptr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-        if (!config) {
-            std::cerr << "Failed to create builder config\n";
-            return false;
-        }
-        
-        // Use setMemoryPoolLimit instead of setMaxWorkspaceSize for TensorRT 10
-        config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30); // 1GB
-        config->setFlag(nvinfer1::BuilderFlag::kFP16); // 启用FP16
-        
-        // 构建引擎
-        trt_ctx.engine = builder->buildEngineWithConfig(*network, *config);
-        if (!trt_ctx.engine) {
-            std::cerr << "Failed to build TensorRT engine\n";
-            return false;
-        }
-        
-        return true;
-    }
-    
-    bool allocate_gpu_memory() {
-        // 设置张量尺寸
-        trt_ctx.input_h = 1634;   // 带padding的高度
-        trt_ctx.input_w = 3840;   // 宽度
-        trt_ctx.target_h = 1608;  // 目标高度（去padding）
-        trt_ctx.target_w = 3840;  // 目标宽度
-        
-        // NV12 完整纹理尺寸 (H*1.5)
-        int nv12_total_h = static_cast<int>(trt_ctx.input_h * 1.5);
-        
-        // 分配输入内存（完整的NV12纹理）
-        size_t nv12_texture_size = nv12_total_h * trt_ctx.input_w * sizeof(uint8_t);
-        size_t template_size = trt_ctx.target_h * trt_ctx.target_w * 3 * sizeof(float);
-        size_t output_size = trt_ctx.target_h * trt_ctx.target_w * 3 * sizeof(float);
-        
-        // 只需要一个完整的 NV12 纹理内存
-        if (cudaMalloc(&trt_ctx.d_input_nv12, nv12_texture_size) != cudaSuccess) {
-            std::cerr << "Failed to allocate NV12 texture memory\n";
-            return false;
-        }
-        
-        if (cudaMalloc(&trt_ctx.d_target_template, template_size) != cudaSuccess) {
-            std::cerr << "Failed to allocate target template memory\n";
-            return false;
-        }
-        
-        if (cudaMalloc(&trt_ctx.d_output_rgb, output_size) != cudaSuccess) {
-            std::cerr << "Failed to allocate output RGB memory\n";
-            return false;
-        }
-        
-        // 初始化目标模板（零填充）
-        cudaMemset(trt_ctx.d_target_template, 0, template_size);
-        
-        return true;
-    }
-    
-    bool process_frame_with_tensorrt(AVFrame* frame) {
+    bool process_frame_with_cuda(AVFrame* frame) {
         if (!frame || frame->format != AV_PIX_FMT_D3D11) {
             std::cerr << "Frame is not D3D11 format\n";
             return false;
@@ -432,8 +391,8 @@ private:
             return false;
         }
         
-        // 3. 执行TensorRT推理
-        if (!run_tensorrt_inference()) {
+        // 3. 执行CUDA预处理
+        if (!run_cuda_preprocessing()) {
             return false;
         }
         
@@ -471,7 +430,7 @@ private:
             
             // 注册D3D11纹理到CUDA
             cudaError_t result = cudaGraphicsD3D11RegisterResource(
-                &trt_ctx.cuda_nv12_resource, 
+                &cuda_ctx.cuda_nv12_resource, 
                 pTexture, 
                 cudaGraphicsRegisterFlagsReadOnly
             );
@@ -482,7 +441,7 @@ private:
             }
             
             // 映射资源
-            result = cudaGraphicsMapResources(1, &trt_ctx.cuda_nv12_resource);
+            result = cudaGraphicsMapResources(1, &cuda_ctx.cuda_nv12_resource);
             if (result != cudaSuccess) {
                 std::cerr << "Failed to map CUDA resource: " << cudaGetErrorString(result) << "\n";
                 return false;
@@ -490,30 +449,25 @@ private:
             
             // 获取CUDA数组
             cudaArray_t cudaArray;
-            result = cudaGraphicsSubResourceGetMappedArray(&cudaArray, trt_ctx.cuda_nv12_resource, subresourceIndex, 0);
+            result = cudaGraphicsSubResourceGetMappedArray(&cudaArray, cuda_ctx.cuda_nv12_resource, subresourceIndex, 0);
             if (result != cudaSuccess) {
                 std::cerr << "Failed to get mapped array: " << cudaGetErrorString(result) << "\n";
                 return false;
             }
             
-            // 添加CUDA数组信息日志
-            cudaChannelFormatDesc channelDesc;
-            cudaExtent extent;
-            unsigned int flags;
-            
-            result = cudaArrayGetInfo(&channelDesc, &extent, &flags, cudaArray);
-            if (result == cudaSuccess) {
-                std::cout << "=== CUDA ARRAY DEBUG INFO ===\n";
-                std::cout << std::format("CUDA Array dimensions: {}x{}x{}\n", 
-                                        extent.width, extent.height, extent.depth);
-                std::cout << std::format("Channel format: x={}, y={}, z={}, w={}\n",
-                                        channelDesc.x, channelDesc.y, channelDesc.z, channelDesc.w);
-                std::cout << std::format("Channel kind: {}\n", static_cast<int>(channelDesc.f));
-                std::cout << "=== END CUDA ARRAY DEBUG ===\n";
-            }
+            // 将CUDA数组数据复制到线性内存
+            cudaMemcpy2DFromArray(
+                cuda_ctx.d_input_nv12, 
+                cuda_ctx.input_w * sizeof(uint8_t),
+                cudaArray,
+                0, 0,
+                cuda_ctx.input_w * sizeof(uint8_t),
+                static_cast<int>(cuda_ctx.input_h * 1.5),
+                cudaMemcpyDeviceToDevice
+            );
             
             // 添加CUDA映射成功的确认日志
-            std::cout << "D3D11 to CUDA mapping successful\n";
+            std::cout << "D3D11 to CUDA mapping and copy successful\n";
         } else {
             std::cout << std::format(">>> WARNING: Unexpected format {} <<<\n", static_cast<int>(desc.Format));
         }
@@ -523,33 +477,38 @@ private:
         return true;
     }
     
-    bool run_tensorrt_inference() {
-        // 获取张量名称（对应新的ONNX模型）
-        const char* nv12_input_name = "nv12_texture";
-        const char* template_input_name = "target_template";
-        const char* output_name = "rgb_output";
+    bool run_cuda_preprocessing() {
+        // 启动 CUDA kernel 进行 NV12 到 RGB 转换
+        launch_nv12_to_rgb_kernel(
+            static_cast<const uint8_t*>(cuda_ctx.d_input_nv12),
+            static_cast<float*>(cuda_ctx.d_output_rgb),
+            cuda_ctx.input_w, cuda_ctx.input_h,
+            cuda_ctx.target_w, cuda_ctx.target_h
+        );
         
-        // 设置张量地址
-        trt_ctx.context->setTensorAddress(nv12_input_name, trt_ctx.d_input_nv12);
-        trt_ctx.context->setTensorAddress(template_input_name, trt_ctx.d_target_template);
-        trt_ctx.context->setTensorAddress(output_name, trt_ctx.d_output_rgb);
-        
-        // 执行推理
-        bool status = trt_ctx.context->executeV2(nullptr);
-        if (!status) {
-            std::cerr << "TensorRT inference failed\n";
+        // 检查CUDA错误
+        cudaError_t result = cudaGetLastError();
+        if (result != cudaSuccess) {
+            std::cerr << "CUDA kernel failed: " << cudaGetErrorString(result) << "\n";
             return false;
         }
         
-        std::cout << "TensorRT inference completed successfully\n";
+        // 等待kernel完成
+        result = cudaDeviceSynchronize();
+        if (result != cudaSuccess) {
+            std::cerr << "CUDA synchronization failed: " << cudaGetErrorString(result) << "\n";
+            return false;
+        }
+        
+        std::cout << "CUDA preprocessing completed successfully\n";
         return true;
     }
     
     void unmap_cuda_resources() {
-        if (trt_ctx.cuda_nv12_resource) {
-            cudaGraphicsUnmapResources(1, &trt_ctx.cuda_nv12_resource);
-            cudaGraphicsUnregisterResource(trt_ctx.cuda_nv12_resource);
-            trt_ctx.cuda_nv12_resource = nullptr;
+        if (cuda_ctx.cuda_nv12_resource) {
+            cudaGraphicsUnmapResources(1, &cuda_ctx.cuda_nv12_resource);
+            cudaGraphicsUnregisterResource(cuda_ctx.cuda_nv12_resource);
+            cuda_ctx.cuda_nv12_resource = nullptr;
         }
     }
 };
@@ -571,9 +530,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // 初始化TensorRT
-        if (!decoder.initialize_tensorrt("d3d11va_direct_preprocess.onnx")) {
-            std::cerr << "Failed to initialize TensorRT\n";
+        // 初始化CUDA预处理
+        if (!decoder.initialize_cuda_preprocess()) {
+            std::cerr << "Failed to initialize CUDA preprocessing\n";
             return 1;
         }
         
