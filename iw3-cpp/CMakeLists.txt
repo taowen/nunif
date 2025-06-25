@@ -9,19 +9,19 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(MSVC)
-    add_compile_options(/W4 /WX- /permissive-)
-    add_compile_options(/std:c++latest)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
+# Windows/MSVC compile options
+add_compile_options(/W4 /WX- /permissive-)
+add_compile_options(/std:c++latest)
+
+# Add cmake directory to module path
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 add_executable(iw3_cpp src/main.cpp)
 
-set_target_properties(iw3_cpp PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
+# Set Visual Studio startup project
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT iw3_cpp)
 
-if(MSVC)
-    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT hello_world)
-endif()
+# Link FFmpeg to target
+include(FindFFmpeg)
+target_link_ffmpeg(iw3_cpp)
+copy_ffmpeg_dlls(iw3_cpp)
