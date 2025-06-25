@@ -4,6 +4,11 @@
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
 
 #include <cuda_d3d11_interop.h>
 #include <cuda_runtime_api.h>
@@ -43,6 +48,58 @@ struct ColorSpaceInfo {
     DXGI_FORMAT dxgi_format = DXGI_FORMAT_UNKNOWN;
 };
 
+// Frame data structure for queue communication
+struct DecodedFrame {
+    AVFrame* frame;
+    bool is_end_signal;
+    
+    DecodedFrame() : frame(nullptr), is_end_signal(false) {}
+    DecodedFrame(AVFrame* f) : frame(f), is_end_signal(false) {}
+    static DecodedFrame end_signal() {
+        DecodedFrame data;
+        data.is_end_signal = true;
+        return data;
+    }
+};
+
+// Thread-safe queue for frame communication
+class FrameQueue {
+private:
+    std::queue<DecodedFrame> queue_;
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    size_t max_size_;
+    
+public:
+    FrameQueue(size_t max_size = 10) : max_size_(max_size) {}
+    
+    void push(const DecodedFrame& data) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return queue_.size() < max_size_; });
+        queue_.push(data);
+        condition_.notify_one();
+    }
+    
+    DecodedFrame pop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this] { return !queue_.empty(); });
+        DecodedFrame data = queue_.front();
+        queue_.pop();
+        condition_.notify_one();
+        return data;
+    }
+    
+    bool empty() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+    
+    size_t size() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+};
+
 class VideoDecoder {
 private:
     AVFormatContext* format_ctx = nullptr;
@@ -79,6 +136,15 @@ private:
         int bit_depth;
         int is_hdr;
     };
+    
+    // Thread management
+    FrameQueue frame_queue_;
+    std::atomic<bool> decode_finished_{false};
+    std::atomic<bool> process_finished_{false};
+    
+    // Color space info - shared for entire video
+    ColorSpaceInfo video_color_info_;
+    bool color_info_detected_ = false;
     
 public:
     VideoDecoder() = default;
@@ -383,14 +449,14 @@ public:
             }
         }
         
-        std::cout << "=== Color Space Information ===\n";
+        std::cout << "=== Video Color Space Information (Detected Once) ===\n";
         std::cout << "Color Space: " << av_color_space_name(info.color_space) << " (" << static_cast<int>(info.color_space) << ")\n";
         std::cout << "Color Primaries: " << av_color_primaries_name(info.color_primaries) << " (" << static_cast<int>(info.color_primaries) << ")\n";
         std::cout << "Transfer Characteristics: " << av_color_transfer_name(info.color_trc) << " (" << static_cast<int>(info.color_trc) << ")\n";
         std::cout << "Color Range: " << av_color_range_name(info.color_range) << " (" << static_cast<int>(info.color_range) << ")\n";
         std::cout << "Bit Depth: " << info.bit_depth << "\n";
         std::cout << "Is HDR: " << (info.is_hdr ? "Yes" : "No") << "\n";
-        std::cout << "==============================\n";
+        std::cout << "====================================================\n";
         
         return info;
     }
@@ -808,18 +874,22 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return true;
     }
     
-    void decode_frames() {
+    // Decode thread function
+    void decode_thread() {
         AVPacket* packet = av_packet_alloc();
         AVFrame* frame = av_frame_alloc();
         
         if (!packet || !frame) {
             std::cerr << "Failed to allocate packet or frame\n";
+            frame_queue_.push(DecodedFrame::end_signal());
             return;
         }
         
         int frame_count = 0;
         
-        // 读取和解码帧
+        std::cout << "=== Decode Thread Started ===\n";
+        
+        // Read and decode frames
         while (av_read_frame(format_ctx, packet) >= 0) {
             if (packet->stream_index == video_stream_index) {
                 int ret = avcodec_send_packet(codec_ctx, packet);
@@ -840,26 +910,220 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                     frame_count++;
                     
                     if (frame->format == AV_PIX_FMT_D3D11) {
-                        
-                        if (cuda_d3d11_initialized) {
-                            process_d3d11_frame_with_cuda(frame);
+                        // Detect color space info only for the first frame
+                        if (!color_info_detected_) {
+                            video_color_info_ = detect_color_info(frame);
+                            color_info_detected_ = true;
                         }
+                        
+                        // Create a copy of the frame for the queue
+                        AVFrame* frame_copy = av_frame_alloc();
+                        if (av_frame_ref(frame_copy, frame) < 0) {
+                            std::cerr << "Failed to reference frame\n";
+                            av_frame_free(&frame_copy);
+                            continue;
+                        }
+                        
+                        // Push to queue (no color info needed, using shared one)
+                        DecodedFrame decoded_frame(frame_copy);
+                        frame_queue_.push(decoded_frame);
+                        
+                        std::cout << "✓ Frame " << frame_count << " decoded and queued\n";
+                        
                     } else {
                         std::cerr << "Unexpected frame format: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " - hardware decoding may have failed\n";
                         continue;
                     }
                     
                     if (frame_count >= 5) {
-                        goto cleanup_decode;
+                        goto decode_cleanup;
                     }
                 }
             }
             av_packet_unref(packet);
         }
         
-    cleanup_decode:
+    decode_cleanup:
         av_frame_free(&frame);
         av_packet_free(&packet);
+        
+        // Signal end of decoding
+        frame_queue_.push(DecodedFrame::end_signal());
+        decode_finished_ = true;
+        
+        std::cout << "=== Decode Thread Finished ===\n";
+        std::cout << "Total frames decoded: " << frame_count << "\n";
+    }
+    
+    // Process thread function
+    void convert_color_thread() {
+        std::cout << "=== Process Thread Started ===\n";
+        
+        int processed_count = 0;
+        
+        while (true) {
+            DecodedFrame decoded_frame = frame_queue_.pop();
+            
+            // Check for end signal
+            if (decoded_frame.is_end_signal) {
+                std::cout << "=== Process Thread Received End Signal ===\n";
+                break;
+            }
+            
+            if (decoded_frame.frame) {
+                processed_count++;
+                std::cout << ">>> Processing frame " << processed_count << "\n";
+                
+                // Process the D3D11 frame using shared color info
+                if (cuda_d3d11_initialized && color_info_detected_) {
+                    process_d3d11_frame_with_cuda_threaded(decoded_frame.frame, video_color_info_);
+                }
+                
+                // Clean up the frame
+                av_frame_free(&decoded_frame.frame);
+                
+                std::cout << ">>> Frame " << processed_count << " processing completed\n";
+            }
+        }
+        
+        process_finished_ = true;
+        std::cout << "=== Process Thread Finished ===\n";
+        std::cout << "Total frames processed: " << processed_count << "\n";
+    }
+    
+    // Modified process function for threaded execution
+    bool process_d3d11_frame_with_cuda_threaded(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info) {
+        if (!cuda_d3d11_initialized) {
+            std::cerr << "CUDA D3D11 interop not initialized\n";
+            return false;
+        }
+        
+        ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
+        int texture_index = (int)(intptr_t)d3d11_frame->data[1];
+        
+        D3D11_TEXTURE2D_DESC texture_desc;
+        d3d11_texture->GetDesc(&texture_desc);
+        
+        if (!cuda_interop_texture) {
+            if (!create_cuda_interop_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format)) {
+                return false;
+            }
+        }
+        
+        // Create shader and output resources if not already created
+        if (!color_conversion_shader) {
+            if (!create_color_conversion_shader(color_info)) {
+                return false;
+            }
+        }
+        
+        if (!output_texture) {
+            if (!create_output_texture(texture_desc.Width, texture_desc.Height)) {
+                return false;
+            }
+        }
+        
+        // Copy from original texture to intermediate texture
+        UINT src_subresource = D3D11CalcSubresource(0, texture_index, 1);
+        UINT dst_subresource = D3D11CalcSubresource(0, 0, 1);
+        
+        d3d11_context->CopySubresourceRegion(
+            cuda_interop_texture, dst_subresource, 0, 0, 0,
+            d3d11_texture, src_subresource, nullptr);
+        
+        std::cout << "  ✓ Texture copied to intermediate buffer\n";
+        
+        // === DirectX Shader Color Conversion ===
+        
+        // Create input SRV for shader (only once)
+        if (!create_input_srv_once(cuda_interop_texture)) {
+            return false;
+        }
+        
+        // Update constants buffer
+        ConversionConstants constants = generate_conversion_constants(color_info);
+        
+        D3D11_MAPPED_SUBRESOURCE mapped_resource;
+        HRESULT hr = d3d11_context->Map(conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
+        if (SUCCEEDED(hr)) {
+            memcpy(mapped_resource.pData, &constants, sizeof(constants));
+            d3d11_context->Unmap(conversion_constants_buffer, 0);
+        }
+        
+        // Set shader resources
+        d3d11_context->CSSetShader(color_conversion_shader, nullptr, 0);
+        if (input_srv_uv) {
+            ID3D11ShaderResourceView* srvs[] = { input_srv_y, input_srv_uv };
+            d3d11_context->CSSetShaderResources(0, 2, srvs);
+        } else {
+            d3d11_context->CSSetShaderResources(0, 1, &input_srv_y);
+        }
+        d3d11_context->CSSetUnorderedAccessViews(0, 1, &output_uav, nullptr);
+        d3d11_context->CSSetConstantBuffers(0, 1, &conversion_constants_buffer);
+        
+        // Dispatch shader
+        UINT dispatch_x = (texture_desc.Width + 7) / 8;
+        UINT dispatch_y = (texture_desc.Height + 7) / 8;
+        d3d11_context->Dispatch(dispatch_x, dispatch_y, 1);
+        
+        // Unbind resources
+        ID3D11ShaderResourceView* null_srvs[] = { nullptr, nullptr };
+        ID3D11UnorderedAccessView* null_uav = nullptr;
+        d3d11_context->CSSetShaderResources(0, 2, null_srvs);
+        d3d11_context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+        
+        d3d11_context->Flush();
+        
+        std::cout << "  ✓ Color conversion shader executed successfully\n";
+        
+        // === CUDA Processing on Converted Data ===
+        
+        // Now register the output texture with CUDA for further processing
+        cudaGraphicsResource* output_cuda_resource = nullptr;
+        cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
+            &output_cuda_resource, output_texture, cudaGraphicsRegisterFlagsNone);
+        
+        if (cuda_status == cudaSuccess) {
+            checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
+            
+            try {
+                cudaArray_t cuda_array;
+                checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, output_cuda_resource, 0, 0));
+                
+                std::cout << "  ✓ Converted texture mapped to CUDA successfully\n";
+                
+                // Here you can process the converted data with CUDA kernels
+                
+                checkCudaErrors(cudaStreamSynchronize(cuda_stream));
+                
+            } catch (const std::exception& e) {
+                std::cerr << "Error processing converted CUDA data: " << e.what() << "\n";
+            }
+            
+            checkCudaErrors(cudaGraphicsUnmapResources(1, &output_cuda_resource, cuda_stream));
+            cudaGraphicsUnregisterResource(output_cuda_resource);
+            
+            std::cout << "  ✓ Converted texture processing completed\n";
+        } else {
+            std::cerr << "Failed to register output texture with CUDA: " << cudaGetErrorString(cuda_status) << "\n";
+        }
+        
+        return true;
+    }
+    
+    // Main function to run both threads
+    void decode_and_convert_color_threaded() {
+        std::cout << "=== Starting Multi-threaded Processing ===\n";
+        
+        // Start both threads
+        std::thread decode_th(&VideoDecoder::decode_thread, this);
+        std::thread process_th(&VideoDecoder::convert_color_thread, this);
+        
+        // Wait for both threads to complete
+        decode_th.join();
+        process_th.join();
+        
+        std::cout << "=== Multi-threaded Processing Completed ===\n";
     }
 };
 
@@ -891,7 +1155,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        decoder.decode_frames();
+        // Use threaded processing instead of single-threaded
+        decoder.decode_and_convert_color_threaded();
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
