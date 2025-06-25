@@ -144,17 +144,12 @@ function(copy_tensorrt_dlls target_name)
     # TensorRT DLLs are in the lib directory, not bin directory
     file(GLOB TENSORRT_DLLS "${TENSORRT_LIB_DIR}/*.dll")
     if(TENSORRT_DLLS)
-        foreach(dll_file ${TENSORRT_DLLS})
-            get_filename_component(dll_name ${dll_file} NAME)
-            add_custom_command(TARGET ${target_name} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${dll_file}"
-                "$<TARGET_FILE_DIR:${target_name}>/${dll_name}"
-                COMMAND ${CMAKE_COMMAND} -E echo "Checking ${dll_name}..."
-                BYPRODUCTS "$<TARGET_FILE_DIR:${target_name}>/${dll_name}"
-                COMMENT "Copying TensorRT DLL ${dll_name} if different"
-            )
-        endforeach()
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${TENSORRT_DLLS}
+            $<TARGET_FILE_DIR:${target_name}>
+            COMMENT "Copying TensorRT DLLs to output directory"
+        )
         message(STATUS "Will copy TensorRT DLLs from: ${TENSORRT_LIB_DIR}")
     endif()
 endfunction() 
