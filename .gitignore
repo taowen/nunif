@@ -14,6 +14,7 @@ tmp
 *.zip
 *.xcf
 /data
+/.vscode
 !/data/.keep
 /models
 !/models/.keep
