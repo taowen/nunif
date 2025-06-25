@@ -34,6 +34,13 @@ set_target_properties(iw3_cpp PROPERTIES
 # Set Visual Studio startup project
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT iw3_cpp)
 
+# Link DirectX libraries (Windows only)
+target_link_libraries(iw3_cpp PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+)
+
 # Link FFmpeg to target
 include(FindFFmpeg)
 target_link_ffmpeg(iw3_cpp)
