@@ -92,7 +92,10 @@ def batch_preprocess(x, lower_bound=392, max_aspect_ratio=4):
         new_w = lower_bound
 
     # TODO: 'aten::_upsample_bilinear2d_aa.out' is not currently implemented for mps/xpu device
-    antialias = not (device_is_mps(x.device) or device_is_xpu(x.device))
+    if torch.onnx.is_in_onnx_export():
+        antialias = False
+    else:
+        antialias = not (device_is_mps(x.device) or device_is_xpu(x.device))
     x = F.interpolate(x, size=(new_h, new_w), mode="bilinear", align_corners=False, antialias=antialias)
     x.clamp_(0, 1)
 
