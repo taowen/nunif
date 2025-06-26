@@ -19,7 +19,12 @@
 #include "NvInfer.h"
 #include "NvOnnxParser.h"
 
-extern void checkCudaErrors(cudaError_t result);
+void checkCudaErrors(cudaError_t result) {
+    if (result != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(result) << " (" << static_cast<int>(result) << ")\n";
+        throw std::runtime_error("CUDA error occurred");
+    }
+}
 
 namespace {
 

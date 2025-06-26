@@ -4,8 +4,6 @@
 #include <stdexcept>
 #include <d3dcompiler.h>
 
-extern void checkCudaErrors(cudaError_t result);
-
 namespace {
 
 bool create_intermediate_texture(UINT width, UINT height, DXGI_FORMAT format,

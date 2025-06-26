@@ -22,14 +22,8 @@
 
 // D3D11VA 头文件已包含在 ffmpeg_wrapper.h 中
 
-void checkCudaErrors(cudaError_t result) {
-    if (result != cudaSuccess) {
-        std::cerr << "CUDA error: " << cudaGetErrorString(result) << " (" << static_cast<int>(result) << ")\n";
-        throw std::runtime_error("CUDA error occurred");
-    }
-}
 
-class VideoDecoder {
+class MainProgram {
 private:
     // Decoder state
     DecoderState decoder_state_;
@@ -43,9 +37,9 @@ private:
     ColorConvertedFrameQueue convert_color_output;
     
 public:
-    VideoDecoder() = default;
+    MainProgram() = default;
     
-    ~VideoDecoder() {
+    ~MainProgram() {
         cleanup();
     }
     
@@ -92,80 +86,7 @@ public:
         return ::open_video_file(filename, decoder_state_);
     }
     
-    bool setup_decoder() {
-        AVStream* video_stream = decoder_state_.format_ctx->streams[decoder_state_.video_stream_index];
-        
-        const AVCodec* decoder = nullptr;
-        
-        if (!decoder_state_.hw_device_ctx) {
-            std::cerr << "D3D11VA device context not initialized\n";
-            return false;
-        }
-        
-        const AVCodec* codec = nullptr;
-        void* opaque = nullptr;
-        
-        while ((codec = av_codec_iterate(&opaque))) {
-            if (codec->type == AVMEDIA_TYPE_VIDEO && 
-                av_codec_is_decoder(codec) &&
-                codec->id == video_stream->codecpar->codec_id) {
-                
-                for (int i = 0; ; i++) {
-                    const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
-                    if (!config) {
-                        break;
-                    }
-                    if (config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
-                        decoder = codec;
-                        break;
-                    }
-                }
-                
-                if (decoder) break;
-            }
-        }
-        
-        if (!decoder) {
-            std::cerr << "No D3D11VA capable decoder found\n";
-            return false;
-        }
-        
-        decoder_state_.codec_ctx = avcodec_alloc_context3(decoder);
-        if (!decoder_state_.codec_ctx) {
-            std::cerr << "Failed to allocate codec context\n";
-            return false;
-        }
-        
-        int ret = avcodec_parameters_to_context(decoder_state_.codec_ctx, video_stream->codecpar);
-        if (ret < 0) {
-            std::cerr << "Failed to copy codec parameters: " << av_err_to_string(ret) << "\n";
-            return false;
-        }
-        
-        decoder_state_.codec_ctx->hw_device_ctx = av_buffer_ref(decoder_state_.hw_device_ctx);
-        
-        decoder_state_.codec_ctx->get_format = [](AVCodecContext* /* ctx */, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
-            const enum AVPixelFormat* p;
-            for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-                if (*p == AV_PIX_FMT_D3D11) {
-                    return *p;
-                }
-            }
-            std::cerr << "D3D11 format not available\n";
-            return AV_PIX_FMT_NONE;
-        };
-        
-        ret = avcodec_open2(decoder_state_.codec_ctx, decoder, nullptr);
-        if (ret < 0) {
-            std::cerr << "Failed to open codec: " << av_err_to_string(ret) << "\n";
-            return false;
-        }
-        
-        return true;
-    }
-    
-    // Main function to run all threads
-    void decode_and_convert_color_threaded() {
+    void run_all_threads() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
         
         // Start decode thread
@@ -207,27 +128,23 @@ int main(int argc, char* argv[]) {
     std::string video_file = argv[1];
     
     try {
-        VideoDecoder decoder;
+        MainProgram program;
         
-        if (!decoder.initialize_d3d11va()) {
+        if (!program.initialize_d3d11va()) {
             std::cerr << "Failed to initialize D3D11VA, will use software decoding\n";
         }
         
-        if (!decoder.setup_d3d11_device()) {
-            std::cerr << "Failed to setup CUDA D3D11 interop\n";
+        if (!program.setup_d3d11_device()) {
+            std::cerr << "Get d3d11 device for cuda d3d11 interop failed\n";
             return 1;
         }
         
-        if (!decoder.open_video_file(video_file)) {
-            return 1;
-        }
-        
-        if (!decoder.setup_decoder()) {
+        if (!program.open_video_file(video_file)) {
             return 1;
         }
         
         // Use threaded processing
-        decoder.decode_and_convert_color_threaded();
+        program.run_all_threads();
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
