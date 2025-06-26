@@ -83,12 +83,15 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
     }
     
     int frame_count = 0;
+    int total_decoded_frames = 0;
+    const int frames_to_skip = 1000;
     
     std::cout << "=== Decode Thread Started ===\n";
     
     // Read and decode frames
     while (av_read_frame(decoder_state.format_ctx, packet) >= 0) {
         if (packet->stream_index == decoder_state.video_stream_index) {
+            
             int ret = avcodec_send_packet(decoder_state.codec_ctx, packet);
             if (ret < 0) {
                 std::cerr << "Error sending packet: " << av_err_to_string_decode(ret) << "\n";
@@ -102,6 +105,11 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
                 } else if (ret < 0) {
                     std::cerr << "Error receiving frame: " << av_err_to_string_decode(ret) << "\n";
                     break;
+                }
+                
+                total_decoded_frames++;
+                if (total_decoded_frames <= frames_to_skip) {
+                    continue;
                 }
                 
                 frame_count++;
@@ -132,7 +140,7 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
                     continue;
                 }
                 
-                if (frame_count >= 500) {
+                if (frame_count >= 60) {
                     goto decode_cleanup;
                 }
             }

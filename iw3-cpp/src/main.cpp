@@ -1,6 +1,7 @@
 #include "main.h"
 #include "decode_thread.h"
 #include "convert_color_thread.h"
+#include "diagnose_convert_color_thread.h"
 #include "infer_sbs.h"
 #include "encode_thread.h"
 #include "video_file_opener.h"
@@ -23,6 +24,8 @@
 
 // D3D11VA 头文件已包含在 ffmpeg_wrapper.h 中
 
+// Diagnostic mode toggle - set to true to enable color conversion diagnosis
+constexpr bool ENABLE_COLOR_CONVERSION_DIAGNOSIS = true;
 
 class MainProgram {
 private:
@@ -36,7 +39,8 @@ private:
     // Thread management
     DecodedFrameQueue decode_thread_output;
     ColorConvertedFrameQueue convert_color_output;
-    StereoInferredFrameQueue infer_sbs_output;  // New output queue for stereo inference
+    ColorConvertedFrameQueue diagnose_color_output;  // New queue for diagnosis mode
+    StereoInferredFrameQueue infer_sbs_output;
     
     // 添加输出文件名成员变量
     std::string output_filename_;
@@ -98,6 +102,12 @@ public:
     void run_all_threads() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
         
+        if constexpr (ENABLE_COLOR_CONVERSION_DIAGNOSIS) {
+            std::cout << "Color conversion diagnosis mode ENABLED\n";
+        } else {
+            std::cout << "Color conversion diagnosis mode DISABLED\n";
+        }
+        
         // Start decode thread
         std::thread decode_th([this]() {
             start_decode_thread(decoder_state_, decode_thread_output);
@@ -114,10 +124,26 @@ public:
             );
         });
         
-        // Start depth inference thread with its own CUDA stream
-        std::thread infer_sbs_th([this]() {
-            start_infer_sbs(convert_color_output, infer_sbs_output);
-        });
+        std::thread diagnose_th;
+        std::thread infer_sbs_th;
+        
+        if constexpr (ENABLE_COLOR_CONVERSION_DIAGNOSIS) {
+            // Start diagnosis thread
+            diagnose_th = std::thread([this]() {
+                start_diagnose_convert_color_thread(convert_color_output, diagnose_color_output, 
+                                                  d3d11_device, d3d11_context);
+            });
+            
+            // Start depth inference thread (input from diagnosis thread)
+            infer_sbs_th = std::thread([this]() {
+                start_infer_sbs(diagnose_color_output, infer_sbs_output);
+            });
+        } else {
+            // Start depth inference thread (input directly from color conversion)
+            infer_sbs_th = std::thread([this]() {
+                start_infer_sbs(convert_color_output, infer_sbs_output);
+            });
+        }
         
         // Start encode thread
         std::thread encode_th([this]() {
@@ -128,6 +154,11 @@ public:
         // Wait for all threads to complete
         decode_th.join();
         convert_color_th.join();
+        
+        if constexpr (ENABLE_COLOR_CONVERSION_DIAGNOSIS) {
+            diagnose_th.join();
+        }
+        
         infer_sbs_th.join();
         encode_th.join();
         

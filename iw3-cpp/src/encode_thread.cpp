@@ -232,6 +232,9 @@ bool create_yuv_output_resources(int width, int height, EncoderState& encoder_st
 
 bool initialize_ffmpeg_encoder(const std::string& output_filename, const ColorSpaceInfo& color_info, 
                               int width, int height, EncoderState& encoder_state) {
+    // Set FFmpeg log level to reduce x265 verbosity
+    av_log_set_level(AV_LOG_ERROR);
+    
     // Initialize format context
     int ret = avformat_alloc_output_context2(&encoder_state.format_ctx, nullptr, nullptr, output_filename.c_str());
     if (ret < 0) {
@@ -280,6 +283,11 @@ bool initialize_ffmpeg_encoder(const std::string& output_filename, const ColorSp
     // Set encoding quality
     av_opt_set(encoder_state.codec_ctx->priv_data, "preset", "medium", 0);
     av_opt_set(encoder_state.codec_ctx->priv_data, "crf", "23", 0);
+    
+    // Disable x265 verbose logging
+    av_opt_set(encoder_state.codec_ctx->priv_data, "log-level", "error", 0);
+    // Alternative: use x265-params to set log level
+    av_opt_set(encoder_state.codec_ctx->priv_data, "x265-params", "log-level=error", 0);
     
     if (encoder_state.format_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
         encoder_state.codec_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -331,7 +339,6 @@ bool initialize_ffmpeg_encoder(const std::string& output_filename, const ColorSp
     encoder_state.width = width;
     encoder_state.height = height;
     
-    std::cout << "✓ H.265 encoder initialized successfully\n";
     return true;
 }
 
@@ -469,7 +476,7 @@ void start_encode_thread(
     ID3D11Device* d3d11_device,
     ID3D11DeviceContext* d3d11_context
 ) {
-    std::cout << "=== Starting encode thread, output: " << output_filename << " ===\n";
+    std::cout << "Starting encode thread for: " << output_filename << std::endl;
     
     EncoderState encoder_state;
     bool encoder_initialized = false;
@@ -503,7 +510,6 @@ void start_encode_thread(
         }
         
         if (encoder_initialized) {
-            std::cout << "Encoding frame: " << frame.width << "x" << frame.height << std::endl;
             convert_rgb_to_yuv_and_encode(frame, color_info, encoder_state, d3d11_device, d3d11_context);
         }
     }
@@ -522,9 +528,9 @@ void start_encode_thread(
         }
         
         av_write_trailer(encoder_state.format_ctx);
-        std::cout << "✓ H.265 encoding completed, " << encoder_state.frame_count << " frames encoded\n";
+        std::cout << "H.265 encoding completed: " << encoder_state.frame_count << " frames" << std::endl;
     }
     
     encoder_state.cleanup();
-    std::cout << "=== Encode thread finished ===\n";
+    std::cout << "Encode thread finished" << std::endl;
 } 
