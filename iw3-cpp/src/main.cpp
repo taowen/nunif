@@ -19,15 +19,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 
-// D3D11VA 头文件需要在 extern "C" 之外包含
-#include <libavutil/hwcontext_d3d11va.h>
-
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
-#include <libavutil/hwcontext.h>
-#include <libavutil/pixdesc.h>
-}
+// D3D11VA 头文件已包含在 ffmpeg_wrapper.h 中
 
 void checkCudaErrors(cudaError_t result) {
     if (result != cudaSuccess) {
@@ -50,7 +42,9 @@ private:
     // CUDA D3D11 interop members
     ID3D11Device* d3d11_device = nullptr;
     ID3D11DeviceContext* d3d11_context = nullptr;
-    cudaStream_t cuda_stream = nullptr;
+    cudaStream_t decode_cuda_stream = nullptr;
+    cudaStream_t convert_color_cuda_stream = nullptr;
+    cudaStream_t infer_depth_cuda_stream = nullptr;
     bool cuda_d3d11_initialized = false;
     
     // Color conversion state
@@ -74,8 +68,14 @@ public:
         // Clean up color conversion state
         color_conversion_state_.cleanup();
         
-        if (cuda_stream) {
-            cudaStreamDestroy(cuda_stream);
+        if (decode_cuda_stream) {
+            cudaStreamDestroy(decode_cuda_stream);
+        }
+        if (convert_color_cuda_stream) {
+            cudaStreamDestroy(convert_color_cuda_stream);
+        }
+        if (infer_depth_cuda_stream) {
+            cudaStreamDestroy(infer_depth_cuda_stream);
         }
         
         if (d3d11_context) {
@@ -146,9 +146,17 @@ public:
         
         checkCudaErrors(cudaSetDevice(cuda_device));
         
-        checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
+        // 为每个线程创建独立的 CUDA stream
+        checkCudaErrors(cudaStreamCreateWithFlags(&decode_cuda_stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaStreamCreateWithFlags(&convert_color_cuda_stream, cudaStreamNonBlocking));
+        checkCudaErrors(cudaStreamCreateWithFlags(&infer_depth_cuda_stream, cudaStreamNonBlocking));
         
         cuda_d3d11_initialized = true;
+        
+        std::cout << "✓ Created independent CUDA streams for each thread\n";
+        std::cout << "  → Decode stream: " << decode_cuda_stream << "\n";
+        std::cout << "  → Color conversion stream: " << convert_color_cuda_stream << "\n";  
+        std::cout << "  → Depth inference stream: " << infer_depth_cuda_stream << "\n";
         
         return true;
     }
@@ -227,7 +235,7 @@ public:
         
         decoder_state_.codec_ctx->hw_device_ctx = av_buffer_ref(decoder_state_.hw_device_ctx);
         
-        decoder_state_.codec_ctx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
+        decoder_state_.codec_ctx->get_format = [](AVCodecContext* /* ctx */, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
             const enum AVPixelFormat* p;
             for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                 if (*p == AV_PIX_FMT_D3D11) {
@@ -321,7 +329,7 @@ public:
             start_decode_thread(decoder_state_, decode_thread_output);
         });
         
-        // Start color conversion thread
+        // Start color conversion thread with its own CUDA stream
         std::thread convert_color_th([this]() {
             start_convert_color_thread(
                 decode_thread_output,
@@ -330,13 +338,13 @@ public:
                 decoder_state_.video_color_info,
                 d3d11_device,
                 d3d11_context,
-                cuda_stream
+                convert_color_cuda_stream  // 使用独立的 CUDA stream
             );
         });
         
-        // Start depth inference thread (替换原来的AI处理线程)
+        // Start depth inference thread with its own CUDA stream
         std::thread infer_depth_th([this]() {
-            start_infer_depth_thread(convert_color_output, cuda_stream);
+            start_infer_depth_thread(convert_color_output, infer_depth_cuda_stream);  // 使用独立的 CUDA stream
         });
         
         // Wait for all threads to complete

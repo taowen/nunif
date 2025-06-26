@@ -53,16 +53,22 @@ class StereoDepthModule(nn.Module):
         self.side_model = side_model.model if hasattr(side_model, "model") else side_model
 
     def forward(self, x):
-        # x: BCHW, float32, 0-1, on correct device
+        # x: BCHW, float32, 0-1, RGBA format (4 channels) from convert_color_thread
+        # Extract RGB channels only (discard alpha channel)
+        if x.shape[1] == 4:  # RGBA input
+            x_rgb = x[:, :3, :, :]  # Extract RGB channels, discard alpha
+        else:  # RGB input (fallback)
+            x_rgb = x
+            
         depth = self.depth_model_wrapper.infer(
-            x, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
+            x_rgb, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
         )
         depth = self.depth_model_wrapper.minmax_normalize_chw(depth)  # BCHW
         depth = mapper(depth)
 
         left, right = apply_divergence_nn_LR(
             self.side_model_wrapper,
-            x,
+            x_rgb,  # Use RGB data for side model
             depth,
             divergence=2.0,
             convergence=0.5,
@@ -82,6 +88,14 @@ class StereoDepthModule(nn.Module):
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
+
+# 修改测试数据为 RGBA 格式以匹配 convert_color_thread 的输出
+logger.debug(f"Converting RGB to RGBA format to match convert_color_thread output")
+# 添加 alpha 通道 (全为1.0)
+x1_rgba = torch.cat([x1, torch.ones(1, x1.shape[1], x1.shape[2])], dim=0)  # 添加alpha通道
+x2_rgba = torch.cat([x2, torch.ones(1, x2.shape[1], x2.shape[2])], dim=0)  # 添加alpha通道
+x = torch.stack([x1_rgba, x2_rgba], dim=0)  # BCHW, float32, 0-1, RGBA
+logger.debug(f"RGBA stacked x shape: {x.shape}")  # Should be (2, 4, H, W)
 
 with torch.inference_mode():
     x = x.to(depth_model.device)
@@ -104,6 +118,7 @@ with torch.inference_mode():
         },
     )
     logger.info(f"ONNX model saved to {output_path}")
+    logger.info(f"Model expects RGBA input (4 channels) to match convert_color_thread output")
 
 os.makedirs("tmp", exist_ok=True)
 for idx in range(half_sbs.shape[0]):

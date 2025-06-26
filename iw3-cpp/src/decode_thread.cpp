@@ -1,12 +1,6 @@
 #include "decode_thread.h"
 #include <iostream>
 
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
-#include <libavutil/pixdesc.h>
-}
-
 std::string av_err_to_string_decode(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
     av_strerror(errnum, errbuf, AV_ERROR_MAX_STRING_SIZE);

@@ -7,11 +7,7 @@
 #include <atomic>
 #include <cuda_runtime_api.h>
 
-extern "C" {
-#include <libavutil/pixfmt.h>
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-}
+#include "ffmpeg_wrapper.h"
 
 struct ColorSpaceInfo {
     AVColorSpace color_space = AVCOL_SPC_UNSPECIFIED;
@@ -142,7 +138,7 @@ struct DecodedFrame {
 
 // Converted frame data structure for AI processing
 struct ColorConvertedFrame {
-    float* cuda_data;  // CUDA memory pointer for RGB data
+    float* cuda_data; 
     UINT width;
     UINT height;
     size_t pitch;      // Row pitch in bytes
