@@ -1,7 +1,7 @@
 #include "main.h"
 #include "decode_thread.h"
 #include "convert_color_thread.h"
-#include "diagnose_convert_color_thread.h"
+#include "dump_d11_frame_thread.h"
 #include "infer_sbs.h"
 #include "encode_thread.h"
 #include "video_file_opener.h"
@@ -129,7 +129,7 @@ public:
         if constexpr (ENABLE_COLOR_CONVERSION_DIAGNOSIS) {
             // Start diagnosis thread
             diagnose_th = std::thread([this]() {
-                start_diagnose_convert_color_thread(convert_color_output, diagnose_color_output, 
+                start_dump_d11_frame_thread(convert_color_output, diagnose_color_output, 
                                                   d3d11_device, d3d11_context);
             });
             
