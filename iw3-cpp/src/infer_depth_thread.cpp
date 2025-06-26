@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <memory>
 #include <fstream>
+#include <cuda_runtime_api.h>
+#include <cuda_d3d11_interop.h>
 
 // Prevent Windows min/max macros from interfering
 #ifdef min
@@ -229,7 +231,7 @@ public:
         return true;
     }
     
-    bool infer(float* input_data, UINT width, UINT height, cudaStream_t stream) {
+    bool infer(float* input_data_device, UINT width, UINT height, cudaStream_t stream) {
         // Set dynamic input dimensions
         nvinfer1::Dims4 input_shape{1, 4, static_cast<int>(height), static_cast<int>(width)};
         if (!context->setInputShape(engine->getIOTensorName(0), input_shape)) {
@@ -278,8 +280,8 @@ public:
             std::cout << "    → Allocated output buffer: " << output_size << " bytes\n";
         }
         
-        // Copy input data to device buffer (修复：使用 cudaMemcpy 而不是直接赋值指针)
-        checkCudaErrors(cudaMemcpyAsync(d_input, input_data, input_size, cudaMemcpyDeviceToDevice, stream));
+        // Copy input data to device buffer (input_data_device is already on device)
+        checkCudaErrors(cudaMemcpyAsync(d_input, input_data_device, input_size, cudaMemcpyDeviceToDevice, stream));
         
         // Set tensor addresses
         if (!context->setTensorAddress(engine->getIOTensorName(0), d_input)) {
@@ -355,11 +357,10 @@ void start_infer_depth_thread(
             break;
         }
         
-        if (converted_frame.cuda_data) {
+        if (converted_frame.texture) {
             processed_count++;
             std::cout << ">>> Processing frame " << processed_count << " for stereo inference\n";
             std::cout << "    → Frame dimensions: " << converted_frame.width << "x" << converted_frame.height << "\n";
-            std::cout << "    → Frame pitch: " << converted_frame.pitch << " bytes\n";
             
             // Validate input data
             if (converted_frame.width == 0 || converted_frame.height == 0) {
@@ -367,12 +368,33 @@ void start_infer_depth_thread(
                 continue;
             }
             
+            // Perform CUDA-D3D11 interop
+            cudaGraphicsResource_t cuda_resource = nullptr;
+            checkCudaErrors(cudaGraphicsD3D11RegisterResource(&cuda_resource, converted_frame.texture, cudaGraphicsRegisterFlagsNone));
+
+            checkCudaErrors(cudaGraphicsMapResources(1, &cuda_resource, cuda_stream));
+            cudaArray_t cuda_array;
+            checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0));
+
             // Execute TensorRT inference
-            if (!g_inference_engine->infer(converted_frame.cuda_data, converted_frame.width, 
-                                          converted_frame.height, cuda_stream)) {
+            size_t input_size = converted_frame.width * converted_frame.height * 4 * sizeof(float);
+            float* d_temp_input = nullptr;
+            checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_temp_input), input_size));
+            
+            checkCudaErrors(cudaMemcpy2DFromArrayAsync(
+                d_temp_input, converted_frame.width * 4 * sizeof(float),
+                cuda_array, 0, 0,
+                converted_frame.width * 4 * sizeof(float), converted_frame.height,
+                cudaMemcpyDeviceToDevice, cuda_stream
+            ));
+
+            if (!g_inference_engine->infer(d_temp_input, converted_frame.width, converted_frame.height, cuda_stream)) {
                 std::cerr << "    ✗ TensorRT inference failed for frame " << processed_count << "\n";
-                continue;
             }
+
+            checkCudaErrors(cudaFree(d_temp_input));
+            checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+            checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
             
             std::cout << ">>> Stereo inference frame " << processed_count << " completed\n";
         }

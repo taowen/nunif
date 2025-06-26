@@ -3,14 +3,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <d3dcompiler.h>
-#include <cuda_runtime_api.h>
-#include <cuda_d3d11_interop.h>
 
 extern void checkCudaErrors(cudaError_t result);
 
 namespace {
 
-bool create_cuda_interop_texture(UINT width, UINT height, DXGI_FORMAT format, 
+bool create_intermediate_texture(UINT width, UINT height, DXGI_FORMAT format,
                                  ColorConversionState& color_state, ID3D11Device* d3d11_device) {
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = width;
@@ -23,19 +21,11 @@ bool create_cuda_interop_texture(UINT width, UINT height, DXGI_FORMAT format,
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     desc.CPUAccessFlags = 0;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // For CUDA interop
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // For CUDA interop in the next thread
     
-    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &color_state.cuda_interop_texture);
+    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &color_state.intermediate_texture);
     if (FAILED(hr)) {
-        std::cerr << "Failed to create CUDA interop texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
-        return false;
-    }
-    
-    cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-        &color_state.cuda_resource, color_state.cuda_interop_texture, cudaGraphicsRegisterFlagsNone);
-    
-    if (cuda_status != cudaSuccess) {
-        std::cerr << "Failed to register interop texture with CUDA: " << cudaGetErrorString(cuda_status) << "\n";
+        std::cerr << "Failed to create intermediate texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
         return false;
     }
     
@@ -252,7 +242,8 @@ bool create_color_conversion_shader(const ColorSpaceInfo& color_info,
     return true;
 }
 
-bool create_output_texture(UINT width, UINT height, ColorConversionState& color_state, ID3D11Device* d3d11_device) {
+bool create_output_texture_and_uav(UINT width, UINT height, ID3D11Device* d3d11_device,
+                                   ID3D11Texture2D** out_texture, ID3D11UnorderedAccessView** out_uav) {
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = width;
     desc.Height = height;
@@ -264,9 +255,9 @@ bool create_output_texture(UINT width, UINT height, ColorConversionState& color_
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
     desc.CPUAccessFlags = 0;
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // For CUDA interop in the next thread
     
-    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &color_state.output_texture);
+    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, out_texture);
     if (FAILED(hr)) {
         std::cerr << "Failed to create output texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
         return false;
@@ -278,8 +269,9 @@ bool create_output_texture(UINT width, UINT height, ColorConversionState& color_
     uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
     uav_desc.Texture2D.MipSlice = 0;
     
-    hr = d3d11_device->CreateUnorderedAccessView(color_state.output_texture, &uav_desc, &color_state.output_uav);
+    hr = d3d11_device->CreateUnorderedAccessView(*out_texture, &uav_desc, out_uav);
     if (FAILED(hr)) {
+        (*out_texture)->Release();
         std::cerr << "Failed to create output UAV: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
         return false;
     }
@@ -329,33 +321,33 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
     return true;
 }
 
-bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
+bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
                                   ColorConversionState& color_state, ID3D11Device* d3d11_device,
-                                  ID3D11DeviceContext* d3d11_context, cudaStream_t cuda_stream,
-                                  ColorConvertedFrameQueue& output_queue) {
+                                  ID3D11DeviceContext* d3d11_context, ColorConvertedFrameQueue& output_queue) {
     ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
     int texture_index = (int)(intptr_t)d3d11_frame->data[1];
     
     D3D11_TEXTURE2D_DESC texture_desc;
     d3d11_texture->GetDesc(&texture_desc);
     
-    if (!color_state.cuda_interop_texture) {
-        if (!create_cuda_interop_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format, color_state, d3d11_device)) {
+    if (!color_state.intermediate_texture) {
+        if (!create_intermediate_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format, color_state, d3d11_device)) {
             return false;
         }
     }
     
-    // Create shader and output resources if not already created
+    // Create shader if not already created
     if (!color_state.color_conversion_shader) {
         if (!create_color_conversion_shader(color_info, color_state, d3d11_device)) {
             return false;
         }
     }
     
-    if (!color_state.output_texture) {
-        if (!create_output_texture(texture_desc.Width, texture_desc.Height, color_state, d3d11_device)) {
-            return false;
-        }
+    // Create a new output texture and UAV for each frame
+    ID3D11Texture2D* output_texture = nullptr;
+    ID3D11UnorderedAccessView* output_uav = nullptr;
+    if (!create_output_texture_and_uav(texture_desc.Width, texture_desc.Height, d3d11_device, &output_texture, &output_uav)) {
+        return false;
     }
     
     // Copy from original texture to intermediate texture
@@ -363,7 +355,7 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     UINT dst_subresource = D3D11CalcSubresource(0, 0, 1);
     
     d3d11_context->CopySubresourceRegion(
-        color_state.cuda_interop_texture, dst_subresource, 0, 0, 0,
+        color_state.intermediate_texture, dst_subresource, 0, 0, 0,
         d3d11_texture, src_subresource, nullptr);
     
     std::cout << "  ✓ Texture copied to intermediate buffer\n";
@@ -371,7 +363,9 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     // === DirectX Shader Color Conversion ===
     
     // Create input SRV for shader (only once)
-    if (!create_input_srv_once(color_state.cuda_interop_texture, color_state, d3d11_device)) {
+    if (!create_input_srv_once(color_state.intermediate_texture, color_state, d3d11_device)) {
+        output_texture->Release();
+        output_uav->Release();
         return false;
     }
     
@@ -393,7 +387,7 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     } else {
         d3d11_context->CSSetShaderResources(0, 1, &color_state.input_srv_y);
     }
-    d3d11_context->CSSetUnorderedAccessViews(0, 1, &color_state.output_uav, nullptr);
+    d3d11_context->CSSetUnorderedAccessViews(0, 1, &output_uav, nullptr);
     d3d11_context->CSSetConstantBuffers(0, 1, &color_state.conversion_constants_buffer);
     
     // Dispatch shader
@@ -403,52 +397,23 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     
     // Unbind resources
     ID3D11ShaderResourceView* null_srvs[] = { nullptr, nullptr };
-    ID3D11UnorderedAccessView* null_uav = nullptr;
+    ID3D11UnorderedAccessView* null_uav_ptr = nullptr;
     d3d11_context->CSSetShaderResources(0, 2, null_srvs);
-    d3d11_context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+    d3d11_context->CSSetUnorderedAccessViews(0, 1, &null_uav_ptr, nullptr);
     
     d3d11_context->Flush();
     
     std::cout << "  ✓ Color conversion shader executed successfully\n";
     
-    // === Convert D3D11 texture to CUDA memory ===
-    
-    // Map D3D11 texture to CUDA
-    checkCudaErrors(cudaGraphicsMapResources(1, &color_state.cuda_resource, cuda_stream));
-    
-    cudaArray_t cuda_array;
-    checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, color_state.cuda_resource, 0, 0));
-    
-    // Allocate CUDA memory for the final output
-    size_t data_size = texture_desc.Width * texture_desc.Height * 4 * sizeof(float); // RGBA float
-    size_t pitch = texture_desc.Width * 4 * sizeof(float);
-    float* cuda_output_data = nullptr;
-    
-    checkCudaErrors(cudaMalloc((void**)&cuda_output_data, data_size));
-    
-    // Copy from CUDA array to linear memory
-    cudaMemcpy2DFromArray(
-        cuda_output_data, pitch,
-        cuda_array, 0, 0,
-        pitch, texture_desc.Height,
-        cudaMemcpyDeviceToDevice
-    );
-    
-    // Unmap the resource
-    checkCudaErrors(cudaGraphicsUnmapResources(1, &color_state.cuda_resource, cuda_stream));
-    
-    // Synchronize to ensure data is ready
-    checkCudaErrors(cudaStreamSynchronize(cuda_stream));
-    
-    std::cout << "  ✓ D3D11 texture converted to CUDA memory\n";
-    std::cout << "    → CUDA data size: " << data_size << " bytes\n";
-    std::cout << "    → Dimensions: " << texture_desc.Width << "x" << texture_desc.Height << "\n";
-    
     // === Add converted frame to output queue ===
-    ColorConvertedFrame converted_frame(cuda_output_data, texture_desc.Width, texture_desc.Height, pitch);
+    ColorConvertedFrame converted_frame(output_texture, texture_desc.Width, texture_desc.Height);
     output_queue.push(std::move(converted_frame));
+
+    // Release local handles, the object in the queue now owns the reference
+    output_texture->Release();
+    output_uav->Release();
     
-    std::cout << "  ✓ Converted frame with CUDA data added to output queue\n";
+    std::cout << "  ✓ Converted frame with D3D11 texture added to output queue\n";
     
     return true;
 }
@@ -461,8 +426,7 @@ void start_convert_color_thread(
     ColorConversionState& color_state, 
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
-    ID3D11DeviceContext* d3d11_context,
-    cudaStream_t cuda_stream) {
+    ID3D11DeviceContext* d3d11_context) {
     
     std::cout << "=== Process Thread Started ===\n";
     
@@ -484,8 +448,8 @@ void start_convert_color_thread(
             std::cout << ">>> Processing frame " << processed_count << "\n";
             
             // Process the D3D11 frame
-            process_d3d11_frame_with_cuda(decoded_frame.frame, color_info, color_state, 
-                                        d3d11_device, d3d11_context, cuda_stream, output_frame_queue);
+            process_d3d11_frame(decoded_frame.frame, color_info, color_state, 
+                                        d3d11_device, d3d11_context, output_frame_queue);
             
             // Clean up the frame
             av_frame_free(&decoded_frame.frame);

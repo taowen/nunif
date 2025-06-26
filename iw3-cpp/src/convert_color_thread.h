@@ -9,6 +9,5 @@ void start_convert_color_thread(
     ColorConversionState& color_state,
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
-    ID3D11DeviceContext* d3d11_context,
-    cudaStream_t cuda_stream
+    ID3D11DeviceContext* d3d11_context
 ); 

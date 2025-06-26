@@ -337,8 +337,7 @@ public:
                 color_conversion_state_,
                 decoder_state_.video_color_info,
                 d3d11_device,
-                d3d11_context,
-                convert_color_cuda_stream  // 使用独立的 CUDA stream
+                d3d11_context
             );
         });
         

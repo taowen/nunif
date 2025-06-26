@@ -74,24 +74,15 @@ struct ColorConversionState {
     ID3D11Buffer* conversion_constants_buffer = nullptr;
     ID3D11ShaderResourceView* input_srv_y = nullptr;
     ID3D11ShaderResourceView* input_srv_uv = nullptr;
-    ID3D11UnorderedAccessView* output_uav = nullptr;
-    ID3D11Texture2D* output_texture = nullptr;
+    ID3D11Texture2D* intermediate_texture = nullptr;
     
-    // CUDA interop resources for color conversion
-    ID3D11Texture2D* cuda_interop_texture = nullptr;
-    cudaGraphicsResource* cuda_resource = nullptr;
     std::atomic<bool> process_finished_{false};
     
     // Cleanup method
     void cleanup() {
-        if (cuda_resource) {
-            cudaGraphicsUnregisterResource(cuda_resource);
-            cuda_resource = nullptr;
-        }
-        
-        if (cuda_interop_texture) {
-            cuda_interop_texture->Release();
-            cuda_interop_texture = nullptr;
+        if (intermediate_texture) {
+            intermediate_texture->Release();
+            intermediate_texture = nullptr;
         }
         
         if (input_srv_y) {
@@ -101,14 +92,6 @@ struct ColorConversionState {
         if (input_srv_uv) {
             input_srv_uv->Release();
             input_srv_uv = nullptr;
-        }
-        if (output_uav) {
-            output_uav->Release();
-            output_uav = nullptr;
-        }
-        if (output_texture) {
-            output_texture->Release();
-            output_texture = nullptr;
         }
         if (conversion_constants_buffer) {
             conversion_constants_buffer->Release();
@@ -138,49 +121,51 @@ struct DecodedFrame {
 
 // Converted frame data structure for AI processing
 struct ColorConvertedFrame {
-    float* cuda_data; 
+    ID3D11Texture2D* texture;
     UINT width;
     UINT height;
-    size_t pitch;      // Row pitch in bytes
     bool is_end_signal;
-    
-    ColorConvertedFrame() : cuda_data(nullptr), width(0), height(0), pitch(0), is_end_signal(false) {}
-    ColorConvertedFrame(float* data, UINT w, UINT h, size_t p) 
-        : cuda_data(data), width(w), height(h), pitch(p), is_end_signal(false) {}
-    
-    ~ColorConvertedFrame() {
-        if (cuda_data && !is_end_signal) {
-            cudaFree(cuda_data);
+
+    ColorConvertedFrame() : texture(nullptr), width(0), height(0), is_end_signal(false) {}
+    ColorConvertedFrame(ID3D11Texture2D* tex, UINT w, UINT h)
+        : texture(tex), width(w), height(h), is_end_signal(false) {
+        if (texture) {
+            texture->AddRef();
         }
     }
-    
-    // Move constructor
-    ColorConvertedFrame(ColorConvertedFrame&& other) noexcept 
-        : cuda_data(other.cuda_data), width(other.width), height(other.height), 
-          pitch(other.pitch), is_end_signal(other.is_end_signal) {
-        other.cuda_data = nullptr;
+
+    ~ColorConvertedFrame() {
+        if (texture && !is_end_signal) {
+            texture->Release();
+        }
     }
-    
+
+    // Move constructor
+    ColorConvertedFrame(ColorConvertedFrame&& other) noexcept
+        : texture(other.texture), width(other.width), height(other.height),
+          is_end_signal(other.is_end_signal) {
+        other.texture = nullptr;
+    }
+
     // Move assignment
     ColorConvertedFrame& operator=(ColorConvertedFrame&& other) noexcept {
         if (this != &other) {
-            if (cuda_data && !is_end_signal) {
-                cudaFree(cuda_data);
+            if (texture && !is_end_signal) {
+                texture->Release();
             }
-            cuda_data = other.cuda_data;
+            texture = other.texture;
             width = other.width;
             height = other.height;
-            pitch = other.pitch;
             is_end_signal = other.is_end_signal;
-            other.cuda_data = nullptr;
+            other.texture = nullptr;
         }
         return *this;
     }
-    
+
     // Delete copy constructor and assignment
     ColorConvertedFrame(const ColorConvertedFrame&) = delete;
     ColorConvertedFrame& operator=(const ColorConvertedFrame&) = delete;
-    
+
     static ColorConvertedFrame end_signal() {
         ColorConvertedFrame data;
         data.is_end_signal = true;
