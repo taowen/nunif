@@ -423,12 +423,14 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
 void start_convert_color_thread(
     DecodedFrameQueue& input_frame_queue,
     ColorConvertedFrameQueue& output_frame_queue,
-    ColorConversionState& color_state, 
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
     ID3D11DeviceContext* d3d11_context) {
     
     std::cout << "=== Process Thread Started ===\n";
+    
+    // Create ColorConversionState inside the thread
+    ColorConversionState color_state;
     
     int processed_count = 0;
     
@@ -458,6 +460,8 @@ void start_convert_color_thread(
         }
     }
     
+    // Clean up ColorConversionState before thread exits
+    color_state.cleanup();
     color_state.process_finished_ = true;
     std::cout << "=== Process Thread Finished ===\n";
     std::cout << "Total frames processed: " << processed_count << "\n";

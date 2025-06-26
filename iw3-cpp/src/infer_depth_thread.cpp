@@ -325,28 +325,26 @@ std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 } // anonymous namespace
 
 void start_infer_depth_thread(
-    ColorConvertedFrameQueue& input_frame_queue,
-    cudaStream_t cuda_stream) {
+    ColorConvertedFrameQueue& input_frame_queue) {
     
+    cudaStream_t cuda_stream = nullptr;
+    checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
+
     std::cout << "=== Depth Inference Thread Started ===\n";
-    std::cout << "Using CUDA stream: " << cuda_stream << "\n";
-    
-    // 检查 CUDA stream 是否有效
-    if (cuda_stream == nullptr) {
-        std::cerr << "Invalid CUDA stream provided to depth inference thread" << std::endl;
-        return;
-    }
+    std::cout << "Using its own CUDA stream: " << cuda_stream << "\n";
     
     // Initialize TensorRT inference engine
     if (!g_inference_engine) {
         g_inference_engine = std::make_unique<TensorRTInferenceEngine>();
         if (!g_inference_engine->initialize("stereo_module_half_sbs.onnx")) {
             std::cerr << "Failed to initialize TensorRT inference engine" << std::endl;
+            cudaStreamDestroy(cuda_stream);
             return;
         }
     }
     
     int processed_count = 0;
+    bool cuda_device_set = false;
     
     while (true) {
         ColorConvertedFrame converted_frame = input_frame_queue.pop();
@@ -358,6 +356,45 @@ void start_infer_depth_thread(
         }
         
         if (converted_frame.texture) {
+            if (!cuda_device_set) {
+                ID3D11Device* d3d11_device = nullptr;
+                converted_frame.texture->GetDevice(&d3d11_device);
+
+                if (d3d11_device) {
+                    int cuda_device = -1;
+                    IDXGIDevice* dxgi_device = nullptr;
+                    HRESULT hr = d3d11_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
+                    if (SUCCEEDED(hr)) {
+                        IDXGIAdapter* dxgi_adapter = nullptr;
+                        hr = dxgi_device->GetAdapter(&dxgi_adapter);
+                        dxgi_device->Release();
+                        
+                        if (SUCCEEDED(hr)) {
+                            cudaError_t cuda_status = cudaD3D11GetDevice(&cuda_device, dxgi_adapter);
+                            dxgi_adapter->Release();
+                            
+                            if (cuda_status == cudaSuccess) {
+                                checkCudaErrors(cudaSetDevice(cuda_device));
+                                std::cout << "Depth inference thread set CUDA device to " << cuda_device << std::endl;
+                                cuda_device_set = true;
+                            } else {
+                                std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(cuda_status) << "\n";
+                            }
+                        } else {
+                             std::cerr << "Failed to get DXGI adapter\n";
+                        }
+                    } else {
+                         std::cerr << "Failed to get DXGI device\n";
+                    }
+                    d3d11_device->Release();
+                }
+
+                if (!cuda_device_set) {
+                    std::cerr << "Failed to set CUDA device for depth inference thread. Aborting thread." << std::endl;
+                    break;
+                }
+            }
+
             processed_count++;
             std::cout << ">>> Processing frame " << processed_count << " for stereo inference\n";
             std::cout << "    → Frame dimensions: " << converted_frame.width << "x" << converted_frame.height << "\n";
@@ -400,6 +437,7 @@ void start_infer_depth_thread(
         }
     }
     
+    cudaStreamDestroy(cuda_stream);
     std::cout << "=== Depth Inference Thread Finished ===\n";
     std::cout << "Total frames processed for stereo inference: " << processed_count << "\n";
 } 

@@ -42,13 +42,6 @@ private:
     // CUDA D3D11 interop members
     ID3D11Device* d3d11_device = nullptr;
     ID3D11DeviceContext* d3d11_context = nullptr;
-    cudaStream_t decode_cuda_stream = nullptr;
-    cudaStream_t convert_color_cuda_stream = nullptr;
-    cudaStream_t infer_depth_cuda_stream = nullptr;
-    bool cuda_d3d11_initialized = false;
-    
-    // Color conversion state
-    ColorConversionState color_conversion_state_;
     
     // Thread management
     DecodedFrameQueue decode_thread_output;
@@ -64,19 +57,6 @@ public:
     void cleanup() {
         // Clean up decoder state
         decoder_state_.cleanup();
-        
-        // Clean up color conversion state
-        color_conversion_state_.cleanup();
-        
-        if (decode_cuda_stream) {
-            cudaStreamDestroy(decode_cuda_stream);
-        }
-        if (convert_color_cuda_stream) {
-            cudaStreamDestroy(convert_color_cuda_stream);
-        }
-        if (infer_depth_cuda_stream) {
-            cudaStreamDestroy(infer_depth_cuda_stream);
-        }
         
         if (d3d11_context) {
             d3d11_context->Release();
@@ -97,7 +77,7 @@ public:
         return true;
     }
     
-    bool setup_cuda_d3d11_interop() {
+    bool setup_d3d11_device() {
         if (!decoder_state_.hw_device_ctx) {
             std::cerr << "D3D11VA device context not initialized\n";
             return false;
@@ -109,54 +89,6 @@ public:
         
         d3d11_device->AddRef();
         d3d11_context->AddRef();
-        
-        int deviceCount = 0;
-        checkCudaErrors(cudaGetDeviceCount(&deviceCount));
-        
-        if (deviceCount == 0) {
-            std::cerr << "No CUDA capable devices found\n";
-            return false;
-        }
-        
-        int cuda_device = -1;
-        
-        IDXGIDevice* dxgi_device = nullptr;
-        HRESULT hr = d3d11_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to get DXGI device\n";
-            return false;
-        }
-        
-        IDXGIAdapter* dxgi_adapter = nullptr;
-        hr = dxgi_device->GetAdapter(&dxgi_adapter);
-        dxgi_device->Release();
-        
-        if (FAILED(hr)) {
-            std::cerr << "Failed to get DXGI adapter\n";
-            return false;
-        }
-        
-        cudaError_t cuda_status = cudaD3D11GetDevice(&cuda_device, dxgi_adapter);
-        dxgi_adapter->Release();
-        
-        if (cuda_status != cudaSuccess) {
-            std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(cuda_status) << "\n";
-            return false;
-        }
-        
-        checkCudaErrors(cudaSetDevice(cuda_device));
-        
-        // 为每个线程创建独立的 CUDA stream
-        checkCudaErrors(cudaStreamCreateWithFlags(&decode_cuda_stream, cudaStreamNonBlocking));
-        checkCudaErrors(cudaStreamCreateWithFlags(&convert_color_cuda_stream, cudaStreamNonBlocking));
-        checkCudaErrors(cudaStreamCreateWithFlags(&infer_depth_cuda_stream, cudaStreamNonBlocking));
-        
-        cuda_d3d11_initialized = true;
-        
-        std::cout << "✓ Created independent CUDA streams for each thread\n";
-        std::cout << "  → Decode stream: " << decode_cuda_stream << "\n";
-        std::cout << "  → Color conversion stream: " << convert_color_cuda_stream << "\n";  
-        std::cout << "  → Depth inference stream: " << infer_depth_cuda_stream << "\n";
         
         return true;
     }
@@ -255,71 +187,6 @@ public:
         return true;
     }
     
-    ColorSpaceInfo detect_color_info(AVFrame* frame) {
-        ColorSpaceInfo info;
-        
-        // Get DXGI format from D3D11 texture
-        if (frame->format == AV_PIX_FMT_D3D11) {
-            ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)frame->data[0];
-            D3D11_TEXTURE2D_DESC texture_desc;
-            d3d11_texture->GetDesc(&texture_desc);
-            info.dxgi_format = texture_desc.Format;
-            
-            std::cout << "=== Texture Format Detection ===\n";
-            std::cout << "DXGI Format: " << static_cast<int>(texture_desc.Format) << " (";
-            switch (texture_desc.Format) {
-                case DXGI_FORMAT_NV12: std::cout << "NV12"; break;
-                case DXGI_FORMAT_P010: std::cout << "P010"; info.bit_depth = 10; break;
-                case DXGI_FORMAT_P016: std::cout << "P016"; info.bit_depth = 16; break;
-                case DXGI_FORMAT_YUY2: std::cout << "YUY2"; break;
-                case DXGI_FORMAT_AYUV: std::cout << "AYUV"; break;
-                default: std::cout << "Unknown"; break;
-            }
-            std::cout << ")\n";
-        }
-        
-        // Get color space information from codec context and frame
-        info.color_space = decoder_state_.codec_ctx->colorspace != AVCOL_SPC_UNSPECIFIED ? 
-                          decoder_state_.codec_ctx->colorspace : frame->colorspace;
-        info.color_primaries = decoder_state_.codec_ctx->color_primaries != AVCOL_PRI_UNSPECIFIED ? 
-                              decoder_state_.codec_ctx->color_primaries : frame->color_primaries;
-        info.color_trc = decoder_state_.codec_ctx->color_trc != AVCOL_TRC_UNSPECIFIED ? 
-                        decoder_state_.codec_ctx->color_trc : frame->color_trc;
-        info.color_range = decoder_state_.codec_ctx->color_range != AVCOL_RANGE_UNSPECIFIED ? 
-                          decoder_state_.codec_ctx->color_range : frame->color_range;
-        
-        // Detect HDR content
-        info.is_hdr = (info.color_trc == AVCOL_TRC_SMPTE2084 ||  // PQ
-                       info.color_trc == AVCOL_TRC_ARIB_STD_B67 || // HLG
-                       info.color_primaries == AVCOL_PRI_BT2020);
-        
-        // Detect bit depth from DXGI format if not already set
-        if (info.bit_depth == 8) {
-            switch (info.dxgi_format) {
-                case DXGI_FORMAT_P010:
-                    info.bit_depth = 10;
-                    break;
-                case DXGI_FORMAT_P016:
-                    info.bit_depth = 16;
-                    break;
-                default:
-                    info.bit_depth = 8;
-                    break;
-            }
-        }
-        
-        std::cout << "=== Video Color Space Information (Detected Once) ===\n";
-        std::cout << "Color Space: " << av_color_space_name(info.color_space) << " (" << static_cast<int>(info.color_space) << ")\n";
-        std::cout << "Color Primaries: " << av_color_primaries_name(info.color_primaries) << " (" << static_cast<int>(info.color_primaries) << ")\n";
-        std::cout << "Transfer Characteristics: " << av_color_transfer_name(info.color_trc) << " (" << static_cast<int>(info.color_trc) << ")\n";
-        std::cout << "Color Range: " << av_color_range_name(info.color_range) << " (" << static_cast<int>(info.color_range) << ")\n";
-        std::cout << "Bit Depth: " << info.bit_depth << "\n";
-        std::cout << "Is HDR: " << (info.is_hdr ? "Yes" : "No") << "\n";
-        std::cout << "====================================================\n";
-        
-        return info;
-    }
-    
     // Main function to run all threads
     void decode_and_convert_color_threaded() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
@@ -334,7 +201,6 @@ public:
             start_convert_color_thread(
                 decode_thread_output,
                 convert_color_output,
-                color_conversion_state_,
                 decoder_state_.video_color_info,
                 d3d11_device,
                 d3d11_context
@@ -343,7 +209,7 @@ public:
         
         // Start depth inference thread with its own CUDA stream
         std::thread infer_depth_th([this]() {
-            start_infer_depth_thread(convert_color_output, infer_depth_cuda_stream);  // 使用独立的 CUDA stream
+            start_infer_depth_thread(convert_color_output);
         });
         
         // Wait for all threads to complete
@@ -370,7 +236,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "Failed to initialize D3D11VA, will use software decoding\n";
         }
         
-        if (!decoder.setup_cuda_d3d11_interop()) {
+        if (!decoder.setup_d3d11_device()) {
             std::cerr << "Failed to setup CUDA D3D11 interop\n";
             return 1;
         }
