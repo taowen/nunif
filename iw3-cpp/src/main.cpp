@@ -39,20 +39,6 @@ std::string av_err_to_string(int errnum) {
     return std::string(errbuf);
 }
 
-// Frame data structure for queue communication
-struct DecodedFrame {
-    AVFrame* frame;
-    bool is_end_signal;
-    
-    DecodedFrame() : frame(nullptr), is_end_signal(false) {}
-    DecodedFrame(AVFrame* f) : frame(f), is_end_signal(false) {}
-    static DecodedFrame end_signal() {
-        DecodedFrame data;
-        data.is_end_signal = true;
-        return data;
-    }
-};
-
 // Thread-safe queue for frame communication
 class FrameQueue {
 private:
