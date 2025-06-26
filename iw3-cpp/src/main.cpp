@@ -2,6 +2,7 @@
 #include "decode_thread.h"
 #include "convert_color_thread.h"
 #include "infer_sbs.h"
+#include "encode_thread.h"
 #include "video_file_opener.h"
 #include <iostream>
 #include <string_view>
@@ -36,6 +37,9 @@ private:
     DecodedFrameQueue decode_thread_output;
     ColorConvertedFrameQueue convert_color_output;
     StereoInferredFrameQueue infer_sbs_output;  // New output queue for stereo inference
+    
+    // 添加输出文件名成员变量
+    std::string output_filename_;
     
 public:
     MainProgram() = default;
@@ -87,6 +91,10 @@ public:
         return ::open_video_file(filename, decoder_state_);
     }
     
+    void set_output_filename(const std::string& filename) {
+        output_filename_ = filename;
+    }
+    
     void run_all_threads() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
         
@@ -108,25 +116,32 @@ public:
         
         // Start depth inference thread with its own CUDA stream
         std::thread infer_sbs_th([this]() {
-            start_infer_sbs(convert_color_output, infer_sbs_output);  // Pass both input and output queues
+            start_infer_sbs(convert_color_output, infer_sbs_output);
+        });
+        
+        // Start encode thread
+        std::thread encode_th([this]() {
+            start_encode_thread(infer_sbs_output, output_filename_);
         });
         
         // Wait for all threads to complete
         decode_th.join();
         convert_color_th.join();
         infer_sbs_th.join();
+        encode_th.join();
         
         std::cout << "=== Multi-threaded Processing Completed ===\n";
     }
 };
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cout << "Usage: iw3_cpp <video_file>\n";
+    if (argc != 3) {
+        std::cout << "Usage: iw3_cpp <input_video_file> <output_video_file>\n";
         return 1;
     }
     
-    std::string video_file = argv[1];
+    std::string input_video_file = argv[1];
+    std::string output_video_file = argv[2];
     
     try {
         MainProgram program;
@@ -140,10 +155,11 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        if (!program.open_video_file(video_file)) {
+        if (!program.open_video_file(input_video_file)) {
             return 1;
         }
         
+        program.set_output_filename(output_video_file);
         program.run_all_threads();
         
     } catch (const std::exception& e) {

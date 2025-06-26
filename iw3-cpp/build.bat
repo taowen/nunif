@@ -8,4 +8,4 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 popd
-iw3-cpp\build\Debug\iw3_cpp.exe "06 4k.mp4"
+iw3-cpp\build\Debug\iw3_cpp.exe "06 4k.mp4" test.mkv
