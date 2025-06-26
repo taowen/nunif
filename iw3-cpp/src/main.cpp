@@ -2,6 +2,7 @@
 #include "decode_thread.h"
 #include "convert_color_thread.h"
 #include "infer_depth_thread.h"
+#include "video_file_opener.h"
 #include <iostream>
 #include <string_view>
 #include <memory>
@@ -26,12 +27,6 @@ void checkCudaErrors(cudaError_t result) {
         std::cerr << "CUDA error: " << cudaGetErrorString(result) << " (" << static_cast<int>(result) << ")\n";
         throw std::runtime_error("CUDA error occurred");
     }
-}
-
-std::string av_err_to_string(int errnum) {
-    char errbuf[AV_ERROR_MAX_STRING_SIZE];
-    av_strerror(errnum, errbuf, AV_ERROR_MAX_STRING_SIZE);
-    return std::string(errbuf);
 }
 
 class VideoDecoder {
@@ -94,25 +89,7 @@ public:
     }
     
     bool open_video_file(const std::string& filename) {
-        int ret = avformat_open_input(&decoder_state_.format_ctx, filename.c_str(), nullptr, nullptr);
-        if (ret < 0) {
-            std::cerr << "Failed to open video file: " << av_err_to_string(ret) << "\n";
-            return false;
-        }
-        
-        ret = avformat_find_stream_info(decoder_state_.format_ctx, nullptr);
-        if (ret < 0) {
-            std::cerr << "Failed to find stream info: " << av_err_to_string(ret) << "\n";
-            return false;
-        }
-        
-        decoder_state_.video_stream_index = av_find_best_stream(decoder_state_.format_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (decoder_state_.video_stream_index < 0) {
-            std::cerr << "No video stream found\n";
-            return false;
-        }
-        
-        return true;
+        return ::open_video_file(filename, decoder_state_);
     }
     
     bool setup_decoder() {
