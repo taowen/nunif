@@ -332,7 +332,7 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
 bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
                                   ColorConversionState& color_state, ID3D11Device* d3d11_device,
                                   ID3D11DeviceContext* d3d11_context, cudaStream_t cuda_stream,
-                                  ConvertedFrameQueue& output_queue) {
+                                  ColorConvertedFrameQueue& output_queue) {
     ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
     int texture_index = (int)(intptr_t)d3d11_frame->data[1];
     
@@ -412,7 +412,7 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     std::cout << "  ✓ Color conversion shader executed successfully\n";
     
     // === Add converted frame to output queue ===
-    ConvertedFrame converted_frame(color_state.output_texture, texture_desc.Width, texture_desc.Height);
+    ColorConvertedFrame converted_frame(color_state.output_texture, texture_desc.Width, texture_desc.Height);
     output_queue.push(std::move(converted_frame));
     
     std::cout << "  ✓ Converted frame added to output queue\n";
@@ -424,7 +424,7 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
 
 void start_convert_color_thread(
     FrameQueue& input_frame_queue,
-    ConvertedFrameQueue& output_frame_queue,
+    ColorConvertedFrameQueue& output_frame_queue,
     ColorConversionState& color_state, 
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
@@ -442,7 +442,7 @@ void start_convert_color_thread(
         if (decoded_frame.is_end_signal) {
             std::cout << "=== Process Thread Received End Signal ===\n";
             // Send end signal to output queue
-            output_frame_queue.push(ConvertedFrame::end_signal());
+            output_frame_queue.push(ColorConvertedFrame::end_signal());
             break;
         }
         

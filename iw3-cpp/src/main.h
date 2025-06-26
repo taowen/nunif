@@ -141,32 +141,32 @@ struct DecodedFrame {
 };
 
 // Converted frame data structure for AI processing
-struct ConvertedFrame {
+struct ColorConvertedFrame {
     ID3D11Texture2D* converted_texture;
     UINT width;
     UINT height;
     bool is_end_signal;
     
-    ConvertedFrame() : converted_texture(nullptr), width(0), height(0), is_end_signal(false) {}
-    ConvertedFrame(ID3D11Texture2D* texture, UINT w, UINT h) 
+    ColorConvertedFrame() : converted_texture(nullptr), width(0), height(0), is_end_signal(false) {}
+    ColorConvertedFrame(ID3D11Texture2D* texture, UINT w, UINT h) 
         : converted_texture(texture), width(w), height(h), is_end_signal(false) {
         if (texture) texture->AddRef(); // Add reference
     }
     
-    ~ConvertedFrame() {
+    ~ColorConvertedFrame() {
         if (converted_texture && !is_end_signal) {
             converted_texture->Release();
         }
     }
     
     // Move constructor
-    ConvertedFrame(ConvertedFrame&& other) noexcept 
+    ColorConvertedFrame(ColorConvertedFrame&& other) noexcept 
         : converted_texture(other.converted_texture), width(other.width), height(other.height), is_end_signal(other.is_end_signal) {
         other.converted_texture = nullptr;
     }
     
     // Move assignment
-    ConvertedFrame& operator=(ConvertedFrame&& other) noexcept {
+    ColorConvertedFrame& operator=(ColorConvertedFrame&& other) noexcept {
         if (this != &other) {
             if (converted_texture && !is_end_signal) {
                 converted_texture->Release();
@@ -181,11 +181,11 @@ struct ConvertedFrame {
     }
     
     // Delete copy constructor and assignment
-    ConvertedFrame(const ConvertedFrame&) = delete;
-    ConvertedFrame& operator=(const ConvertedFrame&) = delete;
+    ColorConvertedFrame(const ColorConvertedFrame&) = delete;
+    ColorConvertedFrame& operator=(const ColorConvertedFrame&) = delete;
     
-    static ConvertedFrame end_signal() {
-        ConvertedFrame data;
+    static ColorConvertedFrame end_signal() {
+        ColorConvertedFrame data;
         data.is_end_signal = true;
         return data;
     }
@@ -232,4 +232,4 @@ public:
 
 // Type aliases for specific queue types
 using FrameQueue = ThreadSafeQueue<DecodedFrame>;
-using ConvertedFrameQueue = ThreadSafeQueue<ConvertedFrame>; 
+using ColorConvertedFrameQueue = ThreadSafeQueue<ColorConvertedFrame>; 

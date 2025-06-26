@@ -57,7 +57,7 @@ private:
     
     // Thread management
     FrameQueue decode_thread_output;
-    ConvertedFrameQueue convert_color_output;
+    ColorConvertedFrameQueue convert_color_output;
     
 public:
     VideoDecoder() = default;
@@ -339,7 +339,7 @@ public:
             int ai_processed_count = 0;
             
             while (true) {
-                ConvertedFrame converted_frame = convert_color_output.pop();
+                ColorConvertedFrame converted_frame = convert_color_output.pop();
                 
                 if (converted_frame.is_end_signal) {
                     std::cout << "=== AI Thread Received End Signal ===\n";

@@ -5,7 +5,7 @@
 // 启动颜色转换线程的函数
 void start_convert_color_thread(
     FrameQueue& input_frame_queue,
-    ConvertedFrameQueue& output_frame_queue,
+    ColorConvertedFrameQueue& output_frame_queue,
     ColorConversionState& color_state,
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
