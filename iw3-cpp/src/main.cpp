@@ -39,44 +39,6 @@ std::string av_err_to_string(int errnum) {
     return std::string(errbuf);
 }
 
-// Thread-safe queue for frame communication
-class FrameQueue {
-private:
-    std::queue<DecodedFrame> queue_;
-    std::mutex mutex_;
-    std::condition_variable condition_;
-    size_t max_size_;
-    
-public:
-    FrameQueue(size_t max_size = 10) : max_size_(max_size) {}
-    
-    void push(const DecodedFrame& data) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return queue_.size() < max_size_; });
-        queue_.push(data);
-        condition_.notify_one();
-    }
-    
-    DecodedFrame pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return !queue_.empty(); });
-        DecodedFrame data = queue_.front();
-        queue_.pop();
-        condition_.notify_one();
-        return data;
-    }
-    
-    bool empty() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.empty();
-    }
-    
-    size_t size() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return queue_.size();
-    }
-};
-
 class VideoDecoder {
 private:
     AVFormatContext* format_ctx = nullptr;
