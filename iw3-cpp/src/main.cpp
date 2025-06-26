@@ -1,4 +1,5 @@
 #include "main.h"
+#include "decode_thread.h"
 #include <iostream>
 #include <string_view>
 #include <memory>
@@ -752,87 +753,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return true;
     }
     
-    // Decode thread function
-    void decode_thread() {
-        AVPacket* packet = av_packet_alloc();
-        AVFrame* frame = av_frame_alloc();
-        
-        if (!packet || !frame) {
-            std::cerr << "Failed to allocate packet or frame\n";
-            frame_queue_.push(DecodedFrame::end_signal());
-            return;
-        }
-        
-        int frame_count = 0;
-        
-        std::cout << "=== Decode Thread Started ===\n";
-        
-        // Read and decode frames
-        while (av_read_frame(decoder_state_.format_ctx, packet) >= 0) {
-            if (packet->stream_index == decoder_state_.video_stream_index) {
-                int ret = avcodec_send_packet(decoder_state_.codec_ctx, packet);
-                if (ret < 0) {
-                    std::cerr << "Error sending packet: " << av_err_to_string(ret) << "\n";
-                    break;
-                }
-                
-                while (ret >= 0) {
-                    ret = avcodec_receive_frame(decoder_state_.codec_ctx, frame);
-                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                        break;
-                    } else if (ret < 0) {
-                        std::cerr << "Error receiving frame: " << av_err_to_string(ret) << "\n";
-                        break;
-                    }
-                    
-                    frame_count++;
-                    
-                    if (frame->format == AV_PIX_FMT_D3D11) {
-                        // Detect color space info only for the first frame
-                        if (!decoder_state_.color_info_detected) {
-                            decoder_state_.video_color_info = detect_color_info(frame);
-                            decoder_state_.color_info_detected = true;
-                        }
-                        
-                        // Create a copy of the frame for the queue
-                        AVFrame* frame_copy = av_frame_alloc();
-                        if (av_frame_ref(frame_copy, frame) < 0) {
-                            std::cerr << "Failed to reference frame\n";
-                            av_frame_free(&frame_copy);
-                            continue;
-                        }
-                        
-                        // Push to queue (no color info needed, using shared one)
-                        DecodedFrame decoded_frame(frame_copy);
-                        frame_queue_.push(decoded_frame);
-                        
-                        std::cout << "✓ Frame " << frame_count << " decoded and queued\n";
-                        
-                    } else {
-                        std::cerr << "Unexpected frame format: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " - hardware decoding may have failed\n";
-                        continue;
-                    }
-                    
-                    if (frame_count >= 5) {
-                        goto decode_cleanup;
-                    }
-                }
-            }
-            av_packet_unref(packet);
-        }
-        
-    decode_cleanup:
-        av_frame_free(&frame);
-        av_packet_free(&packet);
-        
-        // Signal end of decoding
-        frame_queue_.push(DecodedFrame::end_signal());
-        decoder_state_.decode_finished_ = true;
-        
-        std::cout << "=== Decode Thread Finished ===\n";
-        std::cout << "Total frames decoded: " << frame_count << "\n";
-    }
-    
     // Process thread function
     void convert_color_thread() {
         std::cout << "=== Process Thread Started ===\n";
@@ -993,8 +913,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     void decode_and_convert_color_threaded() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
         
-        // Start both threads
-        std::thread decode_th(&VideoDecoder::decode_thread, this);
+        // Start both threads using the new decode thread function
+        std::thread decode_th([this]() {
+            start_decode_thread(decoder_state_, frame_queue_);
+        });
         std::thread process_th(&VideoDecoder::convert_color_thread, this);
         
         // Wait for both threads to complete
