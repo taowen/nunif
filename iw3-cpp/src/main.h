@@ -45,7 +45,6 @@ struct DecoderState {
     
     // Thread synchronization
     std::atomic<bool> decode_finished_{false};
-    std::atomic<bool> process_finished_{false};
     
     // Color space detection state
     ColorSpaceInfo video_color_info;
@@ -67,7 +66,6 @@ struct DecoderState {
         }
         
         decode_finished_ = false;
-        process_finished_ = false;
         color_info_detected = false;
         video_stream_index = -1;
     }
@@ -86,6 +84,7 @@ struct ColorConversionState {
     // CUDA interop resources for color conversion
     ID3D11Texture2D* cuda_interop_texture = nullptr;
     cudaGraphicsResource* cuda_resource = nullptr;
+    std::atomic<bool> process_finished_{false};
     
     // Cleanup method
     void cleanup() {
@@ -123,6 +122,7 @@ struct ColorConversionState {
             color_conversion_shader->Release();
             color_conversion_shader = nullptr;
         }
+        process_finished_ = false;
     }
 };
 

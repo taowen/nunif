@@ -864,7 +864,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             }
         }
         
-        decoder_state_.process_finished_ = true;
+        color_conversion_state_.process_finished_ = true;
         std::cout << "=== Process Thread Finished ===\n";
         std::cout << "Total frames processed: " << processed_count << "\n";
     }
