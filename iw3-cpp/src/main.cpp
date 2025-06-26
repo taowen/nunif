@@ -56,7 +56,7 @@ private:
     ColorConversionState color_conversion_state_;
     
     // Thread management
-    FrameQueue frame_queue_;
+    FrameQueue decode_thread_output;
     
 public:
     VideoDecoder() = default;
@@ -316,12 +316,12 @@ public:
         
         // Start both threads using the new decode thread function
         std::thread decode_th([this]() {
-            start_decode_thread(decoder_state_, frame_queue_);
+            start_decode_thread(decoder_state_, decode_thread_output);
         });
         
         std::thread process_th([this]() {
             start_convert_color_thread(
-                frame_queue_,
+                decode_thread_output,
                 color_conversion_state_,
                 decoder_state_.video_color_info,
                 d3d11_device,
