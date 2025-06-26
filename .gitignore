@@ -15,6 +15,7 @@ tmp
 *.xcf
 *.onnx
 *.trt
+*.mkv
 /data
 /.vscode
 !/data/.keep

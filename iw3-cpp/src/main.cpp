@@ -121,7 +121,8 @@ public:
         
         // Start encode thread
         std::thread encode_th([this]() {
-            start_encode_thread(infer_sbs_output, output_filename_);
+            start_encode_thread(infer_sbs_output, output_filename_,
+                decoder_state_.video_color_info, d3d11_device, d3d11_context);
         });
         
         // Wait for all threads to complete
