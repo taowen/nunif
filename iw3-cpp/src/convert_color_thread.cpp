@@ -331,7 +331,8 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
 
 bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
                                   ColorConversionState& color_state, ID3D11Device* d3d11_device,
-                                  ID3D11DeviceContext* d3d11_context, cudaStream_t cuda_stream) {
+                                  ID3D11DeviceContext* d3d11_context, cudaStream_t cuda_stream,
+                                  ConvertedFrameQueue& output_queue) {
     ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
     int texture_index = (int)(intptr_t)d3d11_frame->data[1];
     
@@ -410,37 +411,11 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     
     std::cout << "  ✓ Color conversion shader executed successfully\n";
     
-    // === CUDA Processing on Converted Data ===
+    // === Add converted frame to output queue ===
+    ConvertedFrame converted_frame(color_state.output_texture, texture_desc.Width, texture_desc.Height);
+    output_queue.push(std::move(converted_frame));
     
-    // Now register the output texture with CUDA for further processing
-    cudaGraphicsResource* output_cuda_resource = nullptr;
-    cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-        &output_cuda_resource, color_state.output_texture, cudaGraphicsRegisterFlagsNone);
-    
-    if (cuda_status == cudaSuccess) {
-        checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
-        
-        try {
-            cudaArray_t cuda_array;
-            checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, output_cuda_resource, 0, 0));
-            
-            std::cout << "  ✓ Converted texture mapped to CUDA successfully\n";
-            
-            // Here you can process the converted data with CUDA kernels
-            
-            checkCudaErrors(cudaStreamSynchronize(cuda_stream));
-            
-        } catch (const std::exception& e) {
-            std::cerr << "Error processing converted CUDA data: " << e.what() << "\n";
-        }
-        
-        checkCudaErrors(cudaGraphicsUnmapResources(1, &output_cuda_resource, cuda_stream));
-        cudaGraphicsUnregisterResource(output_cuda_resource);
-        
-        std::cout << "  ✓ Converted texture processing completed\n";
-    } else {
-        std::cerr << "Failed to register output texture with CUDA: " << cudaGetErrorString(cuda_status) << "\n";
-    }
+    std::cout << "  ✓ Converted frame added to output queue\n";
     
     return true;
 }
@@ -448,7 +423,8 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
 } // anonymous namespace
 
 void start_convert_color_thread(
-    FrameQueue& frame_queue,
+    FrameQueue& input_frame_queue,
+    ConvertedFrameQueue& output_frame_queue,
     ColorConversionState& color_state, 
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
@@ -460,11 +436,13 @@ void start_convert_color_thread(
     int processed_count = 0;
     
     while (true) {
-        DecodedFrame decoded_frame = frame_queue.pop();
+        DecodedFrame decoded_frame = input_frame_queue.pop();
         
         // Check for end signal
         if (decoded_frame.is_end_signal) {
             std::cout << "=== Process Thread Received End Signal ===\n";
+            // Send end signal to output queue
+            output_frame_queue.push(ConvertedFrame::end_signal());
             break;
         }
         
@@ -474,7 +452,7 @@ void start_convert_color_thread(
             
             // Process the D3D11 frame
             process_d3d11_frame_with_cuda(decoded_frame.frame, color_info, color_state, 
-                                        d3d11_device, d3d11_context, cuda_stream);
+                                        d3d11_device, d3d11_context, cuda_stream, output_frame_queue);
             
             // Clean up the frame
             av_frame_free(&decoded_frame.frame);

@@ -57,6 +57,7 @@ private:
     
     // Thread management
     FrameQueue decode_thread_output;
+    ConvertedFrameQueue convert_color_output;
     
 public:
     VideoDecoder() = default;
@@ -314,14 +315,16 @@ public:
     void decode_and_convert_color_threaded() {
         std::cout << "=== Starting Multi-threaded Processing ===\n";
         
-        // Start both threads using the new decode thread function
+        // Start decode thread
         std::thread decode_th([this]() {
             start_decode_thread(decoder_state_, decode_thread_output);
         });
         
+        // Start color conversion thread
         std::thread process_th([this]() {
             start_convert_color_thread(
                 decode_thread_output,
+                convert_color_output,
                 color_conversion_state_,
                 decoder_state_.video_color_info,
                 d3d11_device,
@@ -330,9 +333,39 @@ public:
             );
         });
         
-        // Wait for both threads to complete
+        // Start AI processing thread (示例)
+        std::thread ai_th([this]() {
+            std::cout << "=== AI Processing Thread Started ===\n";
+            int ai_processed_count = 0;
+            
+            while (true) {
+                ConvertedFrame converted_frame = convert_color_output.pop();
+                
+                if (converted_frame.is_end_signal) {
+                    std::cout << "=== AI Thread Received End Signal ===\n";
+                    break;
+                }
+                
+                if (converted_frame.converted_texture) {
+                    ai_processed_count++;
+                    std::cout << ">>> AI processing frame " << ai_processed_count 
+                             << " (size: " << converted_frame.width << "x" << converted_frame.height << ")\n";
+                    
+                    // 这里可以添加AI模型推理代码
+                    // 例如：将 converted_frame.converted_texture 传递给深度学习模型
+                    
+                    std::cout << ">>> AI frame " << ai_processed_count << " completed\n";
+                }
+            }
+            
+            std::cout << "=== AI Processing Thread Finished ===\n";
+            std::cout << "Total AI frames processed: " << ai_processed_count << "\n";
+        });
+        
+        // Wait for all threads to complete
         decode_th.join();
         process_th.join();
+        ai_th.join();
         
         std::cout << "=== Multi-threaded Processing Completed ===\n";
     }

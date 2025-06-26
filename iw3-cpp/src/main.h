@@ -140,40 +140,96 @@ struct DecodedFrame {
     }
 };
 
+// Converted frame data structure for AI processing
+struct ConvertedFrame {
+    ID3D11Texture2D* converted_texture;
+    UINT width;
+    UINT height;
+    bool is_end_signal;
+    
+    ConvertedFrame() : converted_texture(nullptr), width(0), height(0), is_end_signal(false) {}
+    ConvertedFrame(ID3D11Texture2D* texture, UINT w, UINT h) 
+        : converted_texture(texture), width(w), height(h), is_end_signal(false) {
+        if (texture) texture->AddRef(); // Add reference
+    }
+    
+    ~ConvertedFrame() {
+        if (converted_texture && !is_end_signal) {
+            converted_texture->Release();
+        }
+    }
+    
+    // Move constructor
+    ConvertedFrame(ConvertedFrame&& other) noexcept 
+        : converted_texture(other.converted_texture), width(other.width), height(other.height), is_end_signal(other.is_end_signal) {
+        other.converted_texture = nullptr;
+    }
+    
+    // Move assignment
+    ConvertedFrame& operator=(ConvertedFrame&& other) noexcept {
+        if (this != &other) {
+            if (converted_texture && !is_end_signal) {
+                converted_texture->Release();
+            }
+            converted_texture = other.converted_texture;
+            width = other.width;
+            height = other.height;
+            is_end_signal = other.is_end_signal;
+            other.converted_texture = nullptr;
+        }
+        return *this;
+    }
+    
+    // Delete copy constructor and assignment
+    ConvertedFrame(const ConvertedFrame&) = delete;
+    ConvertedFrame& operator=(const ConvertedFrame&) = delete;
+    
+    static ConvertedFrame end_signal() {
+        ConvertedFrame data;
+        data.is_end_signal = true;
+        return data;
+    }
+};
+
 // Thread-safe queue for frame communication
-class FrameQueue {
+template<typename T>
+class ThreadSafeQueue {
 private:
-    std::queue<DecodedFrame> decode_thread_output;
+    std::queue<T> queue_;
     std::mutex mutex_;
     std::condition_variable condition_;
     size_t max_size_;
     
 public:
-    FrameQueue(size_t max_size = 10) : max_size_(max_size) {}
+    ThreadSafeQueue(size_t max_size = 10) : max_size_(max_size) {}
     
-    void push(const DecodedFrame& data) {
+    void push(T&& data) {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return decode_thread_output.size() < max_size_; });
-        decode_thread_output.push(data);
+        condition_.wait(lock, [this] { return queue_.size() < max_size_; });
+        queue_.push(std::move(data));
         condition_.notify_one();
     }
     
-    DecodedFrame pop() {
+    T pop() {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait(lock, [this] { return !decode_thread_output.empty(); });
-        DecodedFrame data = decode_thread_output.front();
-        decode_thread_output.pop();
+        condition_.wait(lock, [this] { return !queue_.empty(); });
+        T data = std::move(queue_.front());
+        queue_.pop();
         condition_.notify_one();
         return data;
     }
     
     bool empty() {
         std::lock_guard<std::mutex> lock(mutex_);
-        return decode_thread_output.empty();
+        return queue_.empty();
     }
     
     size_t size() {
         std::lock_guard<std::mutex> lock(mutex_);
-        return decode_thread_output.size();
+        return queue_.size();
     }
-}; 
+};
+
+// Type aliases for specific queue types
+using FrameQueue = ThreadSafeQueue<DecodedFrame>;
+using ConvertedFrameQueue = ThreadSafeQueue<ConvertedFrame>; 

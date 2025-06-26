@@ -129,7 +129,7 @@ void start_decode_thread(DecoderState& decoder_state, FrameQueue& frame_queue) {
                     
                     // Push to queue (no color info needed, using shared one)
                     DecodedFrame decoded_frame(frame_copy);
-                    frame_queue.push(decoded_frame);
+                    frame_queue.push(std::move(decoded_frame));
                     
                     std::cout << "✓ Frame " << frame_count << " decoded and queued\n";
                     
