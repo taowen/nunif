@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Add cmake directory to module path
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-add_executable(iw3_cpp src/main.cpp src/decode_thread.cpp src/convert_color_thread.cpp src/infer_depth_thread.cpp src/video_file_opener.cpp)
+add_executable(iw3_cpp src/main.cpp src/decode_thread.cpp src/convert_color_thread.cpp src/infer_sbs.cpp src/video_file_opener.cpp)
 
 # Apply Windows/MSVC compile options
 target_compile_options(iw3_cpp PRIVATE

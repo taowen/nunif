@@ -1,7 +1,7 @@
 #include "main.h"
 #include "decode_thread.h"
 #include "convert_color_thread.h"
-#include "infer_depth_thread.h"
+#include "infer_sbs.h"
 #include "video_file_opener.h"
 #include <iostream>
 #include <string_view>
@@ -106,14 +106,14 @@ public:
         });
         
         // Start depth inference thread with its own CUDA stream
-        std::thread infer_depth_th([this]() {
-            start_infer_depth_thread(convert_color_output);
+        std::thread infer_sbs_th([this]() {
+            start_infer_sbs(convert_color_output);
         });
         
         // Wait for all threads to complete
         decode_th.join();
         convert_color_th.join();
-        infer_depth_th.join();
+        infer_sbs_th.join();
         
         std::cout << "=== Multi-threaded Processing Completed ===\n";
     }
@@ -143,7 +143,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // Use threaded processing
         program.run_all_threads();
         
     } catch (const std::exception& e) {

@@ -1,4 +1,4 @@
-#include "infer_depth_thread.h"
+#include "infer_sbs.h"
 #include <iostream>
 #include <cuda_runtime_api.h>
 #include <algorithm>
@@ -329,7 +329,7 @@ std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 
 } // anonymous namespace
 
-void start_infer_depth_thread(
+void start_infer_sbs(
     ColorConvertedFrameQueue& input_frame_queue) {
     
     cudaStream_t cuda_stream = nullptr;
