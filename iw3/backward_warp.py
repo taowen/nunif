@@ -58,13 +58,11 @@ def make_input_tensor(c, depth, divergence, convergence,
 
 
 def backward_warp(c, grid, delta, delta_scale):
-    print(f"[backward_warp] c.shape={c.shape}, grid.shape={grid.shape}, delta.shape={delta.shape}")
     grid = grid + delta * delta_scale
     if c.shape[2] != grid.shape[2] or c.shape[3] != grid.shape[3]:
         grid = F.interpolate(grid, size=c.shape[-2:],
                              mode="bilinear", align_corners=True, antialias=False)
     grid = grid.permute(0, 2, 3, 1)
-    print(f"[backward_warp] after permute: c.shape={c.shape}, grid.shape={grid.shape}")
     if device_is_mps(c.device):
         # MPS does not support bicubic and border
         mode = "bilinear"

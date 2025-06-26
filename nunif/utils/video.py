@@ -519,6 +519,84 @@ def guess_target_colorspace(input_stream, colorspace_arg, pix_fmt,
     return color_primaries, color_trc, colorspace, color_range, pix_fmt
 
 
+def get_colorspace_name(value):
+    """将颜色空间数值转换为英文名称"""
+    colorspace_names = {
+        0: "RGB",
+        1: "BT709", 
+        2: "UNSPECIFIED",
+        4: "FCC",
+        5: "BT470BG",
+        6: "SMPTE170M", 
+        7: "SMPTE240M",
+        8: "YCGCO",
+        9: "BT2020_NCL",
+        10: "BT2020_CL",
+        11: "SMPTE2085",
+        12: "CHROMA_DERIVED_NCL",
+        13: "CHROMA_DERIVED_CL",
+        14: "ICTCP"
+    }
+    return colorspace_names.get(value, f"UNKNOWN({value})")
+
+
+def get_color_range_name(value):
+    """将颜色范围数值转换为英文名称"""
+    color_range_names = {
+        0: "UNSPECIFIED",
+        1: "MPEG/TV",  # Limited range
+        2: "JPEG/PC"   # Full range
+    }
+    return color_range_names.get(value, f"UNKNOWN({value})")
+
+
+def get_color_primaries_name(value):
+    """将色彩原色数值转换为英文名称"""
+    color_primaries_names = {
+        0: "RESERVED0",
+        1: "BT709",
+        2: "UNSPECIFIED", 
+        3: "RESERVED",
+        4: "BT470M",
+        5: "BT470BG",
+        6: "SMPTE170M",
+        7: "SMPTE240M",
+        8: "FILM",
+        9: "BT2020",
+        10: "SMPTE428",
+        11: "SMPTE431",
+        12: "SMPTE432",
+        22: "JEDEC_P22"
+    }
+    return color_primaries_names.get(value, f"UNKNOWN({value})")
+
+
+def get_color_trc_name(value):
+    """将传输特性数值转换为英文名称"""
+    color_trc_names = {
+        0: "RESERVED0",
+        1: "BT709",
+        2: "UNSPECIFIED",
+        3: "RESERVED", 
+        4: "GAMMA22",
+        5: "GAMMA28",
+        6: "SMPTE170M",
+        7: "SMPTE240M",
+        8: "LINEAR",
+        9: "LOG",
+        10: "LOG_SQRT",
+        11: "IEC61966_2_4",
+        12: "BT1361_ECG",
+        13: "IEC61966_2_1",
+        14: "BT2020_10",
+        15: "BT2020_12",
+        16: "SMPTE2084",
+        17: "SMPTE428",
+        18: "ARIB_STD_B67"
+    }
+    return color_trc_names.get(value, f"UNKNOWN({value})")
+
+
 def configure_colorspace(output_stream, input_stream, config):
     assert config.colorspace in {"unspecified", "auto", "copy",
                                  "bt709", "bt709-tv", "bt709-pc",
@@ -528,8 +606,22 @@ def configure_colorspace(output_stream, input_stream, config):
     config.state["reformatter"] = reformatter = lambda frame: frame
     exported_source_color_range = config.state["source_color_range"]
     exported_output_colorspace = config.state["output_colorspace"]
+    
+    # 打印输入流信息
+    if input_stream is not None:
+        print(f"Original Input Stream Info:")
+        print(f"  Pixel Format: {input_stream.pix_fmt}")
+        print(f"  Colorspace: {get_colorspace_name(input_stream.codec_context.colorspace)}")
+        print(f"  Color Range: {get_color_range_name(input_stream.codec_context.color_range)}")
+        print(f"  Color Primaries: {get_color_primaries_name(input_stream.codec_context.color_primaries)}")
+        print(f"  Transfer Characteristics: {get_color_trc_name(input_stream.codec_context.color_trc)}")
+        print(f"  Resolution: {input_stream.width}x{input_stream.height}")
+    else:
+        print("Input Stream: None (possibly image import)")
+        
     if config.pix_fmt in {"rgb24", "gbrp"} or config.colorspace == "unspecified":
         config.state["source_color_range"] = config.state["output_colorspace"] = None
+        print(f"Skip colorspace conversion (Pixel Format: {config.pix_fmt}, Colorspace Param: {config.colorspace})")
         if config.state_updated:
             config.state_updated(config)
         return
@@ -545,6 +637,15 @@ def configure_colorspace(output_stream, input_stream, config):
         output_stream.codec_context.colorspace = colorspace
         output_stream.codec_context.color_range = color_range
 
+        # 打印输出流信息
+        print(f"Target Output Stream Info:")
+        print(f"  Pixel Format: {config.pix_fmt}")
+        print(f"  Colorspace: {get_colorspace_name(colorspace)}")
+        print(f"  Color Range: {get_color_range_name(color_range)}")
+        print(f"  Color Primaries: {get_color_primaries_name(color_primaries)}")
+        print(f"  Transfer Characteristics: {get_color_trc_name(color_trc)}")
+        print(f"  Colorspace Parameter: {config.colorspace}")
+
         if output_stream.codec_context.colorspace in KNOWN_COLORSPACES:
             if input_stream is not None:
                 rgb24_options = guess_rgb24_options(
@@ -552,6 +653,7 @@ def configure_colorspace(output_stream, input_stream, config):
                     target_colorspace=output_stream.codec_context.colorspace)
                 reformatter_src_colorspace = rgb24_options["dst_colorspace"]  # output_stream.codec_context.colorspace
                 reformatter_src_color_range = rgb24_options["dst_color_range"]  # ColorRange.JPEG
+                print(f"RGB24 Conversion Options: {rgb24_options}")
             else:
                 # image import (generate_video)
                 if exported_output_colorspace in KNOWN_COLORSPACES:
@@ -565,6 +667,7 @@ def configure_colorspace(output_stream, input_stream, config):
                         reformatter_src_color_range = exported_source_color_range
                     else:
                         reformatter_src_color_range = output_stream.codec_context.color_range
+                print(f"Image Import Reformat Info: Source Colorspace={get_colorspace_name(reformatter_src_colorspace)}, Source Color Range={get_color_range_name(reformatter_src_color_range)}")
 
             reformatter = lambda frame: frame.reformat(
                 format=config.pix_fmt,
@@ -580,6 +683,8 @@ def configure_colorspace(output_stream, input_stream, config):
                 rgb24_options = guess_rgb24_options(input_stream, target_colorspace=target_colorspace)
                 reformatter_src_colorspace = rgb24_options["dst_colorspace"]  # output_stream.codec_context.colorspace
                 reformatter_src_color_range = rgb24_options["dst_color_range"]  # ColorRange.JPEG
+                print(f"Guessed Target Colorspace: {get_colorspace_name(target_colorspace)}")
+                print(f"RGB24 Conversion Options: {rgb24_options}")
             else:
                 # image import (generate_video)
                 if exported_output_colorspace in KNOWN_COLORSPACES:
@@ -591,6 +696,7 @@ def configure_colorspace(output_stream, input_stream, config):
                     target_colorspace = Colorspace.ITU709
                     reformatter_src_colorspace = Colorspace.ITU709
                     reformatter_src_color_range = output_stream.codec_context.color_range
+                print(f"Image Import Target Colorspace: {get_colorspace_name(target_colorspace)}")
 
             reformatter = lambda frame: frame.reformat(
                 format=config.pix_fmt,
@@ -599,24 +705,32 @@ def configure_colorspace(output_stream, input_stream, config):
     else:
         # hook video
         assert input_stream is not None
+        print("Hook Video Mode - No Output Stream")
 
         if config.colorspace in {"auto", "copy"}:
             target_colorspace = guess_colorspace(input_stream)
             rgb24_options = guess_rgb24_options(input_stream, target_colorspace=target_colorspace)
+            print(f"Auto/Copy Mode - Target Colorspace: {get_colorspace_name(target_colorspace)}")
         elif config.colorspace in {"bt709", "bt709-pc", "bt709-tv"}:
             rgb24_options = guess_rgb24_options(input_stream, target_colorspace=Colorspace.ITU709.value)
+            print(f"BT.709 Mode - RGB24 Conversion Options: {rgb24_options}")
         elif config.colorspace in {"bt601", "bt601-pc", "bt601-tv"}:
             rgb24_options = guess_rgb24_options(input_stream, target_colorspace=Colorspace.ITU601.value)
+            print(f"BT.601 Mode - RGB24 Conversion Options: {rgb24_options}")
 
     config.state["rgb24_options"] = rgb24_options
     config.state["reformatter"] = reformatter
     if rgb24_options:
         config.state["output_colorspace"] = int(rgb24_options["dst_colorspace"])
+        print(f"Final Output Colorspace: {get_colorspace_name(config.state['output_colorspace'])}")
     if input_stream is not None:
         config.state["source_color_range"] = int(guess_color_range(input_stream))
+        print(f"Source Color Range: {get_color_range_name(config.state['source_color_range'])}")
 
     if config.state_updated:
         config.state_updated(config)
+    
+    print("-" * 50)  # separator
 
 
 def configure_video_codec(config):
