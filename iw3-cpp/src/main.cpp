@@ -1,3 +1,4 @@
+#include "main.h"
 #include <iostream>
 #include <string_view>
 #include <memory>
@@ -37,16 +38,6 @@ std::string av_err_to_string(int errnum) {
     av_strerror(errnum, errbuf, AV_ERROR_MAX_STRING_SIZE);
     return std::string(errbuf);
 }
-
-struct ColorSpaceInfo {
-    AVColorSpace color_space = AVCOL_SPC_UNSPECIFIED;
-    AVColorPrimaries color_primaries = AVCOL_PRI_UNSPECIFIED;
-    AVColorTransferCharacteristic color_trc = AVCOL_TRC_UNSPECIFIED;
-    AVColorRange color_range = AVCOL_RANGE_UNSPECIFIED;
-    int bit_depth = 8;
-    bool is_hdr = false;
-    DXGI_FORMAT dxgi_format = DXGI_FORMAT_UNKNOWN;
-};
 
 // Frame data structure for queue communication
 struct DecodedFrame {
