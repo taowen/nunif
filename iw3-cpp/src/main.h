@@ -4,6 +4,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <cuda_runtime_api.h>
 
 extern "C" {
 #include <libavutil/pixfmt.h>
@@ -18,6 +19,75 @@ struct ColorSpaceInfo {
     int bit_depth = 8;
     bool is_hdr = false;
     DXGI_FORMAT dxgi_format = DXGI_FORMAT_UNKNOWN;
+};
+
+// Color space conversion constants
+struct ConversionConstants {
+    float matrix[16];  // 4x4 color matrix
+    float luma_coeffs[4];
+    float chroma_coeffs[4];
+    float offset[4];
+    int input_format;
+    int color_space;
+    int bit_depth;
+    int is_hdr;
+};
+
+// Color conversion state structure
+struct ColorConversionState {
+    // DirectX shader resources
+    ID3D11ComputeShader* color_conversion_shader = nullptr;
+    ID3D11Buffer* conversion_constants_buffer = nullptr;
+    ID3D11ShaderResourceView* input_srv_y = nullptr;
+    ID3D11ShaderResourceView* input_srv_uv = nullptr;
+    ID3D11UnorderedAccessView* output_uav = nullptr;
+    ID3D11Texture2D* output_texture = nullptr;
+    
+    // CUDA interop resources
+    ID3D11Texture2D* cuda_interop_texture = nullptr;
+    cudaGraphicsResource* cuda_resource = nullptr;
+    
+    // Color space information
+    ColorSpaceInfo video_color_info;
+    bool color_info_detected = false;
+    
+    // Cleanup method
+    void cleanup() {
+        if (cuda_resource) {
+            cudaGraphicsUnregisterResource(cuda_resource);
+            cuda_resource = nullptr;
+        }
+        
+        if (cuda_interop_texture) {
+            cuda_interop_texture->Release();
+            cuda_interop_texture = nullptr;
+        }
+        
+        if (input_srv_y) {
+            input_srv_y->Release();
+            input_srv_y = nullptr;
+        }
+        if (input_srv_uv) {
+            input_srv_uv->Release();
+            input_srv_uv = nullptr;
+        }
+        if (output_uav) {
+            output_uav->Release();
+            output_uav = nullptr;
+        }
+        if (output_texture) {
+            output_texture->Release();
+            output_texture = nullptr;
+        }
+        if (conversion_constants_buffer) {
+            conversion_constants_buffer->Release();
+            conversion_constants_buffer = nullptr;
+        }
+        if (color_conversion_shader) {
+            color_conversion_shader->Release();
+            color_conversion_shader = nullptr;
+        }
+    }
 };
 
 // Frame data structure for queue communication

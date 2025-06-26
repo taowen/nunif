@@ -52,38 +52,13 @@ private:
     cudaStream_t cuda_stream = nullptr;
     bool cuda_d3d11_initialized = false;
     
-    // 中间纹理用于 CUDA 互操作
-    ID3D11Texture2D* cuda_interop_texture = nullptr;
-    cudaGraphicsResource* cuda_resource = nullptr;
-    
-    // DirectX shader members
-    ID3D11ComputeShader* color_conversion_shader = nullptr;
-    ID3D11Buffer* conversion_constants_buffer = nullptr;
-    ID3D11ShaderResourceView* input_srv_y = nullptr;
-    ID3D11ShaderResourceView* input_srv_uv = nullptr;
-    ID3D11UnorderedAccessView* output_uav = nullptr;
-    ID3D11Texture2D* output_texture = nullptr;
-    
-    // Color space conversion constants
-    struct ConversionConstants {
-        float matrix[16];  // 4x4 color matrix
-        float luma_coeffs[4];
-        float chroma_coeffs[4];
-        float offset[4];
-        int input_format;
-        int color_space;
-        int bit_depth;
-        int is_hdr;
-    };
+    // Color conversion state
+    ColorConversionState color_conversion_state_;
     
     // Thread management
     FrameQueue frame_queue_;
     std::atomic<bool> decode_finished_{false};
     std::atomic<bool> process_finished_{false};
-    
-    // Color space info - shared for entire video
-    ColorSpaceInfo video_color_info_;
-    bool color_info_detected_ = false;
     
 public:
     VideoDecoder() = default;
@@ -93,13 +68,8 @@ public:
     }
     
     void cleanup() {
-        if (cuda_resource) {
-            cudaGraphicsUnregisterResource(cuda_resource);
-        }
-        
-        if (cuda_interop_texture) {
-            cuda_interop_texture->Release();
-        }
+        // Clean up color conversion state
+        color_conversion_state_.cleanup();
         
         if (cuda_stream) {
             cudaStreamDestroy(cuda_stream);
@@ -121,26 +91,6 @@ public:
         }
         if (hw_device_ctx) {
             av_buffer_unref(&hw_device_ctx);
-        }
-        
-        // Clean up shader resources
-        if (input_srv_y) {
-            input_srv_y->Release();
-        }
-        if (input_srv_uv) {
-            input_srv_uv->Release();
-        }
-        if (output_uav) {
-            output_uav->Release();
-        }
-        if (output_texture) {
-            output_texture->Release();
-        }
-        if (conversion_constants_buffer) {
-            conversion_constants_buffer->Release();
-        }
-        if (color_conversion_shader) {
-            color_conversion_shader->Release();
         }
     }
     
@@ -318,14 +268,14 @@ public:
         desc.CPUAccessFlags = 0;
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // For CUDA interop
         
-        HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &cuda_interop_texture);
+        HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &color_conversion_state_.cuda_interop_texture);
         if (FAILED(hr)) {
             std::cerr << "Failed to create CUDA interop texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
             return false;
         }
         
         cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-            &cuda_resource, cuda_interop_texture, cudaGraphicsRegisterFlagsNone);
+            &color_conversion_state_.cuda_resource, color_conversion_state_.cuda_interop_texture, cudaGraphicsRegisterFlagsNone);
         
         if (cuda_status != cudaSuccess) {
             std::cerr << "Failed to register interop texture with CUDA: " << cudaGetErrorString(cuda_status) << "\n";
@@ -433,7 +383,7 @@ public:
             shader_blob->GetBufferPointer(),
             shader_blob->GetBufferSize(),
             nullptr,
-            &color_conversion_shader
+            &color_conversion_state_.color_conversion_shader
         );
         
         shader_blob->Release();
@@ -450,7 +400,7 @@ public:
         buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         
-        hr = d3d11_device->CreateBuffer(&buffer_desc, nullptr, &conversion_constants_buffer);
+        hr = d3d11_device->CreateBuffer(&buffer_desc, nullptr, &color_conversion_state_.conversion_constants_buffer);
         if (FAILED(hr)) {
             std::cerr << "Failed to create constants buffer: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
             return false;
@@ -623,7 +573,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         desc.CPUAccessFlags = 0;
         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
         
-        HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &output_texture);
+        HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &color_conversion_state_.output_texture);
         if (FAILED(hr)) {
             std::cerr << "Failed to create output texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
             return false;
@@ -635,7 +585,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
         uav_desc.Texture2D.MipSlice = 0;
         
-        hr = d3d11_device->CreateUnorderedAccessView(output_texture, &uav_desc, &output_uav);
+        hr = d3d11_device->CreateUnorderedAccessView(color_conversion_state_.output_texture, &uav_desc, &color_conversion_state_.output_uav);
         if (FAILED(hr)) {
             std::cerr << "Failed to create output UAV: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
             return false;
@@ -646,7 +596,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     
     bool create_input_srv_once(ID3D11Texture2D* input_texture) {
         // Only create SRV if not already created
-        if (input_srv_y) {
+        if (color_conversion_state_.input_srv_y) {
             return true; // Already created
         }
 
@@ -661,7 +611,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         if (desc.Format == DXGI_FORMAT_NV12) {
             // Create Y plane view
             srv_desc.Format = DXGI_FORMAT_R8_UNORM;
-            HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &input_srv_y);
+            HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_conversion_state_.input_srv_y);
             if (FAILED(hr)) {
                 std::cerr << "Failed to create input SRV for Y plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
                 return false;
@@ -669,14 +619,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
             // Create UV plane view
             srv_desc.Format = DXGI_FORMAT_R8G8_UNORM;
-            hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &input_srv_uv);
+            hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_conversion_state_.input_srv_uv);
             if (FAILED(hr)) {
                 std::cerr << "Failed to create input SRV for UV plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
                 return false;
             }
         } else {
             srv_desc.Format = desc.Format;
-            HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &input_srv_y);
+            HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_conversion_state_.input_srv_y);
             if (FAILED(hr)) {
                 std::cerr << "Failed to create input SRV: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
                 return false;
@@ -701,20 +651,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         D3D11_TEXTURE2D_DESC texture_desc;
         d3d11_texture->GetDesc(&texture_desc);
         
-        if (!cuda_interop_texture) {
+        if (!color_conversion_state_.cuda_interop_texture) {
             if (!create_cuda_interop_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format)) {
                 return false;
             }
         }
         
         // Create shader and output resources if not already created
-        if (!color_conversion_shader) {
+        if (!color_conversion_state_.color_conversion_shader) {
             if (!create_color_conversion_shader(color_info)) {
                 return false;
             }
         }
         
-        if (!output_texture) {
+        if (!color_conversion_state_.output_texture) {
             if (!create_output_texture(texture_desc.Width, texture_desc.Height)) {
                 return false;
             }
@@ -725,7 +675,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         UINT dst_subresource = D3D11CalcSubresource(0, 0, 1);
         
         d3d11_context->CopySubresourceRegion(
-            cuda_interop_texture, dst_subresource, 0, 0, 0,
+            color_conversion_state_.cuda_interop_texture, dst_subresource, 0, 0, 0,
             d3d11_texture, src_subresource, nullptr);
         
         std::cout << "✓ Texture copied to intermediate buffer\n";
@@ -733,7 +683,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // === DirectX Shader Color Conversion ===
         
         // Create input SRV for shader (only once)
-        if (!create_input_srv_once(cuda_interop_texture)) {
+        if (!create_input_srv_once(color_conversion_state_.cuda_interop_texture)) {
             return false;
         }
         
@@ -741,22 +691,22 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         ConversionConstants constants = generate_conversion_constants(color_info);
         
         D3D11_MAPPED_SUBRESOURCE mapped_resource;
-        HRESULT hr = d3d11_context->Map(conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
+        HRESULT hr = d3d11_context->Map(color_conversion_state_.conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
         if (SUCCEEDED(hr)) {
             memcpy(mapped_resource.pData, &constants, sizeof(constants));
-            d3d11_context->Unmap(conversion_constants_buffer, 0);
+            d3d11_context->Unmap(color_conversion_state_.conversion_constants_buffer, 0);
         }
         
         // Set shader resources
-        d3d11_context->CSSetShader(color_conversion_shader, nullptr, 0);
-        if (input_srv_uv) {
-            ID3D11ShaderResourceView* srvs[] = { input_srv_y, input_srv_uv };
+        d3d11_context->CSSetShader(color_conversion_state_.color_conversion_shader, nullptr, 0);
+        if (color_conversion_state_.input_srv_uv) {
+            ID3D11ShaderResourceView* srvs[] = { color_conversion_state_.input_srv_y, color_conversion_state_.input_srv_uv };
             d3d11_context->CSSetShaderResources(0, 2, srvs);
         } else {
-            d3d11_context->CSSetShaderResources(0, 1, &input_srv_y);
+            d3d11_context->CSSetShaderResources(0, 1, &color_conversion_state_.input_srv_y);
         }
-        d3d11_context->CSSetUnorderedAccessViews(0, 1, &output_uav, nullptr);
-        d3d11_context->CSSetConstantBuffers(0, 1, &conversion_constants_buffer);
+        d3d11_context->CSSetUnorderedAccessViews(0, 1, &color_conversion_state_.output_uav, nullptr);
+        d3d11_context->CSSetConstantBuffers(0, 1, &color_conversion_state_.conversion_constants_buffer);
         
         // Dispatch shader
         UINT dispatch_x = (texture_desc.Width + 7) / 8;
@@ -779,7 +729,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // Now register the output texture with CUDA for further processing
         cudaGraphicsResource* output_cuda_resource = nullptr;
         cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-            &output_cuda_resource, output_texture, cudaGraphicsRegisterFlagsNone);
+            &output_cuda_resource, color_conversion_state_.output_texture, cudaGraphicsRegisterFlagsNone);
         
         if (cuda_status == cudaSuccess) {
             checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
@@ -850,9 +800,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                     
                     if (frame->format == AV_PIX_FMT_D3D11) {
                         // Detect color space info only for the first frame
-                        if (!color_info_detected_) {
-                            video_color_info_ = detect_color_info(frame);
-                            color_info_detected_ = true;
+                        if (!color_conversion_state_.color_info_detected) {
+                            color_conversion_state_.video_color_info = detect_color_info(frame);
+                            color_conversion_state_.color_info_detected = true;
                         }
                         
                         // Create a copy of the frame for the queue
@@ -914,8 +864,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 std::cout << ">>> Processing frame " << processed_count << "\n";
                 
                 // Process the D3D11 frame using shared color info
-                if (cuda_d3d11_initialized && color_info_detected_) {
-                    process_d3d11_frame_with_cuda_threaded(decoded_frame.frame, video_color_info_);
+                if (cuda_d3d11_initialized && color_conversion_state_.color_info_detected) {
+                    process_d3d11_frame_with_cuda_threaded(decoded_frame.frame, color_conversion_state_.video_color_info);
                 }
                 
                 // Clean up the frame
@@ -943,20 +893,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         D3D11_TEXTURE2D_DESC texture_desc;
         d3d11_texture->GetDesc(&texture_desc);
         
-        if (!cuda_interop_texture) {
+        if (!color_conversion_state_.cuda_interop_texture) {
             if (!create_cuda_interop_texture(texture_desc.Width, texture_desc.Height, texture_desc.Format)) {
                 return false;
             }
         }
         
         // Create shader and output resources if not already created
-        if (!color_conversion_shader) {
+        if (!color_conversion_state_.color_conversion_shader) {
             if (!create_color_conversion_shader(color_info)) {
                 return false;
             }
         }
         
-        if (!output_texture) {
+        if (!color_conversion_state_.output_texture) {
             if (!create_output_texture(texture_desc.Width, texture_desc.Height)) {
                 return false;
             }
@@ -967,7 +917,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         UINT dst_subresource = D3D11CalcSubresource(0, 0, 1);
         
         d3d11_context->CopySubresourceRegion(
-            cuda_interop_texture, dst_subresource, 0, 0, 0,
+            color_conversion_state_.cuda_interop_texture, dst_subresource, 0, 0, 0,
             d3d11_texture, src_subresource, nullptr);
         
         std::cout << "  ✓ Texture copied to intermediate buffer\n";
@@ -975,7 +925,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // === DirectX Shader Color Conversion ===
         
         // Create input SRV for shader (only once)
-        if (!create_input_srv_once(cuda_interop_texture)) {
+        if (!create_input_srv_once(color_conversion_state_.cuda_interop_texture)) {
             return false;
         }
         
@@ -983,22 +933,22 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         ConversionConstants constants = generate_conversion_constants(color_info);
         
         D3D11_MAPPED_SUBRESOURCE mapped_resource;
-        HRESULT hr = d3d11_context->Map(conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
+        HRESULT hr = d3d11_context->Map(color_conversion_state_.conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
         if (SUCCEEDED(hr)) {
             memcpy(mapped_resource.pData, &constants, sizeof(constants));
-            d3d11_context->Unmap(conversion_constants_buffer, 0);
+            d3d11_context->Unmap(color_conversion_state_.conversion_constants_buffer, 0);
         }
         
         // Set shader resources
-        d3d11_context->CSSetShader(color_conversion_shader, nullptr, 0);
-        if (input_srv_uv) {
-            ID3D11ShaderResourceView* srvs[] = { input_srv_y, input_srv_uv };
+        d3d11_context->CSSetShader(color_conversion_state_.color_conversion_shader, nullptr, 0);
+        if (color_conversion_state_.input_srv_uv) {
+            ID3D11ShaderResourceView* srvs[] = { color_conversion_state_.input_srv_y, color_conversion_state_.input_srv_uv };
             d3d11_context->CSSetShaderResources(0, 2, srvs);
         } else {
-            d3d11_context->CSSetShaderResources(0, 1, &input_srv_y);
+            d3d11_context->CSSetShaderResources(0, 1, &color_conversion_state_.input_srv_y);
         }
-        d3d11_context->CSSetUnorderedAccessViews(0, 1, &output_uav, nullptr);
-        d3d11_context->CSSetConstantBuffers(0, 1, &conversion_constants_buffer);
+        d3d11_context->CSSetUnorderedAccessViews(0, 1, &color_conversion_state_.output_uav, nullptr);
+        d3d11_context->CSSetConstantBuffers(0, 1, &color_conversion_state_.conversion_constants_buffer);
         
         // Dispatch shader
         UINT dispatch_x = (texture_desc.Width + 7) / 8;
@@ -1020,7 +970,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // Now register the output texture with CUDA for further processing
         cudaGraphicsResource* output_cuda_resource = nullptr;
         cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-            &output_cuda_resource, output_texture, cudaGraphicsRegisterFlagsNone);
+            &output_cuda_resource, color_conversion_state_.output_texture, cudaGraphicsRegisterFlagsNone);
         
         if (cuda_status == cudaSuccess) {
             checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
