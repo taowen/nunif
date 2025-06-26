@@ -142,40 +142,41 @@ struct DecodedFrame {
 
 // Converted frame data structure for AI processing
 struct ColorConvertedFrame {
-    ID3D11Texture2D* converted_texture;
+    float* cuda_data;  // CUDA memory pointer for RGB data
     UINT width;
     UINT height;
+    size_t pitch;      // Row pitch in bytes
     bool is_end_signal;
     
-    ColorConvertedFrame() : converted_texture(nullptr), width(0), height(0), is_end_signal(false) {}
-    ColorConvertedFrame(ID3D11Texture2D* texture, UINT w, UINT h) 
-        : converted_texture(texture), width(w), height(h), is_end_signal(false) {
-        if (texture) texture->AddRef(); // Add reference
-    }
+    ColorConvertedFrame() : cuda_data(nullptr), width(0), height(0), pitch(0), is_end_signal(false) {}
+    ColorConvertedFrame(float* data, UINT w, UINT h, size_t p) 
+        : cuda_data(data), width(w), height(h), pitch(p), is_end_signal(false) {}
     
     ~ColorConvertedFrame() {
-        if (converted_texture && !is_end_signal) {
-            converted_texture->Release();
+        if (cuda_data && !is_end_signal) {
+            cudaFree(cuda_data);
         }
     }
     
     // Move constructor
     ColorConvertedFrame(ColorConvertedFrame&& other) noexcept 
-        : converted_texture(other.converted_texture), width(other.width), height(other.height), is_end_signal(other.is_end_signal) {
-        other.converted_texture = nullptr;
+        : cuda_data(other.cuda_data), width(other.width), height(other.height), 
+          pitch(other.pitch), is_end_signal(other.is_end_signal) {
+        other.cuda_data = nullptr;
     }
     
     // Move assignment
     ColorConvertedFrame& operator=(ColorConvertedFrame&& other) noexcept {
         if (this != &other) {
-            if (converted_texture && !is_end_signal) {
-                converted_texture->Release();
+            if (cuda_data && !is_end_signal) {
+                cudaFree(cuda_data);
             }
-            converted_texture = other.converted_texture;
+            cuda_data = other.cuda_data;
             width = other.width;
             height = other.height;
+            pitch = other.pitch;
             is_end_signal = other.is_end_signal;
-            other.converted_texture = nullptr;
+            other.cuda_data = nullptr;
         }
         return *this;
     }
@@ -231,5 +232,5 @@ public:
 };
 
 // Type aliases for specific queue types
-using FrameQueue = ThreadSafeQueue<DecodedFrame>;
+using DecodedFrameQueue = ThreadSafeQueue<DecodedFrame>;
 using ColorConvertedFrameQueue = ThreadSafeQueue<ColorConvertedFrame>; 

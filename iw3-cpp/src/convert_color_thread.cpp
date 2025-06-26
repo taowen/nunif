@@ -411,11 +411,44 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
     
     std::cout << "  ✓ Color conversion shader executed successfully\n";
     
+    // === Convert D3D11 texture to CUDA memory ===
+    
+    // Map D3D11 texture to CUDA
+    checkCudaErrors(cudaGraphicsMapResources(1, &color_state.cuda_resource, cuda_stream));
+    
+    cudaArray_t cuda_array;
+    checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&cuda_array, color_state.cuda_resource, 0, 0));
+    
+    // Allocate CUDA memory for the final output
+    size_t data_size = texture_desc.Width * texture_desc.Height * 4 * sizeof(float); // RGBA float
+    size_t pitch = texture_desc.Width * 4 * sizeof(float);
+    float* cuda_output_data = nullptr;
+    
+    checkCudaErrors(cudaMalloc((void**)&cuda_output_data, data_size));
+    
+    // Copy from CUDA array to linear memory
+    cudaMemcpy2DFromArray(
+        cuda_output_data, pitch,
+        cuda_array, 0, 0,
+        pitch, texture_desc.Height,
+        cudaMemcpyDeviceToDevice
+    );
+    
+    // Unmap the resource
+    checkCudaErrors(cudaGraphicsUnmapResources(1, &color_state.cuda_resource, cuda_stream));
+    
+    // Synchronize to ensure data is ready
+    checkCudaErrors(cudaStreamSynchronize(cuda_stream));
+    
+    std::cout << "  ✓ D3D11 texture converted to CUDA memory\n";
+    std::cout << "    → CUDA data size: " << data_size << " bytes\n";
+    std::cout << "    → Dimensions: " << texture_desc.Width << "x" << texture_desc.Height << "\n";
+    
     // === Add converted frame to output queue ===
-    ColorConvertedFrame converted_frame(color_state.output_texture, texture_desc.Width, texture_desc.Height);
+    ColorConvertedFrame converted_frame(cuda_output_data, texture_desc.Width, texture_desc.Height, pitch);
     output_queue.push(std::move(converted_frame));
     
-    std::cout << "  ✓ Converted frame added to output queue\n";
+    std::cout << "  ✓ Converted frame with CUDA data added to output queue\n";
     
     return true;
 }
@@ -423,7 +456,7 @@ bool process_d3d11_frame_with_cuda(AVFrame* d3d11_frame, const ColorSpaceInfo& c
 } // anonymous namespace
 
 void start_convert_color_thread(
-    FrameQueue& input_frame_queue,
+    DecodedFrameQueue& input_frame_queue,
     ColorConvertedFrameQueue& output_frame_queue,
     ColorConversionState& color_state, 
     const ColorSpaceInfo& color_info,
