@@ -4,11 +4,13 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <cuda_runtime_api.h>
 
 extern "C" {
 #include <libavutil/pixfmt.h>
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 }
 
 struct ColorSpaceInfo {
@@ -33,7 +35,45 @@ struct ConversionConstants {
     int is_hdr;
 };
 
-// Color conversion state structure
+// Decoder state structure - contains all decode-related state
+struct DecoderState {
+    // FFmpeg decoder resources
+    AVFormatContext* format_ctx = nullptr;
+    AVCodecContext* codec_ctx = nullptr;
+    AVBufferRef* hw_device_ctx = nullptr;
+    int video_stream_index = -1;
+    
+    // Thread synchronization
+    std::atomic<bool> decode_finished_{false};
+    std::atomic<bool> process_finished_{false};
+    
+    // Color space detection state
+    ColorSpaceInfo video_color_info;
+    bool color_info_detected = false;
+    
+    // Cleanup method
+    void cleanup() {
+        if (codec_ctx) {
+            avcodec_free_context(&codec_ctx);
+            codec_ctx = nullptr;
+        }
+        if (format_ctx) {
+            avformat_close_input(&format_ctx);
+            format_ctx = nullptr;
+        }
+        if (hw_device_ctx) {
+            av_buffer_unref(&hw_device_ctx);
+            hw_device_ctx = nullptr;
+        }
+        
+        decode_finished_ = false;
+        process_finished_ = false;
+        color_info_detected = false;
+        video_stream_index = -1;
+    }
+};
+
+// Color conversion state structure - dedicated to color conversion only
 struct ColorConversionState {
     // DirectX shader resources
     ID3D11ComputeShader* color_conversion_shader = nullptr;
@@ -43,13 +83,9 @@ struct ColorConversionState {
     ID3D11UnorderedAccessView* output_uav = nullptr;
     ID3D11Texture2D* output_texture = nullptr;
     
-    // CUDA interop resources
+    // CUDA interop resources for color conversion
     ID3D11Texture2D* cuda_interop_texture = nullptr;
     cudaGraphicsResource* cuda_resource = nullptr;
-    
-    // Color space information
-    ColorSpaceInfo video_color_info;
-    bool color_info_detected = false;
     
     // Cleanup method
     void cleanup() {

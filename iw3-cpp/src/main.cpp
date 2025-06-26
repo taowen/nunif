@@ -41,10 +41,8 @@ std::string av_err_to_string(int errnum) {
 
 class VideoDecoder {
 private:
-    AVFormatContext* format_ctx = nullptr;
-    AVCodecContext* codec_ctx = nullptr;
-    AVBufferRef* hw_device_ctx = nullptr;
-    int video_stream_index = -1;
+    // Decoder state
+    DecoderState decoder_state_;
     
     // CUDA D3D11 interop members
     ID3D11Device* d3d11_device = nullptr;
@@ -57,8 +55,6 @@ private:
     
     // Thread management
     FrameQueue frame_queue_;
-    std::atomic<bool> decode_finished_{false};
-    std::atomic<bool> process_finished_{false};
     
 public:
     VideoDecoder() = default;
@@ -68,6 +64,9 @@ public:
     }
     
     void cleanup() {
+        // Clean up decoder state
+        decoder_state_.cleanup();
+        
         // Clean up color conversion state
         color_conversion_state_.cleanup();
         
@@ -82,20 +81,10 @@ public:
         if (d3d11_device) {
             d3d11_device->Release();
         }
-        
-        if (codec_ctx) {
-            avcodec_free_context(&codec_ctx);
-        }
-        if (format_ctx) {
-            avformat_close_input(&format_ctx);
-        }
-        if (hw_device_ctx) {
-            av_buffer_unref(&hw_device_ctx);
-        }
     }
     
     bool initialize_d3d11va() {
-        int ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+        int ret = av_hwdevice_ctx_create(&decoder_state_.hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
         if (ret < 0) {
             std::cerr << "Failed to create D3D11VA device context: " << av_err_to_string(ret) << "\n";
             return false;
@@ -105,12 +94,12 @@ public:
     }
     
     bool setup_cuda_d3d11_interop() {
-        if (!hw_device_ctx) {
+        if (!decoder_state_.hw_device_ctx) {
             std::cerr << "D3D11VA device context not initialized\n";
             return false;
         }
         
-        AVD3D11VADeviceContext* d3d11va_ctx = (AVD3D11VADeviceContext*)((AVHWDeviceContext*)hw_device_ctx->data)->hwctx;
+        AVD3D11VADeviceContext* d3d11va_ctx = (AVD3D11VADeviceContext*)((AVHWDeviceContext*)decoder_state_.hw_device_ctx->data)->hwctx;
         d3d11_device = d3d11va_ctx->device;
         d3d11_context = d3d11va_ctx->device_context;
         
@@ -161,20 +150,20 @@ public:
     }
     
     bool open_video_file(const std::string& filename) {
-        int ret = avformat_open_input(&format_ctx, filename.c_str(), nullptr, nullptr);
+        int ret = avformat_open_input(&decoder_state_.format_ctx, filename.c_str(), nullptr, nullptr);
         if (ret < 0) {
             std::cerr << "Failed to open video file: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
-        ret = avformat_find_stream_info(format_ctx, nullptr);
+        ret = avformat_find_stream_info(decoder_state_.format_ctx, nullptr);
         if (ret < 0) {
             std::cerr << "Failed to find stream info: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
-        video_stream_index = av_find_best_stream(format_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (video_stream_index < 0) {
+        decoder_state_.video_stream_index = av_find_best_stream(decoder_state_.format_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (decoder_state_.video_stream_index < 0) {
             std::cerr << "No video stream found\n";
             return false;
         }
@@ -183,11 +172,11 @@ public:
     }
     
     bool setup_decoder() {
-        AVStream* video_stream = format_ctx->streams[video_stream_index];
+        AVStream* video_stream = decoder_state_.format_ctx->streams[decoder_state_.video_stream_index];
         
         const AVCodec* decoder = nullptr;
         
-        if (!hw_device_ctx) {
+        if (!decoder_state_.hw_device_ctx) {
             std::cerr << "D3D11VA device context not initialized\n";
             return false;
         }
@@ -220,21 +209,21 @@ public:
             return false;
         }
         
-        codec_ctx = avcodec_alloc_context3(decoder);
-        if (!codec_ctx) {
+        decoder_state_.codec_ctx = avcodec_alloc_context3(decoder);
+        if (!decoder_state_.codec_ctx) {
             std::cerr << "Failed to allocate codec context\n";
             return false;
         }
         
-        int ret = avcodec_parameters_to_context(codec_ctx, video_stream->codecpar);
+        int ret = avcodec_parameters_to_context(decoder_state_.codec_ctx, video_stream->codecpar);
         if (ret < 0) {
             std::cerr << "Failed to copy codec parameters: " << av_err_to_string(ret) << "\n";
             return false;
         }
         
-        codec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+        decoder_state_.codec_ctx->hw_device_ctx = av_buffer_ref(decoder_state_.hw_device_ctx);
         
-        codec_ctx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
+        decoder_state_.codec_ctx->get_format = [](AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) -> enum AVPixelFormat {
             const enum AVPixelFormat* p;
             for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
                 if (*p == AV_PIX_FMT_D3D11) {
@@ -245,7 +234,7 @@ public:
             return AV_PIX_FMT_NONE;
         };
         
-        ret = avcodec_open2(codec_ctx, decoder, nullptr);
+        ret = avcodec_open2(decoder_state_.codec_ctx, decoder, nullptr);
         if (ret < 0) {
             std::cerr << "Failed to open codec: " << av_err_to_string(ret) << "\n";
             return false;
@@ -309,14 +298,14 @@ public:
         }
         
         // Get color space information from codec context and frame
-        info.color_space = codec_ctx->colorspace != AVCOL_SPC_UNSPECIFIED ? 
-                          codec_ctx->colorspace : frame->colorspace;
-        info.color_primaries = codec_ctx->color_primaries != AVCOL_PRI_UNSPECIFIED ? 
-                              codec_ctx->color_primaries : frame->color_primaries;
-        info.color_trc = codec_ctx->color_trc != AVCOL_TRC_UNSPECIFIED ? 
-                        codec_ctx->color_trc : frame->color_trc;
-        info.color_range = codec_ctx->color_range != AVCOL_RANGE_UNSPECIFIED ? 
-                          codec_ctx->color_range : frame->color_range;
+        info.color_space = decoder_state_.codec_ctx->colorspace != AVCOL_SPC_UNSPECIFIED ? 
+                          decoder_state_.codec_ctx->colorspace : frame->colorspace;
+        info.color_primaries = decoder_state_.codec_ctx->color_primaries != AVCOL_PRI_UNSPECIFIED ? 
+                              decoder_state_.codec_ctx->color_primaries : frame->color_primaries;
+        info.color_trc = decoder_state_.codec_ctx->color_trc != AVCOL_TRC_UNSPECIFIED ? 
+                        decoder_state_.codec_ctx->color_trc : frame->color_trc;
+        info.color_range = decoder_state_.codec_ctx->color_range != AVCOL_RANGE_UNSPECIFIED ? 
+                          decoder_state_.codec_ctx->color_range : frame->color_range;
         
         // Detect HDR content
         info.is_hdr = (info.color_trc == AVCOL_TRC_SMPTE2084 ||  // PQ
@@ -779,16 +768,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         std::cout << "=== Decode Thread Started ===\n";
         
         // Read and decode frames
-        while (av_read_frame(format_ctx, packet) >= 0) {
-            if (packet->stream_index == video_stream_index) {
-                int ret = avcodec_send_packet(codec_ctx, packet);
+        while (av_read_frame(decoder_state_.format_ctx, packet) >= 0) {
+            if (packet->stream_index == decoder_state_.video_stream_index) {
+                int ret = avcodec_send_packet(decoder_state_.codec_ctx, packet);
                 if (ret < 0) {
                     std::cerr << "Error sending packet: " << av_err_to_string(ret) << "\n";
                     break;
                 }
                 
                 while (ret >= 0) {
-                    ret = avcodec_receive_frame(codec_ctx, frame);
+                    ret = avcodec_receive_frame(decoder_state_.codec_ctx, frame);
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                         break;
                     } else if (ret < 0) {
@@ -800,9 +789,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                     
                     if (frame->format == AV_PIX_FMT_D3D11) {
                         // Detect color space info only for the first frame
-                        if (!color_conversion_state_.color_info_detected) {
-                            color_conversion_state_.video_color_info = detect_color_info(frame);
-                            color_conversion_state_.color_info_detected = true;
+                        if (!decoder_state_.color_info_detected) {
+                            decoder_state_.video_color_info = detect_color_info(frame);
+                            decoder_state_.color_info_detected = true;
                         }
                         
                         // Create a copy of the frame for the queue
@@ -838,7 +827,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         
         // Signal end of decoding
         frame_queue_.push(DecodedFrame::end_signal());
-        decode_finished_ = true;
+        decoder_state_.decode_finished_ = true;
         
         std::cout << "=== Decode Thread Finished ===\n";
         std::cout << "Total frames decoded: " << frame_count << "\n";
@@ -864,8 +853,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 std::cout << ">>> Processing frame " << processed_count << "\n";
                 
                 // Process the D3D11 frame using shared color info
-                if (cuda_d3d11_initialized && color_conversion_state_.color_info_detected) {
-                    process_d3d11_frame_with_cuda_threaded(decoded_frame.frame, color_conversion_state_.video_color_info);
+                if (cuda_d3d11_initialized && decoder_state_.color_info_detected) {
+                    process_d3d11_frame_with_cuda_threaded(decoded_frame.frame, decoder_state_.video_color_info);
                 }
                 
                 // Clean up the frame
@@ -875,7 +864,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             }
         }
         
-        process_finished_ = true;
+        decoder_state_.process_finished_ = true;
         std::cout << "=== Process Thread Finished ===\n";
         std::cout << "Total frames processed: " << processed_count << "\n";
     }
