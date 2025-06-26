@@ -16,6 +16,8 @@ tmp
 *.onnx
 *.trt
 *.mkv
+/debug_textures
+/directxtex_desktop_win10.2025.3.25.2
 /data
 /.vscode
 !/data/.keep

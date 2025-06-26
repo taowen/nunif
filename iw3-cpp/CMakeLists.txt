@@ -22,6 +22,14 @@ target_compile_options(iw3_cpp PRIVATE
 # Set Visual Studio startup project
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT iw3_cpp)
 
+# Add DirectXTex library
+set(DIRECTXTEX_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../directxtex_desktop_win10.2025.3.25.2)
+target_include_directories(iw3_cpp PRIVATE ${DIRECTXTEX_ROOT}/include)
+
+target_link_libraries(iw3_cpp PRIVATE
+    ${DIRECTXTEX_ROOT}/native/lib/x64/Debug/DirectXTex.lib
+)
+
 # Link DirectX libraries (Windows only)
 target_link_libraries(iw3_cpp PRIVATE
     d3d11.lib
@@ -43,3 +51,4 @@ copy_cuda_dlls(iw3_cpp)
 include(FindTensorRT)
 target_link_tensorrt(iw3_cpp)
 copy_tensorrt_dlls(iw3_cpp)
+

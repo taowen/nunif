@@ -84,7 +84,7 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
     
     int frame_count = 0;
     int total_decoded_frames = 0;
-    const int frames_to_skip = 1000;
+    const int frames_to_skip = 600;
     
     std::cout << "=== Decode Thread Started ===\n";
     
