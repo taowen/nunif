@@ -6,6 +6,46 @@
 
 namespace {
 
+// Validation function for supported input format
+bool validate_input_format(const ColorSpaceInfo& color_info) {
+    // Output actual format information for debugging
+    std::cout << "Input format info:\n";
+    std::cout << "  DXGI Format: " << color_info.dxgi_format << " (expected: " << DXGI_FORMAT_NV12 << " for NV12)\n";
+    std::cout << "  Color Space: " << color_info.color_space << " (expected: " << AVCOL_SPC_BT709 << " for BT709)\n";
+    std::cout << "  Bit Depth: " << color_info.bit_depth << "\n";
+    std::cout << "  Is HDR: " << (color_info.is_hdr ? "true" : "false") << "\n";
+    
+    // Only support yuv420p (NV12 in D3D11) with BT709 colorspace
+    if (color_info.dxgi_format != DXGI_FORMAT_NV12) {
+        std::ostringstream oss;
+        oss << "Unsupported pixel format. Received DXGI format: " << color_info.dxgi_format 
+            << ", expected: " << DXGI_FORMAT_NV12 << " (NV12/yuv420p)";
+        throw std::runtime_error(oss.str());
+    }
+    
+    if (color_info.color_space != AVCOL_SPC_BT709) {
+        std::ostringstream oss;
+        oss << "Unsupported colorspace. Received: " << color_info.color_space 
+            << ", expected: " << AVCOL_SPC_BT709 << " (BT709)";
+        throw std::runtime_error(oss.str());
+    }
+    
+    if (color_info.is_hdr) {
+        throw std::runtime_error("HDR content is not supported. Only SDR content is supported.");
+    }
+    
+    // Expect MPEG/TV range (limited range)
+    if (color_info.bit_depth != 8) {
+        std::ostringstream oss;
+        oss << "Unsupported bit depth. Received: " << color_info.bit_depth 
+            << ", expected: 8-bit";
+        throw std::runtime_error(oss.str());
+    }
+    
+    std::cout << "✓ Input format validation passed: yuv420p + BT709 + 8-bit + SDR\n";
+    return true;
+}
+
 bool create_intermediate_texture(UINT width, UINT height, DXGI_FORMAT format,
                                  ColorConversionState& color_state, ID3D11Device* d3d11_device) {
     D3D11_TEXTURE2D_DESC desc = {};
@@ -30,10 +70,9 @@ bool create_intermediate_texture(UINT width, UINT height, DXGI_FORMAT format,
     return true;
 }
 
-std::string generate_shader_source(const ColorSpaceInfo& color_info) {
-    std::ostringstream shader;
-    
-    shader << R"(
+std::string generate_shader_source_bt709_yuv420p() {
+    // Simplified shader source for yuv420p + BT709 only
+    return R"(
 cbuffer ConversionConstants : register(b0)
 {
     float4x4 ColorMatrix;
@@ -59,72 +98,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (id.x >= width || id.y >= height)
         return;
     
+    // NV12 format handling (yuv420p)
     float3 yuv;
-    
-)";
-
-    // Handle different input formats
-    switch (color_info.dxgi_format) {
-        case DXGI_FORMAT_NV12:
-            shader << R"(
-    // NV12 format handling
     yuv.x = LumaTexture.Load(int3(id.xy, 0)); // Y
     float2 uv = ChromaTexture.Load(int3(id.xy / 2, 0)); // UV
     yuv.y = uv.x; // U
     yuv.z = uv.y; // V
-)";
-            break;
-        case DXGI_FORMAT_P010:
-        case DXGI_FORMAT_P016:
-            shader << R"(
-    // P010/P016 format handling (10/16-bit)
-    yuv.x = yuv_sample.r;
-    yuv.y = yuv_sample.g;
-    yuv.z = yuv_sample.b;
     
-    // Scale from 10/16-bit to full range
-    float scale_factor = )";
-            shader << (color_info.bit_depth == 10 ? "1023.0" : "65535.0");
-            shader << R"( / 255.0;
-    yuv *= scale_factor;
-)";
-            break;
-        default:
-            shader << R"(
-    // Default YUV handling
-    yuv.x = yuv_sample.r;  // Y
-    yuv.y = yuv_sample.g;  // U
-    yuv.z = yuv_sample.b;  // V
-)";
-            break;
-    }
+    // Apply MPEG/TV range expansion (limited range to full range)
+    // Y: [16/255, 235/255] -> [0, 1]
+    // UV: [16/255, 240/255] -> [-0.5, 0.5]
+    yuv.x = (yuv.x - 16.0/255.0) * 255.0/219.0;
+    yuv.yz = (yuv.yz - 128.0/255.0) * 255.0/224.0;
     
-    // Color space conversion
-    shader << R"(
-    
-    // Apply color range expansion
-    if (ColorSpace != 0) { // Not full range
-        yuv.x = (yuv.x - 16.0/255.0) * 255.0/219.0;
-        yuv.yz = (yuv.yz - 128.0/255.0) * 255.0/224.0;
-    }
-    
-    // YUV to RGB conversion using color matrix
-    float3 rgb = mul(ColorMatrix, float4(yuv, 1.0)).rgb;
-    
-)";
-
-    // HDR tone mapping if needed
-    if (color_info.is_hdr) {
-        shader << R"(
-    // HDR tone mapping
-    if (IsHDR != 0) {
-        // Simple tone mapping - you may want to implement more sophisticated methods
-        rgb = rgb / (rgb + 1.0); // Reinhard tone mapping
-    }
-)";
-    }
-    
-    shader << R"(
+    // BT.709 YUV to RGB conversion matrix
+    float3 rgb;
+    rgb.r = yuv.x + 1.5748 * yuv.z;
+    rgb.g = yuv.x - 0.1873 * yuv.y - 0.4681 * yuv.z;
+    rgb.b = yuv.x + 1.8556 * yuv.y;
     
     // Clamp to [0, 1] range for model input
     rgb = saturate(rgb);
@@ -133,56 +124,33 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     OutputTexture[id.xy] = float4(rgb, 1.0);
 }
 )";
-    
-    return shader.str();
 }
 
-ConversionConstants generate_conversion_constants(const ColorSpaceInfo& color_info) {
+ConversionConstants generate_conversion_constants_bt709() {
     ConversionConstants constants = {};
     
-    // Set basic info
-    constants.input_format = static_cast<int>(color_info.dxgi_format);
-    constants.color_space = static_cast<int>(color_info.color_space);
-    constants.bit_depth = color_info.bit_depth;
-    constants.is_hdr = color_info.is_hdr ? 1 : 0;
+    // Set basic info for yuv420p + BT709
+    constants.input_format = static_cast<int>(DXGI_FORMAT_NV12);
+    constants.color_space = static_cast<int>(AVCOL_SPC_BT709);
+    constants.bit_depth = 8;
+    constants.is_hdr = 0;
     
-    // Generate color conversion matrix based on color space
-    float matrix[16] = {0};
-    
-    switch (color_info.color_space) {
-        case AVCOL_SPC_BT709:
-            // BT.709 YUV to RGB matrix
-            matrix[0] = 1.0f;    matrix[1] = 0.0f;      matrix[2] = 1.5748f;   matrix[3] = 0.0f;
-            matrix[4] = 1.0f;    matrix[5] = -0.1873f;  matrix[6] = -0.4681f;  matrix[7] = 0.0f;
-            matrix[8] = 1.0f;    matrix[9] = 1.8556f;   matrix[10] = 0.0f;     matrix[11] = 0.0f;
-            matrix[12] = 0.0f;   matrix[13] = 0.0f;     matrix[14] = 0.0f;     matrix[15] = 1.0f;
-            break;
-        case AVCOL_SPC_BT2020_NCL:
-        case AVCOL_SPC_BT2020_CL:
-            // BT.2020 YUV to RGB matrix
-            matrix[0] = 1.0f;    matrix[1] = 0.0f;      matrix[2] = 1.7166f;   matrix[3] = 0.0f;
-            matrix[4] = 1.0f;    matrix[5] = -0.1916f;  matrix[6] = -0.6657f;  matrix[7] = 0.0f;
-            matrix[8] = 1.0f;    matrix[9] = 2.1415f;   matrix[10] = 0.0f;     matrix[11] = 0.0f;
-            matrix[12] = 0.0f;   matrix[13] = 0.0f;     matrix[14] = 0.0f;     matrix[15] = 1.0f;
-            break;
-        default:
-            // Default to BT.601
-            matrix[0] = 1.0f;    matrix[1] = 0.0f;      matrix[2] = 1.402f;    matrix[3] = 0.0f;
-            matrix[4] = 1.0f;    matrix[5] = -0.344f;   matrix[6] = -0.714f;   matrix[7] = 0.0f;
-            matrix[8] = 1.0f;    matrix[9] = 1.772f;    matrix[10] = 0.0f;     matrix[11] = 0.0f;
-            matrix[12] = 0.0f;   matrix[13] = 0.0f;     matrix[14] = 0.0f;     matrix[15] = 1.0f;
-            break;
-    }
+    // BT.709 YUV to RGB matrix (hardcoded for performance)
+    float matrix[16] = {
+        1.0f,    0.0f,      1.5748f,   0.0f,
+        1.0f,    -0.1873f,  -0.4681f,  0.0f,
+        1.0f,    1.8556f,   0.0f,      0.0f,
+        0.0f,    0.0f,      0.0f,      1.0f
+    };
     
     memcpy(constants.matrix, matrix, sizeof(matrix));
     
     return constants;
 }
 
-bool create_color_conversion_shader(const ColorSpaceInfo& color_info, 
-                                   ColorConversionState& color_state, ID3D11Device* d3d11_device) {
-    // Generate shader source based on color space info
-    std::string shader_source = generate_shader_source(color_info);
+bool create_color_conversion_shader(ColorConversionState& color_state, ID3D11Device* d3d11_device) {
+    // Use simplified shader source for yuv420p + BT709
+    std::string shader_source = generate_shader_source_bt709_yuv420p();
     
     ID3DBlob* shader_blob = nullptr;
     ID3DBlob* error_blob = nullptr;
@@ -236,7 +204,7 @@ bool create_color_conversion_shader(const ColorSpaceInfo& color_info,
         return false;
     }
     
-    std::cout << "✓ Color conversion shader created successfully\n";
+    std::cout << "✓ BT709 yuv420p color conversion shader created successfully\n";
     return true;
 }
 
@@ -286,34 +254,30 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
     D3D11_TEXTURE2D_DESC desc;
     input_texture->GetDesc(&desc);
     
+    // Validate that this is NV12 format (yuv420p)
+    if (desc.Format != DXGI_FORMAT_NV12) {
+        throw std::runtime_error("Expected NV12 format for yuv420p input");
+    }
+    
     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
     srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srv_desc.Texture2D.MostDetailedMip = 0;
     srv_desc.Texture2D.MipLevels = 1;
     
-    if (desc.Format == DXGI_FORMAT_NV12) {
-        // Create Y plane view
-        srv_desc.Format = DXGI_FORMAT_R8_UNORM;
-        HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_state.input_srv_y);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to create input SRV for Y plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
-            return false;
-        }
+    // Create Y plane view (luminance)
+    srv_desc.Format = DXGI_FORMAT_R8_UNORM;
+    HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_state.input_srv_y);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create input SRV for Y plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
+        return false;
+    }
 
-        // Create UV plane view
-        srv_desc.Format = DXGI_FORMAT_R8G8_UNORM;
-        hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_state.input_srv_uv);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to create input SRV for UV plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
-            return false;
-        }
-    } else {
-        srv_desc.Format = desc.Format;
-        HRESULT hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_state.input_srv_y);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to create input SRV: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
-            return false;
-        }
+    // Create UV plane view (chrominance)
+    srv_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+    hr = d3d11_device->CreateShaderResourceView(input_texture, &srv_desc, &color_state.input_srv_uv);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create input SRV for UV plane: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
+        return false;
     }
     
     return true;
@@ -322,6 +286,10 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
 bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
                                   ColorConversionState& color_state, ID3D11Device* d3d11_device,
                                   ID3D11DeviceContext* d3d11_context, ColorConvertedFrameQueue& output_queue) {
+    
+    // Validate input format first - throw error if not supported
+    validate_input_format(color_info);
+    
     ID3D11Texture2D* d3d11_texture = (ID3D11Texture2D*)d3d11_frame->data[0];
     int texture_index = (int)(intptr_t)d3d11_frame->data[1];
     
@@ -334,9 +302,9 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
         }
     }
     
-    // Create shader if not already created
+    // Create shader if not already created (simplified for BT709 only)
     if (!color_state.color_conversion_shader) {
-        if (!create_color_conversion_shader(color_info, color_state, d3d11_device)) {
+        if (!create_color_conversion_shader(color_state, d3d11_device)) {
             return false;
         }
     }
@@ -358,7 +326,7 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
     
     std::cout << "  ✓ Texture copied to intermediate buffer\n";
     
-    // === DirectX Shader Color Conversion ===
+    // === DirectX Shader Color Conversion (BT709 yuv420p only) ===
     
     // Create input SRV for shader (only once)
     if (!create_input_srv_once(color_state.intermediate_texture, color_state, d3d11_device)) {
@@ -367,8 +335,8 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
         return false;
     }
     
-    // Update constants buffer
-    ConversionConstants constants = generate_conversion_constants(color_info);
+    // Update constants buffer with BT709 constants
+    ConversionConstants constants = generate_conversion_constants_bt709();
     
     D3D11_MAPPED_SUBRESOURCE mapped_resource;
     HRESULT hr = d3d11_context->Map(color_state.conversion_constants_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_resource);
@@ -377,14 +345,10 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
         d3d11_context->Unmap(color_state.conversion_constants_buffer, 0);
     }
     
-    // Set shader resources
+    // Set shader resources (NV12 requires both Y and UV textures)
     d3d11_context->CSSetShader(color_state.color_conversion_shader, nullptr, 0);
-    if (color_state.input_srv_uv) {
-        ID3D11ShaderResourceView* srvs[] = { color_state.input_srv_y, color_state.input_srv_uv };
-        d3d11_context->CSSetShaderResources(0, 2, srvs);
-    } else {
-        d3d11_context->CSSetShaderResources(0, 1, &color_state.input_srv_y);
-    }
+    ID3D11ShaderResourceView* srvs[] = { color_state.input_srv_y, color_state.input_srv_uv };
+    d3d11_context->CSSetShaderResources(0, 2, srvs);
     d3d11_context->CSSetUnorderedAccessViews(0, 1, &output_uav, nullptr);
     d3d11_context->CSSetConstantBuffers(0, 1, &color_state.conversion_constants_buffer);
     
@@ -401,7 +365,7 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
     
     d3d11_context->Flush();
     
-    std::cout << "  ✓ Color conversion shader executed successfully\n";
+    std::cout << "  ✓ BT709 yuv420p color conversion completed successfully\n";
     
     // === Add converted frame to output queue ===
     ColorConvertedFrame converted_frame(output_texture, texture_desc.Width, texture_desc.Height);
@@ -421,11 +385,10 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
 void start_convert_color_thread(
     DecodedFrameQueue& input_frame_queue,
     ColorConvertedFrameQueue& output_frame_queue,
-    const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
     ID3D11DeviceContext* d3d11_context) {
     
-    std::cout << "=== Process Thread Started ===\n";
+    std::cout << "=== Process Thread Started (yuv420p + BT709 only) ===\n";
     
     // Create ColorConversionState inside the thread
     ColorConversionState color_state;
@@ -445,11 +408,18 @@ void start_convert_color_thread(
         
         if (decoded_frame.frame) {
             processed_count++;
-            std::cout << ">>> Processing frame " << processed_count << "\n";
+            std::cout << ">>> Processing frame " << processed_count << " (yuv420p + BT709)\n";
             
-            // Process the D3D11 frame
-            process_d3d11_frame(decoded_frame.frame, color_info, color_state, 
-                                        d3d11_device, d3d11_context, output_frame_queue);
+            try {
+                // Use color info from the frame instead of the parameter
+                process_d3d11_frame(decoded_frame.frame, decoded_frame.color_info, color_state, 
+                                            d3d11_device, d3d11_context, output_frame_queue);
+            } catch (const std::exception& e) {
+                std::cerr << "Frame processing failed: " << e.what() << "\n";
+                av_frame_free(&decoded_frame.frame);
+                output_frame_queue.push(ColorConvertedFrame::end_signal());
+                break;
+            }
             
             // Clean up the frame
             av_frame_free(&decoded_frame.frame);

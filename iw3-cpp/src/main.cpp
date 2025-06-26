@@ -118,7 +118,6 @@ public:
             start_convert_color_thread(
                 decode_thread_output,
                 convert_color_output,
-                decoder_state_.video_color_info,
                 d3d11_device,
                 d3d11_context
             );

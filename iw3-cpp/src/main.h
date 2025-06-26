@@ -108,10 +108,11 @@ struct ColorConversionState {
 // Frame data structure for queue communication
 struct DecodedFrame {
     AVFrame* frame;
+    ColorSpaceInfo color_info;  // Add color info to each frame
     bool is_end_signal;
     
     DecodedFrame() : frame(nullptr), is_end_signal(false) {}
-    DecodedFrame(AVFrame* f) : frame(f), is_end_signal(false) {}
+    DecodedFrame(AVFrame* f, const ColorSpaceInfo& info) : frame(f), color_info(info), is_end_signal(false) {}
     static DecodedFrame end_signal() {
         DecodedFrame data;
         data.is_end_signal = true;

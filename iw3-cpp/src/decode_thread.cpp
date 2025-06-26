@@ -115,10 +115,14 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
                 frame_count++;
                 
                 if (frame->format == AV_PIX_FMT_D3D11) {
-                    // Detect color space info only for the first frame
+                    // Detect color space info for each frame (or use cached info)
+                    ColorSpaceInfo current_color_info;
                     if (!decoder_state.color_info_detected) {
-                        decoder_state.video_color_info = detect_color_info_decode(frame, decoder_state.codec_ctx);
+                        current_color_info = detect_color_info_decode(frame, decoder_state.codec_ctx);
+                        decoder_state.video_color_info = current_color_info;  // Cache for future use
                         decoder_state.color_info_detected = true;
+                    } else {
+                        current_color_info = decoder_state.video_color_info;  // Use cached info
                     }
                     
                     // Create a copy of the frame for the queue
@@ -129,11 +133,11 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
                         continue;
                     }
                     
-                    // Push to queue (no color info needed, using shared one)
-                    DecodedFrame decoded_frame(frame_copy);
+                    // Push to queue with color info included
+                    DecodedFrame decoded_frame(frame_copy, current_color_info);
                     frame_queue.push(std::move(decoded_frame));
                     
-                    std::cout << "✓ Frame " << frame_count << " decoded and queued\n";
+                    std::cout << "✓ Frame " << frame_count << " decoded and queued with color info\n";
                     
                 } else {
                     std::cerr << "Unexpected frame format: " << av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)) << " - hardware decoding may have failed\n";
