@@ -35,6 +35,7 @@ private:
     // Thread management
     DecodedFrameQueue decode_thread_output;
     ColorConvertedFrameQueue convert_color_output;
+    StereoInferredFrameQueue infer_sbs_output;  // New output queue for stereo inference
     
 public:
     MainProgram() = default;
@@ -107,7 +108,7 @@ public:
         
         // Start depth inference thread with its own CUDA stream
         std::thread infer_sbs_th([this]() {
-            start_infer_sbs(convert_color_output);
+            start_infer_sbs(convert_color_output, infer_sbs_output);  // Pass both input and output queues
         });
         
         // Wait for all threads to complete

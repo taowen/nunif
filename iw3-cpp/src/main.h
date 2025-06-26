@@ -173,6 +173,60 @@ struct ColorConvertedFrame {
     }
 };
 
+// Stereo inference result data structure
+struct StereoInferredFrame {
+    ID3D11Texture2D* stereo_texture;  // Half side-by-side stereo texture
+    UINT width;   // Width of the stereo texture (original_width for half SBS)
+    UINT height;  // Height of the stereo texture
+    bool is_end_signal;
+
+    StereoInferredFrame() : stereo_texture(nullptr), width(0), height(0), is_end_signal(false) {}
+    StereoInferredFrame(ID3D11Texture2D* tex, UINT w, UINT h)
+        : stereo_texture(tex), width(w), height(h), is_end_signal(false) {
+        if (stereo_texture) {
+            stereo_texture->AddRef();
+        }
+    }
+
+    ~StereoInferredFrame() {
+        if (stereo_texture && !is_end_signal) {
+            stereo_texture->Release();
+        }
+    }
+
+    // Move constructor
+    StereoInferredFrame(StereoInferredFrame&& other) noexcept
+        : stereo_texture(other.stereo_texture), width(other.width), height(other.height),
+          is_end_signal(other.is_end_signal) {
+        other.stereo_texture = nullptr;
+    }
+
+    // Move assignment
+    StereoInferredFrame& operator=(StereoInferredFrame&& other) noexcept {
+        if (this != &other) {
+            if (stereo_texture && !is_end_signal) {
+                stereo_texture->Release();
+            }
+            stereo_texture = other.stereo_texture;
+            width = other.width;
+            height = other.height;
+            is_end_signal = other.is_end_signal;
+            other.stereo_texture = nullptr;
+        }
+        return *this;
+    }
+
+    // Delete copy constructor and assignment
+    StereoInferredFrame(const StereoInferredFrame&) = delete;
+    StereoInferredFrame& operator=(const StereoInferredFrame&) = delete;
+
+    static StereoInferredFrame end_signal() {
+        StereoInferredFrame data;
+        data.is_end_signal = true;
+        return data;
+    }
+};
+
 // Thread-safe queue for frame communication
 template<typename T>
 class ThreadSafeQueue {
@@ -214,4 +268,5 @@ public:
 
 // Type aliases for specific queue types
 using DecodedFrameQueue = ThreadSafeQueue<DecodedFrame>;
-using ColorConvertedFrameQueue = ThreadSafeQueue<ColorConvertedFrame>; 
+using ColorConvertedFrameQueue = ThreadSafeQueue<ColorConvertedFrame>;
+using StereoInferredFrameQueue = ThreadSafeQueue<StereoInferredFrame>; 

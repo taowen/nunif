@@ -84,7 +84,13 @@ class StereoDepthModule(nn.Module):
         right_half = F.interpolate(right, size=(H, W // 2), mode="bilinear", align_corners=False)
         # concat along width
         half_sbs = torch.cat([left_half, right_half], dim=3)  # (B, C, H, W)
-        return half_sbs
+        
+        # Add alpha channel to match infer_sbs.cpp output format expectation (RGBA)
+        B, C, H, W = half_sbs.shape
+        alpha_channel = torch.ones(B, 1, H, W, dtype=half_sbs.dtype, device=half_sbs.device)
+        half_sbs_rgba = torch.cat([half_sbs, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
+        
+        return half_sbs_rgba
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
@@ -118,7 +124,7 @@ with torch.inference_mode():
         },
     )
     logger.info(f"ONNX model saved to {output_path}")
-    logger.info(f"Model expects RGBA input (4 channels) to match convert_color_thread output")
+    logger.info(f"Model expects RGBA input (4 channels) and outputs RGBA (4 channels) to match convert_color_thread and infer_sbs expectations")
 
 os.makedirs("tmp", exist_ok=True)
 for idx in range(half_sbs.shape[0]):

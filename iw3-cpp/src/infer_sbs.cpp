@@ -330,7 +330,8 @@ std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 } // anonymous namespace
 
 void start_infer_sbs(
-    ColorConvertedFrameQueue& input_frame_queue) {
+    ColorConvertedFrameQueue& input_frame_queue,
+    StereoInferredFrameQueue& output_frame_queue) {
     
     cudaStream_t cuda_stream = nullptr;
     checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
@@ -344,6 +345,8 @@ void start_infer_sbs(
         if (!g_inference_engine->initialize("stereo_module_half_sbs.onnx")) {
             std::cerr << "Failed to initialize TensorRT inference engine" << std::endl;
             cudaStreamDestroy(cuda_stream);
+            // Send end signal to output queue
+            output_frame_queue.push(StereoInferredFrame::end_signal());
             return;
         }
     }
@@ -357,6 +360,8 @@ void start_infer_sbs(
         // Check for end signal
         if (converted_frame.is_end_signal) {
             std::cout << "=== Depth Inference Thread Received End Signal ===\n";
+            // Forward end signal to output queue
+            output_frame_queue.push(StereoInferredFrame::end_signal());
             break;
         }
         
@@ -396,6 +401,7 @@ void start_infer_sbs(
 
                 if (!cuda_device_set) {
                     std::cerr << "Failed to set CUDA device for depth inference thread. Aborting thread." << std::endl;
+                    output_frame_queue.push(StereoInferredFrame::end_signal());
                     break;
                 }
             }
@@ -432,13 +438,46 @@ void start_infer_sbs(
 
             if (!g_inference_engine->infer(d_temp_input, converted_frame.width, converted_frame.height, cuda_stream)) {
                 std::cerr << "    ✗ TensorRT inference failed for frame " << processed_count << "\n";
+                checkCudaErrors(cudaFree(d_temp_input));
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
+                continue;
             }
+
+            // TODO: Create output D3D11 texture from TensorRT inference result
+            // For now, we'll create a placeholder texture
+            ID3D11Device* d3d11_device = nullptr;
+            converted_frame.texture->GetDevice(&d3d11_device);
+            
+            ID3D11Texture2D* output_texture = nullptr;
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = converted_frame.width;  // Full width for half side-by-side
+            desc.Height = converted_frame.height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            
+            HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &output_texture);
+            if (SUCCEEDED(hr)) {
+                // Create stereo inference result and push to output queue
+                StereoInferredFrame stereo_frame(output_texture, converted_frame.width, converted_frame.height);
+                output_frame_queue.push(std::move(stereo_frame));
+                std::cout << ">>> Stereo inference frame " << processed_count << " completed and queued\n";
+            } else {
+                std::cerr << "    ✗ Failed to create output texture for frame " << processed_count << "\n";
+            }
+            
+            if (output_texture) {
+                output_texture->Release();
+            }
+            d3d11_device->Release();
 
             checkCudaErrors(cudaFree(d_temp_input));
             checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
             checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
-            
-            std::cout << ">>> Stereo inference frame " << processed_count << " completed\n";
         }
     }
     
