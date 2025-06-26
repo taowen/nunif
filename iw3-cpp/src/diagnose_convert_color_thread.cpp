@@ -62,8 +62,8 @@ bool save_texture_as_dds(ID3D11Texture2D* texture, ID3D11Device* device, ID3D11D
 }
 
 void start_diagnose_convert_color_thread(
-    ColorConvertedFrameQueue& input_queue,
-    ColorConvertedFrameQueue& output_queue,
+    D11FrameQueue& input_queue,
+    D11FrameQueue& output_queue,
     ID3D11Device* device,
     ID3D11DeviceContext* context
 ) {
@@ -73,10 +73,10 @@ void start_diagnose_convert_color_thread(
     int frame_count = 0;
     
     while (true) {
-        ColorConvertedFrame frame = input_queue.pop();
+        D11Frame frame = input_queue.pop();
         
         if (frame.is_end_signal) {
-            output_queue.push(ColorConvertedFrame::end_signal());
+            output_queue.push(D11Frame::end_signal());
             break;
         }
         

@@ -285,7 +285,7 @@ bool create_input_srv_once(ID3D11Texture2D* input_texture, ColorConversionState&
 
 bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
                                   ColorConversionState& color_state, ID3D11Device* d3d11_device,
-                                  ID3D11DeviceContext* d3d11_context, ColorConvertedFrameQueue& output_queue) {
+                                  ID3D11DeviceContext* d3d11_context, D11FrameQueue& output_queue) {
     
     // Validate input format first - throw error if not supported
     validate_input_format(color_info);
@@ -368,7 +368,7 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
     std::cout << "  ✓ BT709 yuv420p color conversion completed successfully\n";
     
     // === Add converted frame to output queue ===
-    ColorConvertedFrame converted_frame(output_texture, texture_desc.Width, texture_desc.Height);
+    D11Frame converted_frame(output_texture, texture_desc.Width, texture_desc.Height);
     output_queue.push(std::move(converted_frame));
 
     // Release local handles, the object in the queue now owns the reference
@@ -384,7 +384,7 @@ bool process_d3d11_frame(AVFrame* d3d11_frame, const ColorSpaceInfo& color_info,
 
 void start_convert_color_thread(
     DecodedFrameQueue& input_frame_queue,
-    ColorConvertedFrameQueue& output_frame_queue,
+    D11FrameQueue& output_frame_queue,
     ID3D11Device* d3d11_device,
     ID3D11DeviceContext* d3d11_context) {
     
@@ -402,7 +402,7 @@ void start_convert_color_thread(
         if (decoded_frame.is_end_signal) {
             std::cout << "=== Process Thread Received End Signal ===\n";
             // Send end signal to output queue
-            output_frame_queue.push(ColorConvertedFrame::end_signal());
+            output_frame_queue.push(D11Frame::end_signal());
             break;
         }
         
@@ -417,7 +417,7 @@ void start_convert_color_thread(
             } catch (const std::exception& e) {
                 std::cerr << "Frame processing failed: " << e.what() << "\n";
                 av_frame_free(&decoded_frame.frame);
-                output_frame_queue.push(ColorConvertedFrame::end_signal());
+                output_frame_queue.push(D11Frame::end_signal());
                 break;
             }
             

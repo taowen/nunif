@@ -121,35 +121,35 @@ struct DecodedFrame {
 };
 
 // Converted frame data structure for AI processing
-struct ColorConvertedFrame {
+struct D11Frame {
     ID3D11Texture2D* texture;
     UINT width;
     UINT height;
     bool is_end_signal;
 
-    ColorConvertedFrame() : texture(nullptr), width(0), height(0), is_end_signal(false) {}
-    ColorConvertedFrame(ID3D11Texture2D* tex, UINT w, UINT h)
+    D11Frame() : texture(nullptr), width(0), height(0), is_end_signal(false) {}
+    D11Frame(ID3D11Texture2D* tex, UINT w, UINT h)
         : texture(tex), width(w), height(h), is_end_signal(false) {
         if (texture) {
             texture->AddRef();
         }
     }
 
-    ~ColorConvertedFrame() {
+    ~D11Frame() {
         if (texture && !is_end_signal) {
             texture->Release();
         }
     }
 
     // Move constructor
-    ColorConvertedFrame(ColorConvertedFrame&& other) noexcept
+    D11Frame(D11Frame&& other) noexcept
         : texture(other.texture), width(other.width), height(other.height),
           is_end_signal(other.is_end_signal) {
         other.texture = nullptr;
     }
 
     // Move assignment
-    ColorConvertedFrame& operator=(ColorConvertedFrame&& other) noexcept {
+    D11Frame& operator=(D11Frame&& other) noexcept {
         if (this != &other) {
             if (texture && !is_end_signal) {
                 texture->Release();
@@ -164,65 +164,11 @@ struct ColorConvertedFrame {
     }
 
     // Delete copy constructor and assignment
-    ColorConvertedFrame(const ColorConvertedFrame&) = delete;
-    ColorConvertedFrame& operator=(const ColorConvertedFrame&) = delete;
+    D11Frame(const D11Frame&) = delete;
+    D11Frame& operator=(const D11Frame&) = delete;
 
-    static ColorConvertedFrame end_signal() {
-        ColorConvertedFrame data;
-        data.is_end_signal = true;
-        return data;
-    }
-};
-
-// Stereo inference result data structure
-struct StereoInferredFrame {
-    ID3D11Texture2D* stereo_texture;  // Half side-by-side stereo texture
-    UINT width;   // Width of the stereo texture (original_width for half SBS)
-    UINT height;  // Height of the stereo texture
-    bool is_end_signal;
-
-    StereoInferredFrame() : stereo_texture(nullptr), width(0), height(0), is_end_signal(false) {}
-    StereoInferredFrame(ID3D11Texture2D* tex, UINT w, UINT h)
-        : stereo_texture(tex), width(w), height(h), is_end_signal(false) {
-        if (stereo_texture) {
-            stereo_texture->AddRef();
-        }
-    }
-
-    ~StereoInferredFrame() {
-        if (stereo_texture && !is_end_signal) {
-            stereo_texture->Release();
-        }
-    }
-
-    // Move constructor
-    StereoInferredFrame(StereoInferredFrame&& other) noexcept
-        : stereo_texture(other.stereo_texture), width(other.width), height(other.height),
-          is_end_signal(other.is_end_signal) {
-        other.stereo_texture = nullptr;
-    }
-
-    // Move assignment
-    StereoInferredFrame& operator=(StereoInferredFrame&& other) noexcept {
-        if (this != &other) {
-            if (stereo_texture && !is_end_signal) {
-                stereo_texture->Release();
-            }
-            stereo_texture = other.stereo_texture;
-            width = other.width;
-            height = other.height;
-            is_end_signal = other.is_end_signal;
-            other.stereo_texture = nullptr;
-        }
-        return *this;
-    }
-
-    // Delete copy constructor and assignment
-    StereoInferredFrame(const StereoInferredFrame&) = delete;
-    StereoInferredFrame& operator=(const StereoInferredFrame&) = delete;
-
-    static StereoInferredFrame end_signal() {
-        StereoInferredFrame data;
+    static D11Frame end_signal() {
+        D11Frame data;
         data.is_end_signal = true;
         return data;
     }
@@ -269,5 +215,4 @@ public:
 
 // Type aliases for specific queue types
 using DecodedFrameQueue = ThreadSafeQueue<DecodedFrame>;
-using ColorConvertedFrameQueue = ThreadSafeQueue<ColorConvertedFrame>;
-using StereoInferredFrameQueue = ThreadSafeQueue<StereoInferredFrame>; 
+using D11FrameQueue = ThreadSafeQueue<D11Frame>;

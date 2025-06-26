@@ -38,9 +38,9 @@ private:
     
     // Thread management
     DecodedFrameQueue decode_thread_output;
-    ColorConvertedFrameQueue convert_color_output;
-    ColorConvertedFrameQueue diagnose_color_output;  // New queue for diagnosis mode
-    StereoInferredFrameQueue infer_sbs_output;
+    D11FrameQueue convert_color_output;
+    D11FrameQueue diagnose_color_output;  // New queue for diagnosis mode
+    D11FrameQueue infer_sbs_output;
     
     // 添加输出文件名成员变量
     std::string output_filename_;

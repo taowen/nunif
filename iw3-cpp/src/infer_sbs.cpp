@@ -330,8 +330,8 @@ std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 } // anonymous namespace
 
 void start_infer_sbs(
-    ColorConvertedFrameQueue& input_frame_queue,
-    StereoInferredFrameQueue& output_frame_queue) {
+    D11FrameQueue& input_frame_queue,
+    D11FrameQueue& output_frame_queue) {
     
     cudaStream_t cuda_stream = nullptr;
     checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
@@ -346,7 +346,7 @@ void start_infer_sbs(
             std::cerr << "Failed to initialize TensorRT inference engine" << std::endl;
             cudaStreamDestroy(cuda_stream);
             // Send end signal to output queue
-            output_frame_queue.push(StereoInferredFrame::end_signal());
+            output_frame_queue.push(D11Frame::end_signal());
             return;
         }
     }
@@ -355,13 +355,13 @@ void start_infer_sbs(
     bool cuda_device_set = false;
     
     while (true) {
-        ColorConvertedFrame converted_frame = input_frame_queue.pop();
+        D11Frame converted_frame = input_frame_queue.pop();
         
         // Check for end signal
         if (converted_frame.is_end_signal) {
             std::cout << "=== Depth Inference Thread Received End Signal ===\n";
             // Forward end signal to output queue
-            output_frame_queue.push(StereoInferredFrame::end_signal());
+            output_frame_queue.push(D11Frame::end_signal());
             break;
         }
         
@@ -401,7 +401,7 @@ void start_infer_sbs(
 
                 if (!cuda_device_set) {
                     std::cerr << "Failed to set CUDA device for depth inference thread. Aborting thread." << std::endl;
-                    output_frame_queue.push(StereoInferredFrame::end_signal());
+                    output_frame_queue.push(D11Frame::end_signal());
                     break;
                 }
             }
@@ -463,7 +463,7 @@ void start_infer_sbs(
             HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &output_texture);
             if (SUCCEEDED(hr)) {
                 // Create stereo inference result and push to output queue
-                StereoInferredFrame stereo_frame(output_texture, converted_frame.width, converted_frame.height);
+                D11Frame stereo_frame(output_texture, converted_frame.width, converted_frame.height);
                 output_frame_queue.push(std::move(stereo_frame));
                 std::cout << ">>> Stereo inference frame " << processed_count << " completed and queued\n";
             } else {

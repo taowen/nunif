@@ -342,7 +342,7 @@ bool initialize_ffmpeg_encoder(const std::string& output_filename, const ColorSp
     return true;
 }
 
-bool convert_rgb_to_yuv_and_encode(const StereoInferredFrame& stereo_frame, 
+bool convert_rgb_to_yuv_and_encode(const D11Frame& stereo_frame, 
                                   const ColorSpaceInfo& color_info,
                                   EncoderState& encoder_state,
                                   ID3D11Device* d3d11_device,
@@ -355,7 +355,7 @@ bool convert_rgb_to_yuv_and_encode(const StereoInferredFrame& stereo_frame,
     srv_desc.Texture2D.MostDetailedMip = 0;
     srv_desc.Texture2D.MipLevels = 1;
     
-    HRESULT hr = d3d11_device->CreateShaderResourceView(stereo_frame.stereo_texture, &srv_desc, &input_srv);
+    HRESULT hr = d3d11_device->CreateShaderResourceView(stereo_frame.texture, &srv_desc, &input_srv);
     if (FAILED(hr)) {
         std::cerr << "Failed to create input SRV for encoding\n";
         return false;
@@ -470,7 +470,7 @@ bool convert_rgb_to_yuv_and_encode(const StereoInferredFrame& stereo_frame,
 } // anonymous namespace
 
 void start_encode_thread(
-    StereoInferredFrameQueue& input_frame_queue,
+    D11FrameQueue& input_frame_queue,
     const std::string& output_filename,
     const ColorSpaceInfo& color_info,
     ID3D11Device* d3d11_device,
@@ -489,7 +489,7 @@ void start_encode_thread(
     buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     
     while (true) {
-        StereoInferredFrame frame = input_frame_queue.pop();
+        D11Frame frame = input_frame_queue.pop();
         
         if (frame.is_end_signal) {
             std::cout << "Encode thread received end signal" << std::endl;
