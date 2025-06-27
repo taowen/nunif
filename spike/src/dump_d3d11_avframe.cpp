@@ -1,8 +1,6 @@
 #include "main.h"
 #include <fstream>
 #include <vector>
-#include <cuda_runtime.h>
-#include <cuda_d3d11_interop.h>
 
 // Add this to prevent Windows min/max macro conflicts
 #ifdef max
@@ -48,17 +46,17 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
         return result;
     }
 
-    // Create texture for CUDA interop (not staging)
-    D3D11_TEXTURE2D_DESC staging_desc{};
+    // Create staging texture for CPU access
+    D3D11_TEXTURE2D_DESC staging_desc = {};
     staging_desc.Width = input_desc.Width;
     staging_desc.Height = input_desc.Height;
     staging_desc.MipLevels = 1;
     staging_desc.ArraySize = 1;
     staging_desc.Format = input_desc.Format;
     staging_desc.SampleDesc.Count = 1;
-    staging_desc.Usage = D3D11_USAGE_DEFAULT;
-    staging_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    staging_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging_desc.BindFlags = 0;
     
     ID3D11Texture2D* staging_texture = nullptr;
     HRESULT hr = ctx->d3d_device->CreateTexture2D(&staging_desc, nullptr, &staging_texture);
@@ -71,117 +69,20 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     UINT src_subresource = D3D11CalcSubresource(0, texture_index, input_desc.MipLevels);
     ctx->d3d_context->CopySubresourceRegion(staging_texture, 0, 0, 0, 0, input_texture, src_subresource, nullptr);
     
-    // Flush the context to ensure copy is complete before CUDA registration
-    ctx->d3d_context->Flush();
-    
-    // Get CUDA device corresponding to D3D11 device
-    IDXGIDevice* dxgi_device = nullptr;
-    HRESULT hr_dxgi = ctx->d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
-    if (FAILED(hr_dxgi)) {
-        std::cerr << "Failed to query IDXGIDevice from D3D11 device." << std::endl;
+    // Map the staging texture to access CPU memory
+    D3D11_MAPPED_SUBRESOURCE mapped_resource;
+    hr = ctx->d3d_context->Map(staging_texture, 0, D3D11_MAP_READ, 0, &mapped_resource);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to map staging texture: 0x" << std::hex << hr << std::endl;
         staging_texture->Release();
         return result;
     }
 
-    IDXGIAdapter* dxgi_adapter = nullptr;
-    hr_dxgi = dxgi_device->GetAdapter(&dxgi_adapter);
-    dxgi_device->Release();
-    if (FAILED(hr_dxgi)) {
-        std::cerr << "Failed to get IDXGIAdapter from IDXGIDevice." << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-
-    int cuda_device_id = -1;
-    cudaError_t init_status = cudaD3D11GetDevice(&cuda_device_id, dxgi_adapter);
-    dxgi_adapter->Release();
-    if (init_status != cudaSuccess) {
-        std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(init_status) << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-    
-    // Initialize CUDA on the correct device
-    init_status = cudaSetDevice(cuda_device_id);
-    if (init_status != cudaSuccess) {
-        std::cerr << "Failed to initialize CUDA device " << cuda_device_id << ": " << cudaGetErrorString(init_status) << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-    
-    // Check if CUDA-D3D11 interop is supported
-    int device_count = 0;
-    init_status = cudaGetDeviceCount(&device_count);
-    if (init_status != cudaSuccess || device_count == 0) {
-        std::cerr << "No CUDA devices available: " << cudaGetErrorString(init_status) << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-    
-    // Optionally, check if the current device supports D3D11 interop
-    cudaDeviceProp device_prop;
-    init_status = cudaGetDeviceProperties(&device_prop, cuda_device_id);
-    if (init_status != cudaSuccess) {
-        std::cerr << "Failed to get CUDA device properties: " << cudaGetErrorString(init_status) << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-    
-    std::cout << "CUDA device initialized: " << device_prop.name << std::endl;
-    
-    // Register the texture with CUDA - add more detailed error checking
-    cudaGraphicsResource_t cuda_resource = nullptr;
-    cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
-        &cuda_resource, staging_texture, cudaGraphicsRegisterFlagsNone);
-    
-    if (cuda_status != cudaSuccess) {
-        std::cerr << "Failed to register D3D11 texture with CUDA: " << cudaGetErrorString(cuda_status) << std::endl;
-        std::cerr << "CUDA error code: " << cuda_status << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-    
-    // Verify the resource handle is valid
-    if (cuda_resource == nullptr) {
-        std::cerr << "CUDA resource handle is null after registration" << std::endl;
-        staging_texture->Release();
-        return result;
-    }
-
-    // Map the CUDA resource
-    cuda_status = cudaGraphicsMapResources(1, &cuda_resource, 0);
-    if (cuda_status != cudaSuccess) {
-        std::cerr << "Failed to map CUDA graphics resource: " << cudaGetErrorString(cuda_status) << std::endl;
-        std::cerr << "CUDA error code: " << cuda_status << std::endl;
-        cudaGraphicsUnregisterResource(cuda_resource);
-        staging_texture->Release();
-        return result;
-    }
-
-    // Get mapped pointer and size
-    void* cuda_ptr = nullptr;
-    size_t cuda_size = 0;
-    cuda_status = cudaGraphicsResourceGetMappedPointer(&cuda_ptr, &cuda_size, cuda_resource);
-    if (cuda_status != cudaSuccess) {
-        std::cerr << "Failed to get mapped pointer from CUDA resource: " << cudaGetErrorString(cuda_status) << std::endl;
-        std::cerr << "CUDA error code: " << cuda_status << std::endl;
-        std::cerr << "Resource handle: " << cuda_resource << std::endl;
-        cudaGraphicsUnmapResources(1, &cuda_resource, 0);
-        cudaGraphicsUnregisterResource(cuda_resource);
-        staging_texture->Release();
-        return result;
-    }
-    
-    std::cout << "CUDA mapping successful: ptr=" << cuda_ptr << ", size=" << cuda_size << std::endl;
-
-    // Extract YUV data from NV12 format using CUDA memory
-    uint8_t* mapped_data = static_cast<uint8_t*>(cuda_ptr);
+    // Extract YUV data from NV12 format
+    uint8_t* mapped_data = static_cast<uint8_t*>(mapped_resource.pData);
     int width = frame->width;
     int height = frame->height;
-    
-    // For CUDA mapped memory, we need to calculate the pitch ourselves
-    // Assuming the texture has the same layout as D3D11 staging texture
-    int row_pitch = width; // This might need adjustment based on actual memory layout
+    int row_pitch = mapped_resource.RowPitch;
     
     // Calculate plane sizes
     int y_plane_size = width * height;
@@ -194,29 +95,15 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     result.width = width;
     result.height = height;
     
-    // Allocate host memory for copying from CUDA
-    std::vector<uint8_t> host_buffer(cuda_size);
-    cuda_status = cudaMemcpy(host_buffer.data(), cuda_ptr, cuda_size, cudaMemcpyDeviceToHost);
-    if (cuda_status != cudaSuccess) {
-        std::cerr << "Failed to copy data from CUDA memory: " << cudaGetErrorString(cuda_status) << std::endl;
-        cudaGraphicsUnmapResources(1, &cuda_resource, 0);
-        cudaGraphicsUnregisterResource(cuda_resource);
-        staging_texture->Release();
-        return result;
-    }
-    
-    // Now extract data from host buffer
-    uint8_t* buffer_data = host_buffer.data();
-    
     // Copy Y plane
     for (int y = 0; y < height; y++) {
         memcpy(result.y_plane.data() + y * width, 
-               buffer_data + y * row_pitch, 
+               mapped_data + y * row_pitch, 
                width);
     }
     
     // Copy and separate UV plane (NV12 format has interleaved UV)
-    uint8_t* uv_start = buffer_data + height * row_pitch;
+    uint8_t* uv_start = mapped_data + input_desc.Height * row_pitch;
     for (int y = 0; y < height / 2; y++) {
         for (int x = 0; x < width / 2; x++) {
             int src_idx = y * row_pitch + x * 2;
@@ -243,12 +130,11 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
         }
     }
     
-    // Unmap and release CUDA resources
-    cudaGraphicsUnmapResources(1, &cuda_resource, 0);
-    cudaGraphicsUnregisterResource(cuda_resource);
+    // Unmap and release resources
+    ctx->d3d_context->Unmap(staging_texture, 0);
     staging_texture->Release();
     
-    std::cout << "Successfully extracted YUV data from D3D11 AVFrame via CUDA (" 
+    std::cout << "Successfully extracted YUV data from D3D11 AVFrame (" 
               << width << "x" << height << ")" << std::endl;
     
     return result;
