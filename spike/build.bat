@@ -8,4 +8,5 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 popd
+:: Run with verbose output to see stdout
 spike\build\Debug\spike.exe
