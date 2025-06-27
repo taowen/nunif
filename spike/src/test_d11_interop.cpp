@@ -13,6 +13,10 @@ extern "C" {
 #include <string>
 #include <iostream>
 #include <memory>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
 
 // TensorRT includes
 #include "NvInfer.h"
@@ -48,6 +52,76 @@ static Logger gLogger;
             exit(EXIT_FAILURE); \
         } \
     } while(0)
+
+// Add BMP saving function
+bool save_rgba_as_bmp(const std::string& filename, const float* rgba_data, 
+                      UINT width, UINT height) {
+    // BMP header structures
+    #pragma pack(push, 1)
+    struct BMPFileHeader {
+        uint16_t signature = 0x4D42; // "BM"
+        uint32_t file_size;
+        uint16_t reserved1 = 0;
+        uint16_t reserved2 = 0;
+        uint32_t data_offset = 54; // Size of headers
+    };
+    
+    struct BMPInfoHeader {
+        uint32_t header_size = 40;
+        int32_t width;
+        int32_t height;
+        uint16_t planes = 1;
+        uint16_t bits_per_pixel = 24; // RGB (no alpha for BMP)
+        uint32_t compression = 0;
+        uint32_t image_size = 0;
+        int32_t x_pixels_per_meter = 0;
+        int32_t y_pixels_per_meter = 0;
+        uint32_t colors_used = 0;
+        uint32_t colors_important = 0;
+    };
+    #pragma pack(pop)
+    
+    // Calculate padding for 4-byte alignment
+    UINT bytes_per_row = width * 3; // RGB
+    UINT padding = (4 - (bytes_per_row % 4)) % 4;
+    UINT padded_row_size = bytes_per_row + padding;
+    
+    BMPFileHeader file_header;
+    BMPInfoHeader info_header;
+    
+    file_header.file_size = sizeof(BMPFileHeader) + sizeof(BMPInfoHeader) + 
+                           padded_row_size * height;
+    info_header.width = static_cast<int32_t>(width);
+    info_header.height = static_cast<int32_t>(height);
+    info_header.image_size = padded_row_size * height;
+    
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to create BMP file: " << filename << std::endl;
+        return false;
+    }
+    
+    // Write headers
+    file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
+    file.write(reinterpret_cast<const char*>(&info_header), sizeof(info_header));
+    
+    // Convert RGBA float to RGB bytes and write (BMP is bottom-up)
+    std::vector<uint8_t> row_data(padded_row_size, 0);
+    
+    for (int y = height - 1; y >= 0; --y) { // BMP is stored bottom-up
+        for (UINT x = 0; x < width; ++x) {
+            const float* pixel = &rgba_data[(y * width + x) * 4];
+            
+            // Convert float [0,1] to uint8 [0,255] and BGR format for BMP
+            row_data[x * 3 + 0] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, pixel[2] * 255.0f))); // B
+            row_data[x * 3 + 1] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, pixel[1] * 255.0f))); // G
+            row_data[x * 3 + 2] = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, pixel[0] * 255.0f))); // R
+        }
+        file.write(reinterpret_cast<const char*>(row_data.data()), padded_row_size);
+    }
+    
+    return true;
+}
 
 // Add TensorRT inference engine class declaration
 class TensorRTInferenceEngine {
@@ -303,19 +377,161 @@ public:
             std::cout << "    → Allocated output buffer: " << output_size << " bytes\n";
         }
         
+        // 诊断：初始化输入缓冲区为已知值进行测试
+        std::cout << "    → Initializing input buffer with test pattern..." << std::endl;
+        checkCudaErrors(cudaMemset(d_input, 0, input_size));
+        
+        // 诊断：检查 CUDA array 的有效性
+        std::cout << "    → Verifying CUDA array validity..." << std::endl;
+        cudaArray_t test_array = cuda_array;
+        if (test_array == nullptr) {
+            std::cerr << "    ✗ CUDA array is null!" << std::endl;
+            return false;
+        }
+        
+        // 诊断：获取 CUDA array 的描述信息
+        std::cout << "    → Getting CUDA array information..." << std::endl;
+        struct cudaChannelFormatDesc format_desc;
+        struct cudaExtent extent;
+        unsigned int flags;
+        
+        cudaError_t info_result = cudaArrayGetInfo(&format_desc, &extent, &flags, test_array);
+        if (info_result == cudaSuccess) {
+            std::cout << "    → CUDA array info:" << std::endl;
+            std::cout << "      - Width: " << extent.width << std::endl;
+            std::cout << "      - Height: " << extent.height << std::endl; 
+            std::cout << "      - Depth: " << extent.depth << std::endl;
+            std::cout << "      - Format: x=" << format_desc.x << " y=" << format_desc.y 
+                      << " z=" << format_desc.z << " w=" << format_desc.w << std::endl;
+            std::cout << "      - Format kind: " << format_desc.f << std::endl;
+            std::cout << "      - Flags: 0x" << std::hex << flags << std::dec << std::endl;
+            
+            // 检查格式是否匹配预期的 RGBA float32
+            if (format_desc.x == 32 && format_desc.y == 32 && format_desc.z == 32 && format_desc.w == 32 &&
+                format_desc.f == cudaChannelFormatKindFloat) {
+                std::cout << "      ✓ Format matches expected RGBA float32" << std::endl;
+            } else {
+                std::cout << "      ⚠ Format does NOT match expected RGBA float32" << std::endl;
+            }
+            
+            // 检查尺寸是否匹配
+            if (extent.width == width && extent.height == height) {
+                std::cout << "      ✓ Dimensions match expected " << width << "x" << height << std::endl;
+            } else {
+                std::cout << "      ⚠ Dimensions mismatch: expected " << width << "x" << height 
+                          << ", got " << extent.width << "x" << extent.height << std::endl;
+            }
+        } else {
+            std::cout << "    ⚠ Could not get CUDA array info: " << cudaGetErrorString(info_result) << std::endl;
+        }
+        
+        // 诊断：在复制之前，测试目标缓冲区是否可写
+        std::cout << "    → Testing input buffer accessibility..." << std::endl;
+        float test_value = 1.234f;
+        checkCudaErrors(cudaMemcpy(d_input, &test_value, sizeof(float), cudaMemcpyHostToDevice));
+        
+        float readback_value = 0.0f;
+        checkCudaErrors(cudaMemcpy(&readback_value, d_input, sizeof(float), cudaMemcpyDeviceToHost));
+        std::cout << "    → Buffer test: wrote " << test_value << ", read " << readback_value << std::endl;
+        
         // 直接从 CUDA array 复制到 TensorRT 输入缓冲区
         size_t pixel_size = 4 * sizeof(float); // RGBA float32
-        checkCudaErrors(cudaMemcpy2DFromArrayAsync(
+        std::cout << "    → Starting cudaMemcpy2DFromArray..." << std::endl;
+        std::cout << "      - Source: CUDA array" << std::endl;
+        std::cout << "      - Destination: d_input (0x" << std::hex << reinterpret_cast<uintptr_t>(d_input) << std::dec << ")" << std::endl;
+        std::cout << "      - Width bytes: " << width * pixel_size << std::endl;
+        std::cout << "      - Height: " << height << std::endl;
+        std::cout << "      - Pitch: " << width * pixel_size << std::endl;
+        
+        cudaError_t copy_result = cudaMemcpy2DFromArray(
             d_input, width * pixel_size,
             cuda_array, 0, 0,
             width * pixel_size, height,
-            cudaMemcpyDeviceToDevice, stream
-        ));
+            cudaMemcpyDeviceToDevice
+        );
+        
+        if (copy_result != cudaSuccess) {
+            std::cerr << "    ✗ cudaMemcpy2DFromArray failed: " << cudaGetErrorString(copy_result) << std::endl;
+            return false;
+        }
+        std::cout << "    ✓ cudaMemcpy2DFromArray completed" << std::endl;
+        
+        // 诊断：立即检查复制后的数据
+        std::cout << "    → Verifying copied data..." << std::endl;
+        std::vector<float> verify_sample(16); // 前4个像素
+        checkCudaErrors(cudaMemcpy(verify_sample.data(), d_input, 
+                                   verify_sample.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        bool has_non_zero = false;
+        float min_val = verify_sample[0], max_val = verify_sample[0];
+        for (size_t i = 0; i < verify_sample.size(); ++i) {
+            if (verify_sample[i] != 0.0f) has_non_zero = true;
+            min_val = std::min(min_val, verify_sample[i]);
+            max_val = std::max(max_val, verify_sample[i]);
+        }
+        
+        std::cout << "    → Sample verification:" << std::endl;
+        std::cout << "      - Has non-zero values: " << (has_non_zero ? "YES" : "NO") << std::endl;
+        std::cout << "      - Value range: [" << min_val << ", " << max_val << "]" << std::endl;
+        std::cout << "      - First 4 values: " << verify_sample[0] << ", " << verify_sample[1] 
+                  << ", " << verify_sample[2] << ", " << verify_sample[3] << std::endl;
+        
+        if (!has_non_zero) {
+            std::cerr << "    ✗ WARNING: All sample values are zero - data may not have been copied correctly!" << std::endl;
+        }
+        
+        // Save TensorRT input as BMP for debugging
+        std::vector<float> host_input(width * height * 4);
+        checkCudaErrors(cudaMemcpy(host_input.data(), d_input, 
+                                   host_input.size() * sizeof(float), 
+                                   cudaMemcpyDeviceToHost));
+        
+        // 诊断：检查完整数据统计
+        size_t zero_count = 0;
+        size_t total_count = host_input.size();
+        float data_min = host_input[0], data_max = host_input[0];
+        double data_sum = 0.0;
+        
+        for (size_t i = 0; i < total_count; ++i) {
+            float val = host_input[i];
+            if (val == 0.0f) zero_count++;
+            data_min = std::min(data_min, val);
+            data_max = std::max(data_max, val);
+            data_sum += val;
+        }
+        
+        double data_avg = data_sum / total_count;
+        std::cout << "    → Complete data statistics:" << std::endl;
+        std::cout << "      - Total elements: " << total_count << std::endl;
+        std::cout << "      - Zero elements: " << zero_count << " (" << (100.0 * zero_count / total_count) << "%)" << std::endl;
+        std::cout << "      - Data range: [" << data_min << ", " << data_max << "]" << std::endl;
+        std::cout << "      - Average value: " << data_avg << std::endl;
+        
+        // Generate filename with timestamp
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << "tensorrt_input_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
+           << "_" << width << "x" << height << ".bmp";
+        
+        if (save_rgba_as_bmp(ss.str(), host_input.data(), width, height)) {
+            std::cout << "    ✓ TensorRT input saved as: " << ss.str() << std::endl;
+        } else {
+            std::cout << "    ✗ Failed to save TensorRT input as BMP" << std::endl;
+        }
+        
+        // 如果数据全是零，不继续推理
+        if (zero_count == total_count) {
+            std::cerr << "    ✗ ABORT: All input data is zero, skipping inference!" << std::endl;
+            return false;
+        }
         
         // Prepare bindings for executeV2
         void* bindings[2];
         bindings[0] = d_input;  // input tensor
         bindings[1] = d_output; // output tensor
+        
+        std::cout << "    → Starting TensorRT inference..." << std::endl;
         
         // Execute synchronous inference
         if (!context->executeV2(bindings)) {
@@ -328,6 +544,152 @@ public:
         std::cout << "    → Output format: RGBA (4 channels)" << std::endl;
         std::cout << "    → Input size: " << input_size << " bytes" << std::endl;
         std::cout << "    → Output size: " << output_size << " bytes" << std::endl;
+        
+        // 诊断：保存CUDA array直接读取的数据作为对比
+        std::cout << "    → Creating comparison data from CUDA array..." << std::endl;
+        std::vector<float> cuda_array_data(width * height * 4);
+        checkCudaErrors(cudaMemcpy2DFromArray(
+            cuda_array_data.data(), width * pixel_size,
+            cuda_array, 0, 0,
+            width * pixel_size, height,
+            cudaMemcpyDeviceToHost
+        ));
+        
+        // 保存CUDA array数据作为对比
+        auto now_ = std::chrono::system_clock::now();
+        auto time_t_ = std::chrono::system_clock::to_time_t(now_);
+        std::stringstream cuda_ss;
+        cuda_ss << "cuda_array_direct_" << std::put_time(std::localtime(&time_t_), "%Y%m%d_%H%M%S") 
+                << "_" << width << "x" << height << ".bmp";
+        
+        if (save_rgba_as_bmp(cuda_ss.str(), cuda_array_data.data(), width, height)) {
+            std::cout << "    ✓ CUDA array direct data saved as: " << cuda_ss.str() << std::endl;
+        }
+        
+        // 计算CUDA array数据统计
+        size_t cuda_zero_count = 0;
+        float cuda_min_ = cuda_array_data[0], cuda_max_ = cuda_array_data[0];
+        double cuda_sum_ = 0.0;
+        
+        for (size_t i = 0; i < cuda_array_data.size(); ++i) {
+            float val = cuda_array_data[i];
+            if (val == 0.0f) cuda_zero_count++;
+            cuda_min_ = std::min(cuda_min_, val);
+            cuda_max_ = std::max(cuda_max_, val);
+            cuda_sum_ += val;
+        }
+        
+        double cuda_avg_ = cuda_sum_ / cuda_array_data.size();
+        std::cout << "    → CUDA array direct statistics:" << std::endl;
+        std::cout << "      - Zero elements: " << cuda_zero_count << " (" << (100.0 * cuda_zero_count / cuda_array_data.size()) << "%)" << std::endl;
+        std::cout << "      - Data range: [" << cuda_min_ << ", " << cuda_max_ << "]" << std::endl;
+        std::cout << "      - Average value: " << cuda_avg_ << std::endl;
+        
+        // 比较CUDA array和TensorRT输入缓冲区的前几个像素
+        std::cout << "    → Comparing first 4 pixels:" << std::endl;
+        for (int pixel = 0; pixel < 4; ++pixel) {
+            int offset = pixel * 4;
+            std::cout << "      Pixel " << pixel << ":" << std::endl;
+            std::cout << "        CUDA array:    R=" << cuda_array_data[offset+0] << " G=" << cuda_array_data[offset+1] 
+                      << " B=" << cuda_array_data[offset+2] << " A=" << cuda_array_data[offset+3] << std::endl;
+            std::cout << "        TensorRT buf:  R=" << host_input[offset+0] << " G=" << host_input[offset+1] 
+                      << " B=" << host_input[offset+2] << " A=" << host_input[offset+3] << std::endl;
+            
+            // 检查是否完全一致
+            bool identical = true;
+            for (int c = 0; c < 4; ++c) {
+                if (std::abs(cuda_array_data[offset+c] - host_input[offset+c]) > 1e-6f) {
+                    identical = false;
+                    break;
+                }
+            }
+            std::cout << "        Match: " << (identical ? "✓" : "✗") << std::endl;
+        }
+        
+        // 检查整体数据一致性
+        size_t mismatch_count = 0;
+        float max_diff = 0.0f;
+        for (size_t i = 0; i < cuda_array_data.size(); ++i) {
+            float diff = std::abs(cuda_array_data[i] - host_input[i]);
+            if (diff > 1e-6f) {
+                mismatch_count++;
+                max_diff = std::max(max_diff, diff);
+            }
+        }
+        
+        std::cout << "    → Overall data comparison:" << std::endl;
+        std::cout << "      - Mismatched elements: " << mismatch_count << " (" << (100.0 * mismatch_count / cuda_array_data.size()) << "%)" << std::endl;
+        std::cout << "      - Maximum difference: " << max_diff << std::endl;
+        
+        if (mismatch_count == 0) {
+            std::cout << "      ✓ CUDA array and TensorRT buffer data are identical" << std::endl;
+        } else {
+            std::cout << "      ✗ CUDA array and TensorRT buffer data differ!" << std::endl;
+        }
+        
+        // 诊断：检查TensorRT输入的内存布局是否正确
+        std::cout << "    → Analyzing TensorRT input layout..." << std::endl;
+        
+        // 检查是否是NCHW格式 (TensorRT期望的格式)
+        // 对于NCHW: [batch=1][channel=4][height][width]
+        // 计算几个关键位置的索引来验证布局
+        size_t pixel_stride = 4; // RGBA interleaved
+        size_t row_stride = width * pixel_stride;
+        
+        // 中心像素位置
+        size_t center_y = height / 2;
+        size_t center_x = width / 2;
+        size_t center_offset = center_y * row_stride + center_x * pixel_stride;
+        
+        if (center_offset + 3 < host_input.size()) {
+            std::cout << "      - Center pixel (" << center_x << "," << center_y << "): R=" << host_input[center_offset+0] 
+                      << " G=" << host_input[center_offset+1] << " B=" << host_input[center_offset+2] << " A=" << host_input[center_offset+3] << std::endl;
+        }
+        
+        // 检查alpha通道是否合理（大多数应该是1.0）
+        size_t alpha_ones = 0;
+        for (size_t i = 3; i < host_input.size(); i += 4) {
+            if (std::abs(host_input[i] - 1.0f) < 0.01f) {
+                alpha_ones++;
+            }
+        }
+        size_t total_pixels = host_input.size() / 4;
+        std::cout << "      - Alpha channel analysis: " << alpha_ones << "/" << total_pixels 
+                  << " pixels have alpha ≈ 1.0 (" << (100.0 * alpha_ones / total_pixels) << "%)" << std::endl;
+        
+        // 如果大部分alpha不是1.0，可能数据格式有问题
+        if (alpha_ones < total_pixels * 0.8) {
+            std::cout << "      ⚠ WARNING: Low alpha=1.0 ratio suggests possible format issue" << std::endl;
+        }
+        
+        // 保存完整数据后，也进行统计分析
+        size_t rgba_zero_count = 0;
+        size_t rgba_total_count = host_input.size();
+        float rgba_data_min = host_input[0], rgba_data_max = host_input[0];
+        double rgba_data_sum = 0.0;
+        
+        for (size_t i = 0; i < rgba_total_count; ++i) {
+            float val = host_input[i];
+            if (val == 0.0f) rgba_zero_count++;
+            rgba_data_min = std::min(rgba_data_min, val);
+            rgba_data_max = std::max(rgba_data_max, val);
+            rgba_data_sum += val;
+        }
+        
+        double rgba_data_avg = rgba_data_sum / rgba_total_count;
+        std::cout << "Original RGBA texture statistics:" << std::endl;
+        std::cout << "  - Total elements: " << rgba_total_count << std::endl;
+        std::cout << "  - Zero elements: " << rgba_zero_count << " (" << (100.0 * rgba_zero_count / rgba_total_count) << "%)" << std::endl;
+        std::cout << "  - Data range: [" << rgba_data_min << ", " << rgba_data_max << "]" << std::endl;
+        std::cout << "  - Average value: " << rgba_data_avg << std::endl;
+        std::cout << "  - First 4 pixel values:" << std::endl;
+        for (int pixel = 0; pixel < 4; ++pixel) {
+            int offset = pixel * 4;
+            if (offset + 3 < host_input.size()) {
+                std::cout << "    P" << pixel << ": R=" << host_input[offset+0] << " G=" << host_input[offset+1] 
+                          << " B=" << host_input[offset+2] << " A=" << host_input[offset+3] << std::endl;
+            }
+        }
         
         return true;
     }
@@ -342,14 +704,14 @@ public:
             return false;
         }
         
-        nvinfer1::Dims output_dims = context->getTensorShape(engine->getIOTensorName(1));
-        if (output_dims.nbDims != 4) {
+        nvinfer1::Dims actual_output_dims = context->getTensorShape(engine->getIOTensorName(1));
+        if (actual_output_dims.nbDims != 4) {
             return false;
         }
         
-        height = static_cast<UINT>(output_dims.d[2]);
-        width = static_cast<UINT>(output_dims.d[3]); 
-        channels = static_cast<UINT>(output_dims.d[1]);
+        height = static_cast<UINT>(actual_output_dims.d[2]);
+        width = static_cast<UINT>(actual_output_dims.d[3]); 
+        channels = static_cast<UINT>(actual_output_dims.d[1]);
         return true;
     }
     
@@ -366,7 +728,7 @@ public:
 TEST_CASE("Verify RGBA texture for ONNX inference input") {
     // Input file and frame setup
     const char* input_file = "06 4k.mp4";
-    const int frame_index = 0;
+    const int frame_index = 650;
     
     FFMepgContext hw_ctx;
     AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
@@ -469,16 +831,35 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
         REQUIRE(cuda_status == cudaSuccess);
         
         // Copy from CUDA array to linear memory
-        cuda_status = cudaMemcpy2DFromArrayAsync(
+        cuda_status = cudaMemcpy2DFromArray(
             d_temp_buffer, texture_desc.Width * pixel_size,
             cuda_array, 0, 0,
             texture_desc.Width * pixel_size, texture_desc.Height,
-            cudaMemcpyDeviceToDevice, stream
+            cudaMemcpyDeviceToDevice
         );
         REQUIRE(cuda_status == cudaSuccess);
         
         // Synchronize to ensure copy is complete
         cudaStreamSynchronize(stream);
+        
+        // Save complete RGBA texture as BMP
+        std::vector<float> host_rgba_data(texture_desc.Width * texture_desc.Height * 4);
+        cuda_status = cudaMemcpy(host_rgba_data.data(), d_temp_buffer, 
+                                host_rgba_data.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        REQUIRE(cuda_status == cudaSuccess);
+        
+        // Generate filename with timestamp for RGBA texture
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << "rgba_texture_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
+           << "_" << texture_desc.Width << "x" << texture_desc.Height << ".bmp";
+        
+        if (save_rgba_as_bmp(ss.str(), host_rgba_data.data(), texture_desc.Width, texture_desc.Height)) {
+            std::cout << "    ✓ RGBA texture saved as: " << ss.str() << std::endl;
+        } else {
+            std::cout << "    ✗ Failed to save RGBA texture as BMP" << std::endl;
+        }
         
         // Test: Copy some data back to host to verify it's valid
         std::vector<float> host_sample(16); // Sample first 4 pixels (4 components each)
@@ -534,102 +915,252 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
     cleanup_context(&hw_ctx);
 }
 
-TEST_CASE("D3D11 texture to TensorRT inference pipeline") {
-    const char* input_file = "06 4k.mp4";
-    const std::string onnx_model_path = "stereo_module_half_sbs.onnx";
-    const int frame_index = 0;
+// TEST_CASE("D3D11 texture to TensorRT inference pipeline") {
+//     const char* input_file = "06 4k.mp4";
+//     const std::string onnx_model_path = "stereo_module_half_sbs.onnx";
+//     const int frame_index = 650;
     
-    FFMepgContext hw_ctx;
-    AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
+//     FFMepgContext hw_ctx;
+//     AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
     
-    REQUIRE(hw_frame != nullptr);
+//     REQUIRE(hw_frame != nullptr);
     
-    // Convert to RGBA texture
-    ID3D11Texture2D* rgba_texture = convert_color(&hw_ctx, hw_frame);
-    REQUIRE(rgba_texture != nullptr);
+//     // 诊断：检查原始硬件帧的信息
+//     std::cout << "=== Original Hardware Frame Analysis ===" << std::endl;
+//     std::cout << "Frame format: " << av_get_pix_fmt_name((AVPixelFormat)hw_frame->format) << std::endl;
+//     std::cout << "Frame dimensions: " << hw_frame->width << "x" << hw_frame->height << std::endl;
+//     std::cout << "Frame linesize[0]: " << hw_frame->linesize[0] << std::endl;
+//     std::cout << "Frame data[0]: " << (void*)hw_frame->data[0] << std::endl;
     
-    // Get texture dimensions
-    D3D11_TEXTURE2D_DESC texture_desc;
-    rgba_texture->GetDesc(&texture_desc);
+//     // 检查D3D11纹理
+//     ID3D11Texture2D* original_texture = (ID3D11Texture2D*)hw_frame->data[0];
+//     if (original_texture) {
+//         D3D11_TEXTURE2D_DESC original_desc;
+//         original_texture->GetDesc(&original_desc);
+//         std::cout << "Original D3D11 texture format: " << original_desc.Format << std::endl;
+//         std::cout << "Original D3D11 texture dimensions: " << original_desc.Width << "x" << original_desc.Height << std::endl;
+//         std::cout << "Original D3D11 texture usage: " << original_desc.Usage << std::endl;
+//         std::cout << "Original D3D11 texture bind flags: 0x" << std::hex << original_desc.BindFlags << std::dec << std::endl;
+//         std::cout << "Original D3D11 texture misc flags: 0x" << std::hex << original_desc.MiscFlags << std::dec << std::endl;
+//     }
     
-    // Initialize TensorRT engine
-    TensorRTInferenceEngine trt_engine;
-    REQUIRE(trt_engine.initialize(onnx_model_path));
+//     // Convert to RGBA texture
+//     std::cout << "\n=== Color Conversion Analysis ===" << std::endl;
+//     ID3D11Texture2D* rgba_texture = convert_color(&hw_ctx, hw_frame);
+//     REQUIRE(rgba_texture != nullptr);
     
-    // Set up CUDA device for interop
-    int cuda_device = -1;
-    IDXGIDevice* dxgi_device = nullptr;
-    HRESULT hr = hw_ctx.d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
-    REQUIRE(SUCCEEDED(hr));
+//     // Get texture dimensions
+//     D3D11_TEXTURE2D_DESC texture_desc;
+//     rgba_texture->GetDesc(&texture_desc);
     
-    IDXGIAdapter* dxgi_adapter = nullptr;
-    hr = dxgi_device->GetAdapter(&dxgi_adapter); 
-    dxgi_device->Release();
-    REQUIRE(SUCCEEDED(hr));
+//     std::cout << "RGBA texture format: " << texture_desc.Format << std::endl;
+//     std::cout << "RGBA texture dimensions: " << texture_desc.Width << "x" << texture_desc.Height << std::endl;
+//     std::cout << "RGBA texture usage: " << texture_desc.Usage << std::endl;
+//     std::cout << "RGBA texture bind flags: 0x" << std::hex << texture_desc.BindFlags << std::dec << std::endl;
+//     std::cout << "RGBA texture misc flags: 0x" << std::hex << texture_desc.MiscFlags << std::dec << std::endl;
     
-    cudaError_t cuda_status = cudaD3D11GetDevice(&cuda_device, dxgi_adapter);
-    dxgi_adapter->Release();
-    REQUIRE(cuda_status == cudaSuccess);
+//     // 诊断：在注册CUDA之前，先读取D3D11纹理内容
+//     std::cout << "\n=== D3D11 Texture Content Verification ===" << std::endl;
     
-    cuda_status = cudaSetDevice(cuda_device);
-    REQUIRE(cuda_status == cudaSuccess);
+//     // 创建一个可读的临时纹理
+//     D3D11_TEXTURE2D_DESC staging_desc = texture_desc;
+//     staging_desc.Usage = D3D11_USAGE_STAGING;
+//     staging_desc.BindFlags = 0;
+//     staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+//     staging_desc.MiscFlags = 0;
     
-    // Register texture with CUDA
-    cudaGraphicsResource_t cuda_resource = nullptr;
-    cuda_status = cudaGraphicsD3D11RegisterResource(
-        &cuda_resource, rgba_texture, cudaGraphicsRegisterFlagsNone);
-    REQUIRE(cuda_status == cudaSuccess);
+//     ID3D11Texture2D* staging_texture = nullptr;
+//     HRESULT hr = hw_ctx.d3d_device->CreateTexture2D(&staging_desc, nullptr, &staging_texture);
+//     if (SUCCEEDED(hr)) {
+//         // 复制RGBA纹理到staging纹理
+//         hw_ctx.d3d_context->CopyResource(staging_texture, rgba_texture);
+        
+//         // 映射并读取数据
+//         D3D11_MAPPED_SUBRESOURCE mapped_resource;
+//         hr = hw_ctx.d3d_context->Map(staging_texture, 0, D3D11_MAP_READ, 0, &mapped_resource);
+//         if (SUCCEEDED(hr)) {
+//             const float* rgba_data = static_cast<const float*>(mapped_resource.pData);
+            
+//             std::cout << "D3D11 RGBA texture content (first 16 values):" << std::endl;
+//             for (int i = 0; i < 16; ++i) {
+//                 std::cout << "  [" << i << "] = " << rgba_data[i] << std::endl;
+//             }
+            
+//             // 检查第一行的几个像素
+//             std::cout << "First row pixels:" << std::endl;
+//             size_t row_pitch_floats = mapped_resource.RowPitch / sizeof(float);
+//             for (int pixel = 0; pixel < 8 && pixel * 4 < row_pitch_floats; ++pixel) {
+//                 int offset = pixel * 4;
+//                 std::cout << "  Pixel[" << pixel << "]: R=" << rgba_data[offset+0] 
+//                           << " G=" << rgba_data[offset+1] << " B=" << rgba_data[offset+2] 
+//                           << " A=" << rgba_data[offset+3] << std::endl;
+//             }
+            
+//             // 检查中间一行的几个像素
+//             if (texture_desc.Height > 100) {
+//                 size_t middle_row_offset = (texture_desc.Height / 2) * row_pitch_floats;
+//                 std::cout << "Middle row pixels:" << std::endl;
+//                 for (int pixel = 0; pixel < 8 && middle_row_offset + pixel * 4 < row_pitch_floats * texture_desc.Height; ++pixel) {
+//                     int offset = middle_row_offset + pixel * 4;
+//                     std::cout << "  Pixel[" << pixel << "]: R=" << rgba_data[offset+0] 
+//                               << " G=" << rgba_data[offset+1] << " B=" << rgba_data[offset+2] 
+//                               << " A=" << rgba_data[offset+3] << std::endl;
+//                 }
+//             }
+            
+//             // 统计整个纹理的数据分布
+//             size_t total_floats = (mapped_resource.RowPitch / sizeof(float)) * texture_desc.Height;
+//             size_t zero_count = 0;
+//             float min_val = rgba_data[0], max_val = rgba_data[0];
+//             double sum_val = 0.0;
+            
+//             // 只检查有效像素数据，跳过可能的padding
+//             size_t pixels_per_row = texture_desc.Width;
+//             size_t floats_per_row = pixels_per_row * 4; // RGBA
+            
+//             for (size_t row = 0; row < texture_desc.Height; ++row) {
+//                 size_t row_start = row * (mapped_resource.RowPitch / sizeof(float));
+//                 for (size_t col = 0; col < floats_per_row; ++col) {
+//                     size_t index = row_start + col;
+//                     if (index < total_floats) {
+//                         float val = rgba_data[index];
+//                         if (val == 0.0f) zero_count++;
+//                         min_val = std::min(min_val, val);
+//                         max_val = std::max(max_val, val);
+//                         sum_val += val;
+//                     }
+//                 }
+//             }
+            
+//             size_t valid_elements = texture_desc.Width * texture_desc.Height * 4;
+//             double avg_val = sum_val / valid_elements;
+            
+//             std::cout << "D3D11 RGBA texture statistics:" << std::endl;
+//             std::cout << "  - Total valid elements: " << valid_elements << std::endl;
+//             std::cout << "  - Zero elements: " << zero_count << " (" << (100.0 * zero_count / valid_elements) << "%)" << std::endl;
+//             std::cout << "  - Data range: [" << min_val << ", " << max_val << "]" << std::endl;
+//             std::cout << "  - Average value: " << avg_val << std::endl;
+//             std::cout << "  - Row pitch: " << mapped_resource.RowPitch << " bytes" << std::endl;
+//             std::cout << "  - Expected row size: " << texture_desc.Width * 4 * sizeof(float) << " bytes" << std::endl;
+            
+//             // 保存D3D11纹理数据作为参考
+//             std::vector<float> d3d11_rgba_data(texture_desc.Width * texture_desc.Height * 4);
+//             for (size_t row = 0; row < texture_desc.Height; ++row) {
+//                 size_t src_row_start = row * (mapped_resource.RowPitch / sizeof(float));
+//                 size_t dst_row_start = row * texture_desc.Width * 4;
+//                 std::memcpy(&d3d11_rgba_data[dst_row_start], &rgba_data[src_row_start], 
+//                            texture_desc.Width * 4 * sizeof(float));
+//             }
+            
+//             auto now = std::chrono::system_clock::now();
+//             auto time_t = std::chrono::system_clock::to_time_t(now);
+//             std::stringstream ss;
+//             ss << "d3d11_rgba_texture_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
+//                << "_" << texture_desc.Width << "x" << texture_desc.Height << ".bmp";
+            
+//             if (save_rgba_as_bmp(ss.str(), d3d11_rgba_data.data(), texture_desc.Width, texture_desc.Height)) {
+//                 std::cout << "  ✓ D3D11 RGBA texture saved as: " << ss.str() << std::endl;
+//             }
+            
+//             hw_ctx.d3d_context->Unmap(staging_texture, 0);
+//         } else {
+//             std::cout << "  ✗ Failed to map staging texture for reading" << std::endl;
+//         }
+        
+//         staging_texture->Release();
+//     } else {
+//         std::cout << "  ✗ Failed to create staging texture for verification" << std::endl;
+//     }
     
-    // Create CUDA stream for async operations
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
+//     // Initialize TensorRT engine
+//     std::cout << "\n=== TensorRT Initialization ===" << std::endl;
+//     TensorRTInferenceEngine trt_engine;
+//     REQUIRE(trt_engine.initialize(onnx_model_path));
     
-    // Map the CUDA graphics resource to get access to texture data
-    cuda_status = cudaGraphicsMapResources(1, &cuda_resource, stream);
-    REQUIRE(cuda_status == cudaSuccess);
+//     // Set up CUDA device for interop
+//     std::cout << "\n=== CUDA Device Setup ===" << std::endl;
+//     int cuda_device = -1;
+//     IDXGIDevice* dxgi_device = nullptr;
+//     HRESULT hr2 = hw_ctx.d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
+//     REQUIRE(SUCCEEDED(hr2));
     
-    // Get mapped array from the texture
-    cudaArray_t cuda_array;
-    cuda_status = cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0);
-    REQUIRE(cuda_status == cudaSuccess);
+//     IDXGIAdapter* dxgi_adapter = nullptr;
+//     hr2 = dxgi_device->GetAdapter(&dxgi_adapter); 
+//     dxgi_device->Release();
+//     REQUIRE(SUCCEEDED(hr2));
     
-    // Unmap the graphics resource
-    cuda_status = cudaGraphicsUnmapResources(1, &cuda_resource, stream);
-    REQUIRE(cuda_status == cudaSuccess);
+//     cudaError_t cuda_status = cudaD3D11GetDevice(&cuda_device, dxgi_adapter);
+//     dxgi_adapter->Release();
+//     REQUIRE(cuda_status == cudaSuccess);
     
-    // 直接使用 cuda_array 进行推理
-    bool inference_success = trt_engine.infer(
-        cuda_array, texture_desc.Width, texture_desc.Height, stream);
-    REQUIRE(inference_success);
+//     cuda_status = cudaSetDevice(cuda_device);
+//     REQUIRE(cuda_status == cudaSuccess);
     
-    // Get inference results
-    float* output_data = trt_engine.get_output_data();
-    REQUIRE(output_data != nullptr);
+//     std::cout << "CUDA device " << cuda_device << " set successfully" << std::endl;
     
-    // Verify output dimensions
-    UINT out_width, out_height, out_channels;
-    REQUIRE(trt_engine.get_output_dimensions(out_width, out_height, out_channels));
+//     // Register texture with CUDA
+//     std::cout << "\n=== CUDA Graphics Resource Registration ===" << std::endl;
+//     cudaGraphicsResource_t cuda_resource = nullptr;
+//     cuda_status = cudaGraphicsD3D11RegisterResource(
+//         &cuda_resource, rgba_texture, cudaGraphicsRegisterFlagsNone);
+//     REQUIRE(cuda_status == cudaSuccess);
+//     std::cout << "D3D11 texture registered with CUDA successfully" << std::endl;
     
-    std::cout << "Inference completed:" << std::endl;
-    std::cout << "Input: " << texture_desc.Width << "x" << texture_desc.Height << "x4" << std::endl;
-    std::cout << "Output: " << out_width << "x" << out_height << "x" << out_channels << std::endl;
+//     // Create CUDA stream for async operations
+//     cudaStream_t stream;
+//     cudaStreamCreate(&stream);
     
-    // Optional: Copy first few output values to verify
-    std::vector<float> host_output(16);
-    cuda_status = cudaMemcpy(host_output.data(), output_data, 
-                            host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
-    REQUIRE(cuda_status == cudaSuccess);
+//     // Map the CUDA graphics resource to get access to texture data
+//     std::cout << "\n=== CUDA Graphics Resource Mapping ===" << std::endl;
+//     cuda_status = cudaGraphicsMapResources(1, &cuda_resource, stream);
+//     REQUIRE(cuda_status == cudaSuccess);
+//     std::cout << "CUDA graphics resource mapped successfully" << std::endl;
     
-    std::cout << "Sample output values: ";
-    for (int i = 0; i < 4; ++i) {
-        std::cout << host_output[i] << " ";
-    }
-    std::cout << std::endl;
+//     // Get mapped array from the texture
+//     cudaArray_t cuda_array;
+//     cuda_status = cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0);
+//     REQUIRE(cuda_status == cudaSuccess);
+//     std::cout << "CUDA array obtained from mapped resource" << std::endl;
     
-    // Cleanup
-    cudaStreamDestroy(stream);
-    cudaGraphicsUnregisterResource(cuda_resource);
-    rgba_texture->Release();
-    av_frame_free(&hw_frame);
-    cleanup_context(&hw_ctx);
-}
+//     // 在 mapped 状态下进行推理
+//     std::cout << "\n=== TensorRT Inference ===" << std::endl;
+//     bool inference_success = trt_engine.infer(
+//         cuda_array, texture_desc.Width, texture_desc.Height, stream);
+//     REQUIRE(inference_success);
+    
+//     // 推理完成后再 unmap
+//     cuda_status = cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+//     REQUIRE(cuda_status == cudaSuccess);
+    
+//     // Get inference results
+//     float* output_data = trt_engine.get_output_data();
+//     REQUIRE(output_data != nullptr);
+    
+//     // Verify output dimensions
+//     UINT out_width, out_height, out_channels;
+//     REQUIRE(trt_engine.get_output_dimensions(out_width, out_height, out_channels));
+    
+//     std::cout << "\n=== Final Results ===" << std::endl;
+//     std::cout << "Inference completed:" << std::endl;
+//     std::cout << "Input: " << texture_desc.Width << "x" << texture_desc.Height << "x4" << std::endl;
+//     std::cout << "Output: " << out_width << "x" << out_height << "x" << out_channels << std::endl;
+    
+//     // Optional: Copy first few output values to verify
+//     std::vector<float> host_output(16);
+//     cuda_status = cudaMemcpy(host_output.data(), output_data, 
+//                             host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
+//     REQUIRE(cuda_status == cudaSuccess);
+    
+//     std::cout << "Sample output values: ";
+//     for (int i = 0; i < 4; ++i) {
+//         std::cout << host_output[i] << " ";
+//     }
+//     std::cout << std::endl;
+    
+//     // Cleanup
+//     cudaStreamDestroy(stream);
+//     cudaGraphicsUnregisterResource(cuda_resource);
+//     rgba_texture->Release();
+//     av_frame_free(&hw_frame);
+//     cleanup_context(&hw_ctx);
+// }
