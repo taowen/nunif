@@ -25,7 +25,9 @@
 // D3D11VA 头文件已包含在 ffmpeg_wrapper.h 中
 
 // Diagnostic mode toggle - set to true to enable color conversion diagnosis
-constexpr bool ENABLE_COLOR_CONVERSION_DIAGNOSIS = true;
+constexpr bool ENABLE_COLOR_CONVERSION_DIAGNOSIS = false;
+// Diagnostic mode toggle - set to true to enable SBS inference diagnosis
+constexpr bool ENABLE_INFER_SBS_DIAGNOSIS = true;
 
 class MainProgram {
 private:
@@ -41,6 +43,7 @@ private:
     D11FrameQueue convert_color_output;
     D11FrameQueue diagnose_color_output;  // New queue for diagnosis mode
     D11FrameQueue infer_sbs_output;
+    D11FrameQueue diagnose_sbs_output;    // New queue for SBS diagnosis mode
     
     // 添加输出文件名成员变量
     std::string output_filename_;
@@ -108,6 +111,12 @@ public:
             std::cout << "Color conversion diagnosis mode DISABLED\n";
         }
         
+        if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
+            std::cout << "SBS inference diagnosis mode ENABLED\n";
+        } else {
+            std::cout << "SBS inference diagnosis mode DISABLED\n";
+        }
+        
         // Start decode thread
         std::thread decode_th([this]() {
             start_decode_thread(decoder_state_, decode_thread_output);
@@ -125,6 +134,8 @@ public:
         
         std::thread diagnose_th;
         std::thread infer_sbs_th;
+        std::thread diagnose_sbs_th;
+        std::thread encode_th;
         
         if constexpr (ENABLE_COLOR_CONVERSION_DIAGNOSIS) {
             // Start diagnosis thread
@@ -135,20 +146,42 @@ public:
             
             // Start depth inference thread (input from diagnosis thread)
             infer_sbs_th = std::thread([this]() {
-                start_infer_sbs(diagnose_color_output, infer_sbs_output);
+                if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
+                    start_infer_sbs(diagnose_color_output, infer_sbs_output);
+                } else {
+                    start_infer_sbs(diagnose_color_output, diagnose_sbs_output);
+                }
             });
         } else {
             // Start depth inference thread (input directly from color conversion)
             infer_sbs_th = std::thread([this]() {
-                start_infer_sbs(convert_color_output, infer_sbs_output);
+                if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
+                    start_infer_sbs(convert_color_output, infer_sbs_output);
+                } else {
+                    start_infer_sbs(convert_color_output, diagnose_sbs_output);
+                }
             });
         }
         
-        // Start encode thread
-        std::thread encode_th([this]() {
-            start_encode_thread(infer_sbs_output, output_filename_,
-                decoder_state_.video_color_info, d3d11_device, d3d11_context);
-        });
+        if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
+            // Start SBS diagnosis thread
+            diagnose_sbs_th = std::thread([this]() {
+                start_dump_d11_frame_thread(infer_sbs_output, diagnose_sbs_output,
+                                                  d3d11_device, d3d11_context);
+            });
+            
+            // Start encode thread (input from SBS diagnosis)
+            encode_th = std::thread([this]() {
+                start_encode_thread(diagnose_sbs_output, output_filename_,
+                    decoder_state_.video_color_info, d3d11_device, d3d11_context);
+            });
+        } else {
+            // Start encode thread (input directly from SBS inference)
+            encode_th = std::thread([this]() {
+                start_encode_thread(diagnose_sbs_output, output_filename_,
+                    decoder_state_.video_color_info, d3d11_device, d3d11_context);
+            });
+        }
         
         // Wait for all threads to complete
         decode_th.join();
@@ -159,6 +192,11 @@ public:
         }
         
         infer_sbs_th.join();
+        
+        if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
+            diagnose_sbs_th.join();
+        }
+        
         encode_th.join();
         
         std::cout << "=== Multi-threaded Processing Completed ===\n";
