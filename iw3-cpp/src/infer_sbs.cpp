@@ -249,11 +249,20 @@ public:
         
         // Get output dimensions from the context after setting input shape
         nvinfer1::Dims output_dims_actual = context->getTensorShape(engine->getIOTensorName(1));
-        std::cout << "    → Actual output dimensions from context: [";
-        for (int i = 0; i < output_dims_actual.nbDims; ++i) {
-            std::cout << output_dims_actual.d[i] << (i == output_dims_actual.nbDims - 1 ? "" : ", ");
+        
+        // 添加详细的输出维度检查
+        UINT actual_output_channels = static_cast<UINT>(output_dims_actual.d[1]);
+        UINT actual_output_height = static_cast<UINT>(output_dims_actual.d[2]);
+        UINT actual_output_width = static_cast<UINT>(output_dims_actual.d[3]);
+        
+        std::cout << "    → Input dimensions: " << width << "x" << height << std::endl;
+        std::cout << "    → Output dimensions: " << actual_output_width << "x" << actual_output_height << "x" << actual_output_channels << std::endl;
+        
+        // 检查输出尺寸是否与输入匹配
+        if (actual_output_height != height || actual_output_width != width) {
+            std::cout << "    ⚠ WARNING: Output dimensions don't match input dimensions!" << std::endl;
+            std::cout << "    → This might cause the white strip issue" << std::endl;
         }
-        std::cout << "]" << std::endl;
 
         size_t output_elements = 1;
         for (int i = 0; i < output_dims_actual.nbDims; ++i) {
@@ -265,11 +274,6 @@ public:
         }
         output_size = output_elements * sizeof(float);
 
-        // Extract actual dimensions from TensorRT output (NCHW format: [1, 4, H, W])
-        UINT actual_output_height = static_cast<UINT>(output_dims_actual.d[2]);
-        UINT actual_output_width = static_cast<UINT>(output_dims_actual.d[3]);
-        UINT actual_output_channels = static_cast<UINT>(output_dims_actual.d[1]);
-        
         // Reallocate input device memory if needed
         if (current_input_size < input_size) {
             if (d_input) {
@@ -310,6 +314,98 @@ public:
         std::cout << "    → Input size: " << input_size << " bytes" << std::endl;
         std::cout << "    → Output size: " << output_size << " bytes" << std::endl;
         
+        // Get inference output data
+        float* cuda_output_data = d_output;
+        
+        // 添加调试代码：检查输出数据的一些样本值
+        std::cout << "    → Checking output data samples..." << std::endl;
+        
+        // 创建一个小的主机缓冲区来检查输出数据
+        const int sample_size = 16; // 检查前16个像素
+        std::vector<float> sample_data(sample_size * actual_output_channels);
+        checkCudaErrors(cudaMemcpy(sample_data.data(), cuda_output_data, 
+                                 sample_size * actual_output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        std::cout << "      - First " << sample_size << " pixels (RGBA):" << std::endl;
+        for (int i = 0; i < sample_size && i < 4; ++i) {
+            std::cout << "        Pixel " << i << ": ("
+                     << sample_data[i*4] << ", " << sample_data[i*4+1] << ", "
+                     << sample_data[i*4+2] << ", " << sample_data[i*4+3] << ")" << std::endl;
+        }
+        
+        // 检查中间区域的一些像素（可能的白色区域）
+        size_t middle_offset = (actual_output_width * actual_output_height / 2) * actual_output_channels;
+        std::vector<float> middle_sample(sample_size * actual_output_channels);
+        checkCudaErrors(cudaMemcpy(middle_sample.data(), cuda_output_data + middle_offset/sizeof(float), 
+                                 sample_size * actual_output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+        
+        std::cout << "      - Middle region pixels (RGBA):" << std::endl;
+        for (int i = 0; i < sample_size && i < 4; ++i) {
+            std::cout << "        Pixel " << i << ": ("
+                     << middle_sample[i*4] << ", " << middle_sample[i*4+1] << ", "
+                     << middle_sample[i*4+2] << ", " << middle_sample[i*4+3] << ")" << std::endl;
+        }
+        
+        // 检查输出数据中是否有大量的1.0值（白色）
+        const int check_stride = actual_output_width * actual_output_height / 100; // 每1%检查一次
+        std::vector<float> spot_check(actual_output_channels);
+        int white_pixel_count = 0;
+        const int total_checks = 20;
+        
+        for (int i = 0; i < total_checks; ++i) {
+            size_t offset = i * check_stride * actual_output_channels;
+            if (offset + actual_output_channels <= actual_output_width * actual_output_height * actual_output_channels) {
+                checkCudaErrors(cudaMemcpy(spot_check.data(), cuda_output_data + offset, 
+                                         actual_output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+                
+                // 检查是否为白色像素（所有通道都接近1.0）
+                bool is_white = true;
+                for (int c = 0; c < 3; ++c) { // 只检查RGB，忽略Alpha
+                    if (spot_check[c] < 0.9f) {
+                        is_white = false;
+                        break;
+                    }
+                }
+                if (is_white) white_pixel_count++;
+            }
+        }
+        
+        std::cout << "      - White pixel ratio in spot check: " << white_pixel_count << "/" << total_checks 
+                 << " (" << (white_pixel_count * 100.0f / total_checks) << "%)" << std::endl;
+        
+        // 添加 TensorRT 输出维度的详细检查
+        std::cout << "    → Detailed TensorRT output analysis:" << std::endl;
+        std::cout << "      - Expected output: " << width << "x" << height << "x4" << std::endl;
+        std::cout << "      - Actual output dims: ";
+        for (int i = 0; i < output_dims_actual.nbDims; ++i) {
+            std::cout << output_dims_actual.d[i];
+            if (i < output_dims_actual.nbDims - 1) std::cout << "x";
+        }
+        std::cout << std::endl;
+
+        // 验证输出格式
+        if (output_dims_actual.nbDims != 4) {
+            std::cerr << "    ✗ Unexpected output dimensions count: " << output_dims_actual.nbDims << " (expected: 4)" << std::endl;
+            return false;
+        }
+
+        if (output_dims_actual.d[0] != 1) {
+            std::cerr << "    ✗ Unexpected batch size: " << output_dims_actual.d[0] << " (expected: 1)" << std::endl;
+            return false;
+        }
+        
+        // 检查输出内存布局
+        size_t expected_output_size = static_cast<size_t>(output_dims_actual.d[0]) * 
+                                     static_cast<size_t>(output_dims_actual.d[1]) * 
+                                     static_cast<size_t>(output_dims_actual.d[2]) * 
+                                     static_cast<size_t>(output_dims_actual.d[3]) * sizeof(float);
+        std::cout << "      - Expected output buffer size: " << expected_output_size << " bytes" << std::endl;
+        std::cout << "      - Actual output buffer size: " << output_size << " bytes" << std::endl;
+        
+        if (expected_output_size != output_size) {
+            std::cerr << "    ⚠ Output buffer size mismatch!" << std::endl;
+        }
+        
         return true;
     }
     
@@ -328,9 +424,9 @@ public:
             return false;
         }
         
-        height = static_cast<UINT>(output_dims.d[2]);
-        width = static_cast<UINT>(output_dims.d[3]); 
         channels = static_cast<UINT>(output_dims.d[1]);
+        height = static_cast<UINT>(output_dims.d[2]);
+        width = static_cast<UINT>(output_dims.d[3]);
         return true;
     }
     
@@ -508,14 +604,62 @@ bool write_cuda_output_to_d3d11(float* cuda_output_data, UINT width, UINT height
         return false;
     }
     
-    // Copy CUDA output data to D3D11 texture (synchronous)
-    // Note: Using synchronous version as requested
+    // 获取实际的输出纹理描述
+    D3D11_TEXTURE2D_DESC texture_desc;
+    d3d11_output_texture->GetDesc(&texture_desc);
+    
+    std::cout << "    → CUDA output size: " << width << "x" << height << "x" << channels << std::endl;
+    std::cout << "    → D3D11 texture size: " << texture_desc.Width << "x" << texture_desc.Height << std::endl;
+    
+    // 使用实际的纹理尺寸，而不是传入的参数
+    UINT actual_width = std::min(width, texture_desc.Width);
+    UINT actual_height = std::min(height, texture_desc.Height);
+    
+    // 如果尺寸不匹配，先清空纹理
+    if (width != texture_desc.Width || height != texture_desc.Height) {
+        std::cout << "    ⚠ Size mismatch detected, clearing texture first" << std::endl;
+        
+        // 创建一个临时的白色数据来填充纹理
+        size_t temp_size = texture_desc.Width * texture_desc.Height * channels * sizeof(float);
+        float* temp_white_data = nullptr;
+        checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&temp_white_data), temp_size));
+        
+        // 创建主机端白色数据，然后拷贝到设备
+        std::vector<float> host_white_data(texture_desc.Width * texture_desc.Height * channels, 1.0f);
+        checkCudaErrors(cudaMemcpy(temp_white_data, host_white_data.data(), temp_size, cudaMemcpyHostToDevice));
+        
+        // 先用白色填充整个纹理
+        cuda_result = cudaMemcpy2DToArray(
+            cuda_array, 0, 0,
+            temp_white_data,
+            texture_desc.Width * channels * sizeof(float),
+            texture_desc.Width * channels * sizeof(float),
+            texture_desc.Height,
+            cudaMemcpyDeviceToDevice
+        );
+        
+        checkCudaErrors(cudaFree(temp_white_data));
+        
+        if (cuda_result != cudaSuccess) {
+            std::cerr << "Failed to clear texture: " << cudaGetErrorString(cuda_result) << "\n";
+            return false;
+        }
+    }
+    
+    // 输出详细的拷贝参数用于调试
+    std::cout << "    → Copy parameters:" << std::endl;
+    std::cout << "      - Source pitch: " << width * channels * sizeof(float) << " bytes" << std::endl;
+    std::cout << "      - Copy width: " << actual_width * channels * sizeof(float) << " bytes" << std::endl;
+    std::cout << "      - Copy height: " << actual_height << " rows" << std::endl;
+    std::cout << "      - Total copy size: " << (actual_width * channels * sizeof(float) * actual_height) << " bytes" << std::endl;
+    
+    // 然后拷贝实际的输出数据
     cuda_result = cudaMemcpy2DToArray(
         cuda_array, 0, 0,                              // destination: array, x_offset, y_offset
         cuda_output_data,                              // source: CUDA device memory
         width * channels * sizeof(float),             // source pitch
-        width * channels * sizeof(float),             // width in bytes
-        height,                                        // height
+        actual_width * channels * sizeof(float),      // width in bytes (使用实际宽度)
+        actual_height,                                 // height (使用实际高度)
         cudaMemcpyDeviceToDevice                       // copy type
     );
     
@@ -677,10 +821,7 @@ void start_infer_sbs(
                 continue;
             }
 
-            // Get inference output data
-            float* cuda_output_data = g_inference_engine->get_output_data();
-            
-            // Get output dimensions from inference engine
+            // Get output dimensions from inference engine first
             UINT output_width, output_height, output_channels;
             if (!g_inference_engine->get_output_dimensions(output_width, output_height, output_channels)) {
                 std::cerr << "    ✗ Failed to get output dimensions for frame " << processed_count << "\n";
@@ -689,6 +830,65 @@ void start_infer_sbs(
                 checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
                 continue;
             }
+            
+            // Get inference output data
+            float* cuda_output_data = g_inference_engine->get_output_data();
+            
+            // 添加调试代码：检查输出数据的一些样本值
+            std::cout << "    → Checking output data samples..." << std::endl;
+            
+            // 创建一个小的主机缓冲区来检查输出数据
+            const int sample_size = 16; // 检查前16个像素
+            std::vector<float> sample_data(sample_size * output_channels);
+            checkCudaErrors(cudaMemcpy(sample_data.data(), cuda_output_data, 
+                                     sample_size * output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+            
+            std::cout << "      - First " << sample_size << " pixels (RGBA):" << std::endl;
+            for (int i = 0; i < sample_size && i < 4; ++i) {
+                std::cout << "        Pixel " << i << ": ("
+                         << sample_data[i*4] << ", " << sample_data[i*4+1] << ", "
+                         << sample_data[i*4+2] << ", " << sample_data[i*4+3] << ")" << std::endl;
+            }
+            
+            // 检查中间区域的一些像素（可能的白色区域）
+            size_t middle_offset = (output_width * output_height / 2) * output_channels;
+            std::vector<float> middle_sample(sample_size * output_channels);
+            checkCudaErrors(cudaMemcpy(middle_sample.data(), cuda_output_data + middle_offset/sizeof(float), 
+                                     sample_size * output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+            
+            std::cout << "      - Middle region pixels (RGBA):" << std::endl;
+            for (int i = 0; i < sample_size && i < 4; ++i) {
+                std::cout << "        Pixel " << i << ": ("
+                         << middle_sample[i*4] << ", " << middle_sample[i*4+1] << ", "
+                         << middle_sample[i*4+2] << ", " << middle_sample[i*4+3] << ")" << std::endl;
+            }
+            
+            // 检查输出数据中是否有大量的1.0值（白色）
+            const int check_stride = output_width * output_height / 100; // 每1%检查一次
+            std::vector<float> spot_check(output_channels);
+            int white_pixel_count = 0;
+            const int total_checks = 20;
+            
+            for (int i = 0; i < total_checks; ++i) {
+                size_t offset = i * check_stride * output_channels;
+                if (offset + output_channels <= output_width * output_height * output_channels) {
+                    checkCudaErrors(cudaMemcpy(spot_check.data(), cuda_output_data + offset, 
+                                             output_channels * sizeof(float), cudaMemcpyDeviceToHost));
+                    
+                    // 检查是否为白色像素（所有通道都接近1.0）
+                    bool is_white = true;
+                    for (int c = 0; c < 3; ++c) { // 只检查RGB，忽略Alpha
+                        if (spot_check[c] < 0.9f) {
+                            is_white = false;
+                            break;
+                        }
+                    }
+                    if (is_white) white_pixel_count++;
+                }
+            }
+            
+            std::cout << "      - White pixel ratio in spot check: " << white_pixel_count << "/" << total_checks 
+                     << " (" << (white_pixel_count * 100.0f / total_checks) << "%)" << std::endl;
             
             std::cout << "    → Output dimensions: " << output_width << "x" << output_height << "x" << output_channels << "\n";
             

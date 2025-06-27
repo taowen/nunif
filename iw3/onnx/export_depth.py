@@ -17,8 +17,8 @@ from nunif.utils.ui import TorchHubDir
 from nunif.logger import logger
 from iw3.backward_warp import apply_divergence_nn_LR
 
-img_path1 = "C:/games/nunif/debug_textures/frame_2_sbs_infer.png"
-img_path2 = "C:/games/nunif/debug_textures/frame_2_sbs_infer.png"
+img_path1 = "C:/games/nunif/debug_textures/frame_5_color_conv.png"
+img_path2 = "C:/games/nunif/debug_textures/frame_5_color_conv.png"
 logger.debug(f"load two images")
 img1 = Image.open(img_path1).convert("RGB")
 img2 = Image.open(img_path2).convert("RGB")
@@ -58,34 +58,42 @@ class StereoDepthModule(nn.Module):
 
         # Extract RGB channels (drop alpha channel for processing)
         x_rgb = x[:, :3, :, :]  # Take first 3 channels (RGB)
+        B, C, H, W = x_rgb.shape
+        alpha_channel = torch.ones((B, 1, H, W), dtype=x_rgb.dtype, device=x_rgb.device)
+        x_rgb_restored = torch.cat([x_rgb, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
+        # 转换为NHWC格式输出
+        return x_rgb_restored.permute(0, 2, 3, 1)  # (B, H, W, 4)
 
-        depth = self.depth_model_wrapper.infer(
-            x_rgb, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
-        )
-        depth = self.depth_model_wrapper.minmax_normalize_chw(depth)  # BCHW
-        depth = mapper(depth)
+        # depth = self.depth_model_wrapper.infer(
+        #     x_rgb, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
+        # )
+        # depth = self.depth_model_wrapper.minmax_normalize_chw(depth)  # BCHW
+        # depth = mapper(depth)
 
-        left, right = apply_divergence_nn_LR(
-            self.side_model_wrapper,
-            x_rgb,  # Use RGB data for side model
-            depth,
-            divergence=2.0,
-            convergence=0.5,
-            steps=None,
-            mapper='none',
-            synthetic_view='both',
-            preserve_screen_border=False,
-            enable_amp=False
-        )
+        # left, right = apply_divergence_nn_LR(
+        #     self.side_model_wrapper,
+        #     x_rgb,  # Use RGB data for side model
+        #     depth,
+        #     divergence=2.0,
+        #     convergence=0.5,
+        #     steps=None,
+        #     mapper='none',
+        #     synthetic_view='both',
+        #     preserve_screen_border=False,
+        #     enable_amp=False
+        # )
         
-        # Only output left eye for color diagnostics
-        # Keep RGB output as RGB format (no channel reordering needed)  
-        # Add alpha channel (set to 1.0)
-        B, C, H, W = left.shape
-        alpha_channel = torch.ones((B, 1, H, W), dtype=left.dtype, device=left.device)
-        left_rgba = torch.cat([left, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
+        # # Only output left eye for color diagnostics
+        # # Keep RGB output as RGB format (no channel reordering needed)  
+        # # Add alpha channel (set to 1.0)
+        # B, C, H, W = left.shape
+        # alpha_channel = torch.ones((B, 1, H, W), dtype=left.dtype, device=left.device)
+        # left_rgba = torch.cat([left, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
         
-        return left_rgba
+        # # 转换为NHWC格式输出
+        # left_rgba_nhwc = left_rgba.permute(0, 2, 3, 1)  # (B, H, W, 4)
+        
+        # return left_rgba_nhwc
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
@@ -126,7 +134,11 @@ with torch.inference_mode():
 os.makedirs("tmp", exist_ok=True)
 for idx in range(left_eye.shape[0]):
     logger.debug(f"Saving left_eye_{idx}.png shape: {left_eye[idx].shape}")
-    TF.to_pil_image(left_eye[idx]).save(f"tmp/left_eye_{idx}.png")
+    # 由于输出已经是NHWC格式(H, W, 4)，需要转换为CHW格式用于保存
+    left_eye_chw = left_eye[idx].permute(2, 0, 1)  # (H, W, 4) -> (4, H, W)
+    # 只保存RGB通道
+    left_eye_rgb = left_eye_chw[:3]  # 取前3个通道 (3, H, W)
+    TF.to_pil_image(left_eye_rgb).save(f"tmp/left_eye_{idx}.png")
 print('done')
 
 # 验证 ONNX 推理结果和 PyTorch 输出一致性
@@ -150,9 +162,12 @@ compare_outputs(torch_left_eye, onnx_left_eye, "Left Eye")
 # 保存 ONNX 推理输出的图片
 for idx in range(onnx_left_eye.shape[0]):
     logger.debug(f"Saving onnx_left_eye_{idx}.png shape: {onnx_left_eye[idx].shape}")
-    # 将 numpy 数组转换为 torch tensor，然后转换为 PIL 图像
-    onnx_tensor = torch.from_numpy(onnx_left_eye[idx])
-    TF.to_pil_image(onnx_tensor).save(f"tmp/onnx_left_eye_{idx}.png")
+    # ONNX输出也是NHWC格式(H, W, 4)，需要转换为CHW格式用于保存
+    onnx_tensor = torch.from_numpy(onnx_left_eye[idx])  # (H, W, 4)
+    onnx_tensor_chw = onnx_tensor.permute(2, 0, 1)  # (H, W, 4) -> (4, H, W)
+    # 只保存RGB通道
+    onnx_tensor_rgb = onnx_tensor_chw[:3]  # 取前3个通道 (3, H, W)
+    TF.to_pil_image(onnx_tensor_rgb).save(f"tmp/onnx_left_eye_{idx}.png")
 
 print(f"Saved PyTorch outputs: tmp/left_eye_0.png, tmp/left_eye_1.png")
 print(f"Saved ONNX outputs: tmp/onnx_left_eye_0.png, tmp/onnx_left_eye_1.png")
