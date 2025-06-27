@@ -1,273 +1,517 @@
 #!/usr/bin/env python3
 """
-Analysis script for color conversion debugging
-Reads PNG files exported from the C++ diagnose thread and analyzes color conversion quality
+DDS文件颜色转换分析工具
+用于对比同一帧在颜色转换前后的差异，分析颜色输出异常的原因
 """
 
 import os
 import sys
-import glob
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
-import argparse
 from pathlib import Path
+import argparse
+from typing import Optional, Tuple, Dict, Any
+import struct
 
-def analyze_single_frame(image_path):
-    """Analyze a single frame for color conversion issues"""
-    try:
-        # Load image
-        img = Image.open(image_path).convert('RGB')
-        img_array = np.array(img, dtype=np.float32) / 255.0  # Normalize to [0,1]
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("Warning: PIL not available, will use basic DDS reading")
+
+class DDSReader:
+    """DDS文件读取器"""
+    
+    # DDS格式常量
+    DDS_MAGIC = b'DDS '
+    DDSD_CAPS = 0x1
+    DDSD_HEIGHT = 0x2
+    DDSD_WIDTH = 0x4
+    DDSD_PITCH = 0x8
+    DDSD_PIXELFORMAT = 0x1000
+    DDSD_MIPMAPCOUNT = 0x20000
+    DDSD_LINEARSIZE = 0x80000
+    DDSD_DEPTH = 0x800000
+    
+    # DDPF Flags
+    DDPF_RGB = 0x40
+    DDPF_FOURCC = 0x4
+    
+    # DXGI格式
+    DXGI_FORMAT_R32G32B32A32_FLOAT = 2
+    # DX9 formats (FourCC)
+    FOURCC_A32B32G32R32F = 116
+    
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.header = None
+        self.data = None
         
-        height, width, channels = img_array.shape
+    def read_dds(self) -> Optional[np.ndarray]:
+        """读取DDS文件"""
+        try:
+            with open(self.filepath, 'rb') as f:
+                # 读取DDS magic
+                magic = f.read(4)
+                if magic != self.DDS_MAGIC:
+                    print(f"Error: {self.filepath} is not a valid DDS file")
+                    return None
+                
+                # 读取DDS头部 (124字节)
+                header_data = f.read(124)
+                header = self._parse_header(header_data)
+                
+                if header is None:
+                    return None
+                
+                self.header = header
+                
+                # 检查是否有DX10扩展头部
+                has_dx10_header = False
+                dxgi_format = 0
+                if header['ddspf_fourcc'] == b'DX10':
+                    has_dx10_header = True
+                    dx10_header = f.read(20)  # DX10头部20字节
+                    dxgi_format = struct.unpack('<I', dx10_header[:4])[0]
+                
+                # 计算数据大小
+                width = header['width']
+                height = header['height']
+                
+                if has_dx10_header:
+                    if dxgi_format == self.DXGI_FORMAT_R32G32B32A32_FLOAT:
+                        print("Detected R32G32B32A32_FLOAT format")
+                        expected_size = width * height * 16
+                        data = f.read(expected_size)
+                        float_data = np.frombuffer(data, dtype=np.float32)
+                        return float_data.reshape((height, width, 4))
+                    else:
+                        print(f"Warning: Unexpected DXGI format: {dxgi_format}")
+                else:
+                    # Legacy DX9 path
+                    flags = header['ddspf_flags']
+                    
+                    if flags & self.DDPF_FOURCC:
+                        if header['ddspf_fourcc'] == b'DX10':
+                            has_dx10_header = True
+                            dx10_header = f.read(20)  # DX10头部20字节
+                            dxgi_format = struct.unpack('<I', dx10_header[:4])[0]
+                        else:
+                            fourcc_val = struct.unpack('<I', header['ddspf_fourcc'])[0]
+                            if fourcc_val == self.FOURCC_A32B32G32R32F:
+                                print("Detected A32B32G32R32F (legacy DX9) format")
+                                expected_size = width * height * 16
+                                data = f.read(expected_size)
+                                float_data = np.frombuffer(data, dtype=np.float32)
+                                return float_data.reshape((height, width, 4))
+                            else:
+                                print(f"Unsupported FourCC: {header['ddspf_fourcc']} ({fourcc_val})")
+                    elif flags & self.DDPF_RGB:
+                        if header['ddspf_bitcount'] == 128:
+                            print("Detected uncompressed RGBA 128-bit (likely float) format")
+                            expected_size = width * height * 16
+                            data = f.read(expected_size)
+                            float_data = np.frombuffer(data, dtype=np.float32)
+                            return float_data.reshape((height, width, 4))
+                        elif header['ddspf_bitcount'] == 32:
+                            print("Detected uncompressed 32-bit RGBA format")
+                            expected_size = width * height * 4
+                            data = f.read(expected_size)
+                            byte_data = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 4))
+                            
+                            r_mask = header['ddspf_rbitmask']
+                            a_mask = header['ddspf_abitmask']
+
+                            rgba_image = np.zeros((height, width, 4), dtype=np.float32)
+
+                            if r_mask == 0x00ff0000:  # BGRA
+                                print("Converting from BGRA to RGBA")
+                                rgba_image[..., :3] = byte_data[..., [2, 1, 0]] / 255.0
+                            elif r_mask == 0x000000ff:  # RGBA
+                                print("Assuming RGBA byte order")
+                                rgba_image[..., :3] = byte_data[..., :3] / 255.0
+                            else:
+                                print(f"Unsupported bitmask for 32bpp: R={r_mask:x}. Treating as RGBA.")
+                                rgba_image[..., :3] = byte_data[..., :3] / 255.0
+                            
+                            if a_mask != 0:
+                                rgba_image[..., 3] = byte_data[..., 3] / 255.0
+                            else:
+                                rgba_image[..., 3] = 1.0
+                            
+                            return rgba_image
+                        elif header['ddspf_bitcount'] == 24:
+                            print("Detected uncompressed 24-bit RGB format")
+                            expected_size = width * height * 3
+                            data = f.read(expected_size)
+                            byte_data = np.frombuffer(data, dtype=np.uint8).reshape((height, width, 3))
+
+                            rgba_image = np.zeros((height, width, 4), dtype=np.float32)
+                            r_mask = header['ddspf_rbitmask']
+
+                            if r_mask == 0x00ff0000: # BGR
+                                 print("Converting from BGR to RGBA")
+                                 rgba_image[..., :3] = byte_data[..., [2, 1, 0]] / 255.0
+                            elif r_mask == 0x000000ff: # RGB
+                                 print("Assuming RGB byte order")
+                                 rgba_image[..., :3] = byte_data[..., :3] / 255.0
+                            else:
+                                print(f"Unsupported bitmask for 24bpp: R={r_mask:x}. Treating as RGB.")
+                                rgba_image[..., :3] = byte_data[..., :3] / 255.0
+                            
+                            rgba_image[..., 3] = 1.0
+
+                            return rgba_image
+                        else:
+                            print(f"Unsupported bitcount for uncompressed RGB: {header['ddspf_bitcount']}")
+                    else:
+                        print(f"Unsupported pixel format flags: {flags:#x}")
+
+                print(f"Unsupported format in {self.filepath}")
+                return None
+                    
+        except Exception as e:
+            print(f"Error reading {self.filepath}: {e}")
+            return None
+    
+    def _parse_header(self, header_data: bytes) -> Optional[Dict[str, Any]]:
+        """解析DDS头部"""
+        try:
+            # 解析基本头部信息
+            header = {}
+            
+            # 偏移量定义
+            header['size'] = struct.unpack('<I', header_data[0:4])[0]
+            header['flags'] = struct.unpack('<I', header_data[4:8])[0]
+            header['height'] = struct.unpack('<I', header_data[8:12])[0]
+            header['width'] = struct.unpack('<I', header_data[12:16])[0]
+            header['pitch'] = struct.unpack('<I', header_data[16:20])[0]
+            header['depth'] = struct.unpack('<I', header_data[20:24])[0]
+            header['mipmapcount'] = struct.unpack('<I', header_data[24:28])[0]
+            
+            # 像素格式 (从偏移76开始的32字节)
+            pf_start = 72
+            header['ddspf_size'] = struct.unpack('<I', header_data[pf_start:pf_start+4])[0]
+            header['ddspf_flags'] = struct.unpack('<I', header_data[pf_start+4:pf_start+8])[0]
+            header['ddspf_fourcc'] = header_data[pf_start+8:pf_start+12]
+            header['ddspf_bitcount'] = struct.unpack('<I', header_data[pf_start+12:pf_start+16])[0]
+            header['ddspf_rbitmask'] = struct.unpack('<I', header_data[pf_start+16:pf_start+20])[0]
+            header['ddspf_gbitmask'] = struct.unpack('<I', header_data[pf_start+20:pf_start+24])[0]
+            header['ddspf_bbitmask'] = struct.unpack('<I', header_data[pf_start+24:pf_start+28])[0]
+            header['ddspf_abitmask'] = struct.unpack('<I', header_data[pf_start+28:pf_start+32])[0]
+            
+            return header
+            
+        except Exception as e:
+            print(f"Error parsing DDS header: {e}")
+            return None
+
+class ColorAnalyzer:
+    """颜色分析器"""
+    
+    def __init__(self):
+        self.results = {}
         
-        # Basic statistics
-        stats = {
-            'path': image_path,
-            'dimensions': (width, height),
-            'mean_rgb': np.mean(img_array, axis=(0,1)),
-            'std_rgb': np.std(img_array, axis=(0,1)),
-            'min_rgb': np.min(img_array, axis=(0,1)),
-            'max_rgb': np.max(img_array, axis=(0,1)),
+    def analyze_frame_pair(self, frame_num: int, before_data: np.ndarray, after_data: np.ndarray) -> Dict[str, Any]:
+        """分析同一帧转换前后的差异"""
+        analysis = {
+            'frame_number': frame_num,
+            'before_shape': before_data.shape,
+            'after_shape': after_data.shape,
+            'shape_match': before_data.shape == after_data.shape
         }
         
-        # Check for common issues
-        issues = []
+        if not analysis['shape_match']:
+            print(f"Warning: Frame {frame_num} shape mismatch - Before: {before_data.shape}, After: {after_data.shape}")
+            return analysis
         
-        # Check for clipped values (pure black/white regions)
-        black_pixels = np.sum(np.all(img_array < 0.01, axis=2))
-        white_pixels = np.sum(np.all(img_array > 0.99, axis=2))
-        total_pixels = width * height
-        
-        black_ratio = black_pixels / total_pixels
-        white_ratio = white_pixels / total_pixels
-        
-        if black_ratio > 0.1:  # More than 10% black pixels
-            issues.append(f"High black pixel ratio: {black_ratio:.3f}")
-        if white_ratio > 0.1:  # More than 10% white pixels
-            issues.append(f"High white pixel ratio: {white_ratio:.3f}")
-            
-        # Check for unusual color distribution
-        gray_pixels = np.sum(np.abs(img_array[:,:,0] - img_array[:,:,1]) < 0.05) / total_pixels
-        if gray_pixels > 0.8:
-            issues.append(f"Image appears too grayscale: {gray_pixels:.3f}")
-            
-        # Check for color range issues
-        color_range = stats['max_rgb'] - stats['min_rgb']
-        if np.any(color_range < 0.1):
-            issues.append(f"Low color range detected: R={color_range[0]:.3f}, G={color_range[1]:.3f}, B={color_range[2]:.3f}")
-            
-        # Check for color bias (one channel dominant)
-        channel_dominance = stats['mean_rgb'] / np.mean(stats['mean_rgb'])
-        if np.max(channel_dominance) > 1.5 or np.min(channel_dominance) < 0.5:
-            issues.append(f"Color bias detected: R={channel_dominance[0]:.3f}, G={channel_dominance[1]:.3f}, B={channel_dominance[2]:.3f}")
-            
-        stats['issues'] = issues
-        stats['black_ratio'] = black_ratio
-        stats['white_ratio'] = white_ratio
-        stats['gray_ratio'] = gray_pixels
-        
-        return stats, img_array
-        
-    except Exception as e:
-        print(f"Error analyzing {image_path}: {e}")
-        return None, None
+        # NOTE: Compare only the left half, as 'after' is a side-by-side image
+        # and its right half is a synthetic view.
+        width = before_data.shape[1]
+        half_width = width // 2
+        before_data_left = before_data[:, :half_width, :]
+        after_data_left = after_data[:, :half_width, :]
 
-def create_analysis_plots(frames_data, output_dir):
-    """Create analysis plots"""
-    if not frames_data:
-        print("No valid frames to plot")
-        return
+        # 计算基本统计信息
+        analysis['before_stats'] = self._calculate_stats(before_data_left)
+        analysis['after_stats'] = self._calculate_stats(after_data_left)
         
-    os.makedirs(output_dir, exist_ok=True)
+        # 计算差异
+        diff = after_data_left - before_data_left
+        analysis['diff_stats'] = self._calculate_stats(diff)
+        
+        # 计算各通道的差异
+        analysis['channel_diff'] = {}
+        channel_names = ['R', 'G', 'B', 'A']
+        for i, channel in enumerate(channel_names):
+            if i < before_data.shape[2]:
+                before_channel = before_data_left[:, :, i]
+                after_channel = after_data_left[:, :, i]
+                diff_channel = after_channel - before_channel
+                
+                analysis['channel_diff'][channel] = {
+                    'mean_diff': np.mean(diff_channel),
+                    'max_diff': np.max(np.abs(diff_channel)),
+                    'std_diff': np.std(diff_channel),
+                    'before_range': (np.min(before_channel), np.max(before_channel)),
+                    'after_range': (np.min(after_channel), np.max(after_channel))
+                }
+        
+        # 检测异常区域
+        analysis['anomalies'] = self._detect_anomalies(before_data_left, after_data_left, diff)
+        
+        return analysis
     
-    # Extract data for plotting
-    frame_numbers = []
-    mean_r, mean_g, mean_b = [], [], []
-    std_r, std_g, std_b = [], [], []
-    black_ratios, white_ratios, gray_ratios = [], [], []
+    def _calculate_stats(self, data: np.ndarray) -> Dict[str, float]:
+        """计算数据统计信息"""
+        return {
+            'mean': np.mean(data),
+            'std': np.std(data),
+            'min': np.min(data),
+            'max': np.max(data),
+            'median': np.median(data)
+        }
     
-    for i, (stats, _) in enumerate(frames_data):
-        if stats:
-            frame_numbers.append(i)
-            mean_r.append(stats['mean_rgb'][0])
-            mean_g.append(stats['mean_rgb'][1]) 
-            mean_b.append(stats['mean_rgb'][2])
-            std_r.append(stats['std_rgb'][0])
-            std_g.append(stats['std_rgb'][1])
-            std_b.append(stats['std_rgb'][2])
-            black_ratios.append(stats['black_ratio'])
-            white_ratios.append(stats['white_ratio'])
-            gray_ratios.append(stats['gray_ratio'])
+    def _detect_anomalies(self, before: np.ndarray, after: np.ndarray, diff: np.ndarray) -> Dict[str, Any]:
+        """检测异常区域"""
+        anomalies = {}
+        
+        # 检测大幅度变化的区域
+        abs_diff = np.abs(diff)
+        threshold = np.std(abs_diff) * 3  # 3-sigma rule
+        
+        anomaly_mask = abs_diff > threshold
+        anomaly_count = np.sum(anomaly_mask)
+        total_pixels = anomaly_mask.size
+        
+        anomalies['large_changes'] = {
+            'threshold': threshold,
+            'count': int(anomaly_count),
+            'percentage': (anomaly_count / total_pixels) * 100,
+            'locations': np.where(anomaly_mask)
+        }
+        
+        # 检测值域异常
+        anomalies['value_range'] = {
+            'before_out_of_range': {
+                'negative': np.sum(before < 0),
+                'above_one': np.sum(before > 1.0)
+            },
+            'after_out_of_range': {
+                'negative': np.sum(after < 0),
+                'above_one': np.sum(after > 1.0)
+            }
+        }
+        
+        return anomalies
     
-    # Plot 1: Mean RGB values over frames
-    plt.figure(figsize=(12, 8))
-    
-    plt.subplot(2, 2, 1)
-    plt.plot(frame_numbers, mean_r, 'r-', label='Red', alpha=0.7)
-    plt.plot(frame_numbers, mean_g, 'g-', label='Green', alpha=0.7)
-    plt.plot(frame_numbers, mean_b, 'b-', label='Blue', alpha=0.7)
-    plt.ylabel('Mean Color Value')
-    plt.xlabel('Frame Number')
-    plt.title('Mean RGB Values per Frame')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Plot 2: Standard deviation
-    plt.subplot(2, 2, 2)
-    plt.plot(frame_numbers, std_r, 'r-', label='Red', alpha=0.7)
-    plt.plot(frame_numbers, std_g, 'g-', label='Green', alpha=0.7)
-    plt.plot(frame_numbers, std_b, 'b-', label='Blue', alpha=0.7)
-    plt.ylabel('Standard Deviation')
-    plt.xlabel('Frame Number')
-    plt.title('RGB Standard Deviation per Frame')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Plot 3: Clipping ratios
-    plt.subplot(2, 2, 3)
-    plt.plot(frame_numbers, black_ratios, 'k-', label='Black pixels', alpha=0.7)
-    plt.plot(frame_numbers, white_ratios, 'gray', label='White pixels', alpha=0.7)
-    plt.ylabel('Pixel Ratio')
-    plt.xlabel('Frame Number')
-    plt.title('Clipping Detection')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Plot 4: Gray ratio
-    plt.subplot(2, 2, 4)
-    plt.plot(frame_numbers, gray_ratios, 'purple', alpha=0.7)
-    plt.ylabel('Grayscale Pixel Ratio')
-    plt.xlabel('Frame Number')
-    plt.title('Grayscale Content Detection')
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/color_analysis.png", dpi=150, bbox_inches='tight')
-    print(f"Analysis plots saved to {output_dir}/color_analysis.png")
-    
-    # Create histogram of first valid frame
-    for stats, img_array in frames_data:
-        if stats and img_array is not None:
-            plt.figure(figsize=(10, 6))
+    def generate_report(self, analysis: Dict[str, Any]) -> str:
+        """生成分析报告"""
+        report = []
+        report.append(f"=== Frame {analysis['frame_number']} Analysis Report ===")
+        report.append(f"Shape match: {analysis['shape_match']}")
+        
+        if analysis['shape_match']:
+            report.append("\n--- Channel Differences ---")
+            for channel, diff_info in analysis['channel_diff'].items():
+                report.append(f"{channel} Channel:")
+                report.append(f"  Mean difference: {diff_info['mean_diff']:.6f}")
+                report.append(f"  Max difference: {diff_info['max_diff']:.6f}")
+                report.append(f"  Std difference: {diff_info['std_diff']:.6f}")
+                report.append(f"  Before range: {diff_info['before_range']}")
+                report.append(f"  After range: {diff_info['after_range']}")
             
-            # RGB histograms
-            plt.subplot(1, 2, 1)
-            plt.hist(img_array[:,:,0].flatten(), bins=50, alpha=0.7, color='red', label='Red')
-            plt.hist(img_array[:,:,1].flatten(), bins=50, alpha=0.7, color='green', label='Green')
-            plt.hist(img_array[:,:,2].flatten(), bins=50, alpha=0.7, color='blue', label='Blue')
-            plt.xlabel('Pixel Value')
-            plt.ylabel('Frequency')
-            plt.title(f'RGB Histogram - {Path(stats["path"]).name}')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
+            report.append("\n--- Anomaly Detection ---")
+            anomalies = analysis['anomalies']
+            large_changes = anomalies['large_changes']
+            report.append(f"Large changes (>{large_changes['threshold']:.6f}):")
+            report.append(f"  Count: {large_changes['count']} ({large_changes['percentage']:.2f}%)")
             
-            # Luminance histogram
-            plt.subplot(1, 2, 2)
-            # Calculate luminance using standard weights
-            luminance = 0.299 * img_array[:,:,0] + 0.587 * img_array[:,:,1] + 0.114 * img_array[:,:,2]
-            plt.hist(luminance.flatten(), bins=50, alpha=0.7, color='gray')
-            plt.xlabel('Luminance Value')
-            plt.ylabel('Frequency')
-            plt.title('Luminance Histogram')
-            plt.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            plt.savefig(f"{output_dir}/histogram_sample.png", dpi=150, bbox_inches='tight')
-            print(f"Sample histogram saved to {output_dir}/histogram_sample.png")
-            break
+            value_range = anomalies['value_range']
+            report.append(f"Value range issues:")
+            report.append(f"  Before: {value_range['before_out_of_range']['negative']} negative, {value_range['before_out_of_range']['above_one']} >1.0")
+            report.append(f"  After: {value_range['after_out_of_range']['negative']} negative, {value_range['after_out_of_range']['above_one']} >1.0")
+        
+        return "\n".join(report)
+    
+    def create_visualization(self, frame_num: int, before_data: np.ndarray, after_data: np.ndarray, 
+                           analysis: Dict[str, Any], output_dir: str):
+        """创建可视化图表"""
+        if not analysis['shape_match']:
+            return
+        
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f'Frame {frame_num} Color Conversion Analysis (Left Half)', fontsize=16)
+        
+        # Get left half for comparison
+        width = before_data.shape[1]
+        half_width = width // 2
+        before_data_left = before_data[:, :half_width, :]
+        after_data_left = after_data[:, :half_width, :]
+
+        # 显示原始图像和转换后图像 (只显示RGB通道)
+        before_rgb = np.clip(before_data_left[:, :, :3], 0, 1)
+        after_rgb = np.clip(after_data_left[:, :, :3], 0, 1)
+        
+        axes[0, 0].imshow(before_rgb)
+        axes[0, 0].set_title('Before Conversion (Left Half)')
+        axes[0, 0].axis('off')
+        
+        axes[0, 1].imshow(after_rgb)
+        axes[0, 1].set_title('After Conversion (Left of SBS)')
+        axes[0, 1].axis('off')
+        
+        # 显示差异
+        diff = after_data_left - before_data_left
+        diff_rgb = diff[:, :, :3]
+        # 将差异映射到可视化范围
+        diff_vis = (diff_rgb - np.min(diff_rgb)) / (np.max(diff_rgb) - np.min(diff_rgb) + 1e-8)
+        
+        axes[0, 2].imshow(diff_vis)
+        axes[0, 2].set_title('Difference Visualization (Left Half)')
+        axes[0, 2].axis('off')
+        
+        # 显示各通道的直方图
+        channel_names = ['R', 'G', 'B']
+        colors = ['red', 'green', 'blue']
+        
+        for i, (channel, color) in enumerate(zip(channel_names, colors)):
+            if i < before_data.shape[2]:
+                axes[1, i].hist(before_data_left[:, :, i].flatten(), bins=50, alpha=0.5, 
+                               label='Before', color=color, density=True)
+                axes[1, i].hist(after_data_left[:, :, i].flatten(), bins=50, alpha=0.5, 
+                               label='After', color=color, density=True, histtype='step')
+                axes[1, i].set_title(f'{channel} Channel Histogram (Left Half)')
+                axes[1, i].legend()
+                axes[1, i].set_xlabel('Value')
+                axes[1, i].set_ylabel('Density')
+        
+        plt.tight_layout()
+        
+        # 保存图表
+        output_path = os.path.join(output_dir, f'frame_{frame_num}_analysis.png')
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Visualization saved to: {output_path}")
+
+def find_frame_pairs(debug_dir: str) -> Dict[int, Dict[str, str]]:
+    """查找成对的DDS文件"""
+    pairs = {}
+    
+    debug_path = Path(debug_dir)
+    if not debug_path.exists():
+        print(f"Debug directory not found: {debug_dir}")
+        return pairs
+    
+    # 查找所有DDS文件
+    dds_files = list(debug_path.glob("*.dds"))
+    
+    for dds_file in dds_files:
+        filename = dds_file.name
+        # 解析文件名: frame_{number}_{suffix}.dds
+        if filename.startswith("frame_") and filename.endswith(".dds"):
+            parts = filename[6:-4].split("_")  # 去掉"frame_"前缀和".dds"后缀
+            if len(parts) >= 2:
+                try:
+                    frame_num = int(parts[0])
+                    suffix = "_".join(parts[1:])
+                    
+                    if frame_num not in pairs:
+                        pairs[frame_num] = {}
+                    
+                    pairs[frame_num][suffix] = str(dds_file)
+                except ValueError:
+                    continue
+    
+    return pairs
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze color conversion from exported PNG files')
-    parser.add_argument('--input-dir', default='debug_textures', 
-                       help='Directory containing exported PNG files (default: debug_textures)')
+    parser = argparse.ArgumentParser(description='DDS颜色转换分析工具')
+    parser.add_argument('--debug-dir', default='debug_textures', 
+                        help='包含DDS文件的调试目录 (默认: debug_textures)')
     parser.add_argument('--output-dir', default='analysis_output',
-                       help='Directory to save analysis results (default: analysis_output)')
-    parser.add_argument('--max-frames', type=int, default=None,
-                       help='Maximum number of frames to analyze')
-    parser.add_argument('--show-plots', action='store_true',
-                       help='Show plots interactively')
+                        help='分析结果输出目录 (默认: analysis_output)')
+    parser.add_argument('--frame', type=int, help='分析特定帧号 (可选)')
+    parser.add_argument('--max-frames', type=int, default=10, 
+                        help='最大分析帧数 (默认: 10)')
     
     args = parser.parse_args()
     
-    # Find PNG files
-    png_pattern = os.path.join(args.input_dir, "frame_*.png")
-    png_files = sorted(glob.glob(png_pattern), key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    # 创建输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
     
-    if not png_files:
-        print(f"No PNG files found in {args.input_dir}")
-        print(f"Looking for pattern: {png_pattern}")
+    # 查找DDS文件对
+    frame_pairs = find_frame_pairs(args.debug_dir)
+    
+    if not frame_pairs:
+        print(f"No DDS file pairs found in {args.debug_dir}")
         return
-        
-    print(f"Found {len(png_files)} PNG files")
     
-    if args.max_frames:
-        png_files = png_files[:args.max_frames]
-        print(f"Analyzing first {len(png_files)} frames")
+    print(f"Found {len(frame_pairs)} frames with DDS files")
     
-    # Analyze all frames
-    frames_data = []
-    issue_count = 0
+    # 初始化分析器
+    analyzer = ColorAnalyzer()
     
-    print("\nAnalyzing frames...")
-    for i, png_file in enumerate(png_files):
-        if (i + 1) % 10 == 0 or i == 0:
-            print(f"Processing frame {i + 1}/{len(png_files)}")
-            
-        stats, img_array = analyze_single_frame(png_file)
-        frames_data.append((stats, img_array))
-        
-        if stats and stats['issues']:
-            issue_count += 1
-            print(f"  Issues in {Path(png_file).name}: {', '.join(stats['issues'])}")
+    # 分析帧
+    frames_to_analyze = []
+    if args.frame is not None:
+        if args.frame in frame_pairs:
+            frames_to_analyze = [args.frame]
+        else:
+            print(f"Frame {args.frame} not found")
+            return
+    else:
+        frames_to_analyze = sorted(frame_pairs.keys())[:args.max_frames]
     
-    # Print summary
-    print(f"\n=== Analysis Summary ===")
-    print(f"Total frames analyzed: {len(png_files)}")
-    print(f"Frames with issues: {issue_count}")
+    reports = []
     
-    valid_frames = [stats for stats, _ in frames_data if stats]
-    if valid_frames:
-        # Overall statistics
-        all_means = np.array([stats['mean_rgb'] for stats in valid_frames])
-        all_stds = np.array([stats['std_rgb'] for stats in valid_frames])
+    for frame_num in frames_to_analyze:
+        frame_files = frame_pairs[frame_num]
+        print(f"\nAnalyzing frame {frame_num}...")
         
-        print(f"\nOverall Statistics:")
-        print(f"  Mean RGB: R={np.mean(all_means[:,0]):.3f}, G={np.mean(all_means[:,1]):.3f}, B={np.mean(all_means[:,2]):.3f}")
-        print(f"  Std RGB:  R={np.mean(all_stds[:,0]):.3f}, G={np.mean(all_stds[:,1]):.3f}, B={np.mean(all_stds[:,2]):.3f}")
+        # 检查是否有所需的文件
+        if 'color_conv' not in frame_files or 'sbs_infer' not in frame_files:
+            print(f"Missing required files for frame {frame_num}")
+            print(f"Available: {list(frame_files.keys())}")
+            continue
         
-        # Check for common issues across all frames
-        avg_black_ratio = np.mean([stats['black_ratio'] for stats in valid_frames])
-        avg_white_ratio = np.mean([stats['white_ratio'] for stats in valid_frames])
-        avg_gray_ratio = np.mean([stats['gray_ratio'] for stats in valid_frames])
+        # 读取DDS文件
+        before_reader = DDSReader(frame_files['color_conv'])
+        after_reader = DDSReader(frame_files['sbs_infer'])
         
-        print(f"  Average black pixel ratio: {avg_black_ratio:.3f}")
-        print(f"  Average white pixel ratio: {avg_white_ratio:.3f}")
-        print(f"  Average grayscale ratio: {avg_gray_ratio:.3f}")
+        before_data = before_reader.read_dds()
+        after_data = after_reader.read_dds()
         
-        # Color conversion quality assessment
-        print(f"\n=== Color Conversion Assessment ===")
-        if avg_black_ratio > 0.05:
-            print("⚠️  HIGH BLACK PIXEL RATIO - possible underexposure or clipping")
-        if avg_white_ratio > 0.05:
-            print("⚠️  HIGH WHITE PIXEL RATIO - possible overexposure or clipping")
-        if avg_gray_ratio > 0.7:
-            print("⚠️  HIGH GRAYSCALE RATIO - colors may be desaturated")
+        if before_data is None or after_data is None:
+            print(f"Failed to read DDS files for frame {frame_num}")
+            continue
         
-        mean_channel_ratio = np.mean(all_means, axis=0)
-        mean_channel_ratio = mean_channel_ratio / np.mean(mean_channel_ratio)
-        if np.max(mean_channel_ratio) > 1.3 or np.min(mean_channel_ratio) < 0.7:
-            print(f"⚠️  COLOR BIAS DETECTED - channel ratios: R={mean_channel_ratio[0]:.3f}, G={mean_channel_ratio[1]:.3f}, B={mean_channel_ratio[2]:.3f}")
+        # 分析差异
+        analysis = analyzer.analyze_frame_pair(frame_num, before_data, after_data)
         
-        if issue_count == 0:
-            print("✅ No major issues detected in color conversion")
+        # 生成报告
+        report = analyzer.generate_report(analysis)
+        reports.append(report)
+        print(report)
+        
+        # 创建可视化
+        try:
+            analyzer.create_visualization(frame_num, before_data, after_data, 
+                                        analysis, args.output_dir)
+        except Exception as e:
+            print(f"Failed to create visualization for frame {frame_num}: {e}")
     
-    # Create plots
-    create_analysis_plots(frames_data, args.output_dir)
-    
-    if args.show_plots:
-        plt.show()
+    # 保存完整报告
+    if reports:
+        report_path = os.path.join(args.output_dir, 'color_analysis_report.txt')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write("DDS Color Conversion Analysis Report\n")
+            f.write("=" * 50 + "\n\n")
+            f.write("\n\n".join(reports))
+        
+        print(f"\nComplete analysis report saved to: {report_path}")
 
 if __name__ == "__main__":
     main() 
