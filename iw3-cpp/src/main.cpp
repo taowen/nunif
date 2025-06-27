@@ -147,18 +147,18 @@ public:
             // Start depth inference thread (input from diagnosis thread)
             infer_sbs_th = std::thread([this]() {
                 if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
-                    start_infer_sbs(diagnose_color_output, infer_sbs_output);
+                    start_infer_sbs(diagnose_color_output, infer_sbs_output, d3d11_device, d3d11_context);
                 } else {
-                    start_infer_sbs(diagnose_color_output, diagnose_sbs_output);
+                    start_infer_sbs(diagnose_color_output, diagnose_sbs_output, d3d11_device, d3d11_context);
                 }
             });
         } else {
             // Start depth inference thread (input directly from color conversion)
             infer_sbs_th = std::thread([this]() {
                 if constexpr (ENABLE_INFER_SBS_DIAGNOSIS) {
-                    start_infer_sbs(convert_color_output, infer_sbs_output);
+                    start_infer_sbs(convert_color_output, infer_sbs_output, d3d11_device, d3d11_context);
                 } else {
-                    start_infer_sbs(convert_color_output, diagnose_sbs_output);
+                    start_infer_sbs(convert_color_output, diagnose_sbs_output, d3d11_device, d3d11_context);
                 }
             });
         }

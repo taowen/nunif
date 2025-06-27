@@ -264,6 +264,11 @@ public:
             output_elements *= output_dims_actual.d[i];
         }
         output_size = output_elements * sizeof(float);
+
+        // Extract actual dimensions from TensorRT output (NCHW format: [1, 4, H, W])
+        UINT actual_output_height = static_cast<UINT>(output_dims_actual.d[2]);
+        UINT actual_output_width = static_cast<UINT>(output_dims_actual.d[3]);
+        UINT actual_output_channels = static_cast<UINT>(output_dims_actual.d[1]);
         
         // Reallocate input device memory if needed
         if (current_input_size < input_size) {
@@ -314,6 +319,27 @@ public:
         return true;
     }
     
+    float* get_output_data() const {
+        return d_output;
+    }
+    
+    // Add this method to get output dimensions
+    bool get_output_dimensions(UINT& width, UINT& height, UINT& channels) const {
+        if (!context || !engine) {
+            return false;
+        }
+        
+        nvinfer1::Dims output_dims = context->getTensorShape(engine->getIOTensorName(1));
+        if (output_dims.nbDims != 4) {
+            return false;
+        }
+        
+        height = static_cast<UINT>(output_dims.d[2]);
+        width = static_cast<UINT>(output_dims.d[3]); 
+        channels = static_cast<UINT>(output_dims.d[1]);
+        return true;
+    }
+    
     ~TensorRTInferenceEngine() {
         if (d_input) {
             cudaFree(d_input);
@@ -331,7 +357,9 @@ std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 
 void start_infer_sbs(
     D11FrameQueue& input_frame_queue,
-    D11FrameQueue& output_frame_queue) {
+    D11FrameQueue& output_frame_queue,
+    ID3D11Device* d3d11_device,
+    ID3D11DeviceContext* d3d11_context) {
     
     cudaStream_t cuda_stream = nullptr;
     checkCudaErrors(cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking));
@@ -367,9 +395,7 @@ void start_infer_sbs(
         
         if (converted_frame.texture) {
             if (!cuda_device_set) {
-                ID3D11Device* d3d11_device = nullptr;
-                converted_frame.texture->GetDevice(&d3d11_device);
-
+                // Use the FFmpeg-provided D3D11 device instead of getting it from texture
                 if (d3d11_device) {
                     int cuda_device = -1;
                     IDXGIDevice* dxgi_device = nullptr;
@@ -385,7 +411,7 @@ void start_infer_sbs(
                             
                             if (cuda_status == cudaSuccess) {
                                 checkCudaErrors(cudaSetDevice(cuda_device));
-                                std::cout << "Depth inference thread set CUDA device to " << cuda_device << std::endl;
+                                std::cout << "Depth inference thread set CUDA device to " << cuda_device << " (using FFmpeg D3D11 device)" << std::endl;
                                 cuda_device_set = true;
                             } else {
                                 std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(cuda_status) << "\n";
@@ -396,7 +422,8 @@ void start_infer_sbs(
                     } else {
                          std::cerr << "Failed to get DXGI device\n";
                     }
-                    d3d11_device->Release();
+                } else {
+                    std::cerr << "FFmpeg D3D11 device is null\n";
                 }
 
                 if (!cuda_device_set) {
@@ -444,15 +471,21 @@ void start_infer_sbs(
                 continue;
             }
 
-            // TODO: Create output D3D11 texture from TensorRT inference result
-            // For now, we'll create a placeholder texture
-            ID3D11Device* d3d11_device = nullptr;
-            converted_frame.texture->GetDevice(&d3d11_device);
-            
+            // Get output dimensions after successful inference
+            UINT actual_output_width, actual_output_height, actual_output_channels;
+            if (!g_inference_engine->get_output_dimensions(actual_output_width, actual_output_height, actual_output_channels)) {
+                std::cerr << "    ✗ Failed to get output dimensions for frame " << processed_count << "\n";
+                checkCudaErrors(cudaFree(d_temp_input));
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
+                continue;
+            }
+
+            // Create output D3D11 texture using the FFmpeg-provided D3D11 device
             ID3D11Texture2D* output_texture = nullptr;
             D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = converted_frame.width;  // Full width for half side-by-side
-            desc.Height = converted_frame.height;
+            desc.Width = actual_output_width;  // Use actual TensorRT output width
+            desc.Height = actual_output_height; // Use actual TensorRT output height
             desc.MipLevels = 1;
             desc.ArraySize = 1;
             desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -462,8 +495,28 @@ void start_infer_sbs(
             
             HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &output_texture);
             if (SUCCEEDED(hr)) {
+                // Register the output texture with CUDA for copying inference results
+                cudaGraphicsResource_t output_cuda_resource = nullptr;
+                checkCudaErrors(cudaGraphicsD3D11RegisterResource(&output_cuda_resource, output_texture, cudaGraphicsRegisterFlagsWriteDiscard));
+                
+                checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
+                cudaArray_t output_cuda_array;
+                checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&output_cuda_array, output_cuda_resource, 0, 0));
+                
+                // Copy TensorRT inference results to output texture using actual dimensions
+                size_t output_row_pitch = actual_output_width * actual_output_channels * sizeof(float);
+                checkCudaErrors(cudaMemcpy2DToArrayAsync(
+                    output_cuda_array, 0, 0,
+                    g_inference_engine->get_output_data(), output_row_pitch,
+                    output_row_pitch, actual_output_height,
+                    cudaMemcpyDeviceToDevice, cuda_stream
+                ));
+                
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &output_cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(output_cuda_resource));
+                
                 // Create stereo inference result and push to output queue
-                D11Frame stereo_frame(output_texture, converted_frame.width, converted_frame.height);
+                D11Frame stereo_frame(output_texture, actual_output_width, actual_output_height);
                 output_frame_queue.push(std::move(stereo_frame));
                 std::cout << ">>> Stereo inference frame " << processed_count << " completed and queued\n";
             } else {
@@ -473,7 +526,6 @@ void start_infer_sbs(
             if (output_texture) {
                 output_texture->Release();
             }
-            d3d11_device->Release();
 
             checkCudaErrors(cudaFree(d_temp_input));
             checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
