@@ -144,7 +144,7 @@ void start_decode_thread(DecoderState& decoder_state, DecodedFrameQueue& frame_q
                     continue;
                 }
                 
-                if (frame_count >= 1) {
+                if (frame_count >= 60) {
                     goto decode_cleanup;
                 }
             }

@@ -345,6 +345,207 @@ public:
 // Global inference engine instance
 std::unique_ptr<TensorRTInferenceEngine> g_inference_engine;
 
+// Helper function to create output D3D11 texture
+bool create_output_d3d11_texture(UINT width, UINT height, ID3D11Device* d3d11_device, 
+                                 ID3D11Texture2D** output_texture) {
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; // Float32 RGBA format
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags = 0;
+    
+    HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, output_texture);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create output D3D11 texture: 0x" << std::hex << static_cast<unsigned int>(hr) << std::dec << "\n";
+        
+        switch (hr) {
+            case E_INVALIDARG:
+                std::cerr << "    → Invalid argument in texture creation\n";
+                break;
+            case E_OUTOFMEMORY:
+                std::cerr << "    → Out of memory\n";
+                break;
+            case DXGI_ERROR_INVALID_CALL:
+                std::cerr << "    → Invalid DXGI call\n";
+                break;
+            default:
+                std::cerr << "    → Unknown error\n";
+                break;
+        }
+        return false;
+    }
+    
+    if (!*output_texture) {
+        std::cerr << "Output texture pointer is null after creation\n";
+        return false;
+    }
+    
+    std::cout << "    ✓ D3D11 output texture created successfully (" << width << "x" << height << ")\n";
+    return true;
+}
+
+// Helper function to write CUDA output to D3D11 texture (synchronous)
+bool write_cuda_output_to_d3d11(float* cuda_output_data, UINT width, UINT height, UINT channels,
+                                ID3D11Texture2D* d3d11_output_texture, cudaStream_t stream) {
+    if (!cuda_output_data) {
+        std::cerr << "CUDA output data is null\n";
+        return false;
+    }
+    
+    if (!d3d11_output_texture) {
+        std::cerr << "D3D11 output texture is null\n";
+        return false;
+    }
+    
+    if (width == 0 || height == 0 || channels == 0) {
+        std::cerr << "Invalid dimensions: " << width << "x" << height << "x" << channels << "\n";
+        return false;
+    }
+    
+    std::cout << "    → Attempting to register D3D11 texture with CUDA...\n";
+    std::cout << "    → Texture dimensions: " << width << "x" << height << "x" << channels << "\n";
+    
+    int current_device;
+    cudaError_t device_result = cudaGetDevice(&current_device);
+    if (device_result == cudaSuccess) {
+        std::cout << "    → Current CUDA device: " << current_device << "\n";
+    }
+    
+    cudaGraphicsResource_t cuda_resource = nullptr;
+    cudaError_t cuda_result = cudaGraphicsD3D11RegisterResource(&cuda_resource, d3d11_output_texture, 
+                                                               cudaGraphicsRegisterFlagsNone);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to register D3D11 texture with CUDA: " << cudaGetErrorString(cuda_result) << "\n";
+        
+        switch (cuda_result) {
+            case cudaErrorInvalidValue:
+                std::cerr << "    → CUDA error: Invalid value (check texture format/flags)\n";
+                break;
+            case cudaErrorInvalidResourceHandle:
+                std::cerr << "    → CUDA error: Invalid resource handle\n";
+                break;
+            case cudaErrorInvalidDevice:
+                std::cerr << "    → CUDA error: Invalid device (D3D11/CUDA device mismatch)\n";
+                break;
+            case cudaErrorNotSupported:
+                std::cerr << "    → CUDA error: Operation not supported\n";
+                break;
+            default:
+                std::cerr << "    → CUDA error code: " << static_cast<int>(cuda_result) << "\n";
+                break;
+        }
+        
+        ID3D11Device* texture_device = nullptr;
+        d3d11_output_texture->GetDevice(&texture_device);
+        if (texture_device) {
+            std::cout << "    → D3D11 texture device obtained for diagnostics\n";
+            
+            IDXGIDevice* dxgi_device = nullptr;
+            HRESULT hr = texture_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
+            if (SUCCEEDED(hr)) {
+                IDXGIAdapter* dxgi_adapter = nullptr;
+                hr = dxgi_device->GetAdapter(&dxgi_adapter);
+                dxgi_device->Release();
+                
+                if (SUCCEEDED(hr)) {
+                    int cuda_device_for_adapter;
+                    cudaError_t compat_result = cudaD3D11GetDevice(&cuda_device_for_adapter, dxgi_adapter);
+                    dxgi_adapter->Release();
+                    
+                    if (compat_result == cudaSuccess) {
+                        std::cout << "    → CUDA device for this D3D11 adapter: " << cuda_device_for_adapter << "\n";
+                        if (cuda_device_for_adapter != current_device) {
+                            std::cerr << "    ✗ CUDA device mismatch! Current: " << current_device 
+                                     << ", Required: " << cuda_device_for_adapter << "\n";
+                        }
+                    } else {
+                        std::cerr << "    ✗ D3D11 adapter not compatible with CUDA: " 
+                                 << cudaGetErrorString(compat_result) << "\n";
+                    }
+                }
+            }
+            texture_device->Release();
+        }
+        
+        return false;
+    }
+    
+    std::cout << "    ✓ D3D11 texture registered with CUDA successfully\n";
+    
+    // Map the resource for CUDA access (synchronous)
+    cuda_result = cudaGraphicsMapResources(1, &cuda_resource, stream);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to map D3D11 resource for CUDA: " << cudaGetErrorString(cuda_result) << "\n";
+        cudaGraphicsUnregisterResource(cuda_resource);
+        return false;
+    }
+    
+    // Get the mapped CUDA array
+    cudaArray_t cuda_array;
+    cuda_result = cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to get mapped CUDA array: " << cudaGetErrorString(cuda_result) << "\n";
+        cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+        cudaGraphicsUnregisterResource(cuda_resource);
+        return false;
+    }
+    
+    // Synchronize the stream before copying (ensure inference is complete)
+    cuda_result = cudaStreamSynchronize(stream);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to synchronize CUDA stream: " << cudaGetErrorString(cuda_result) << "\n";
+        cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+        cudaGraphicsUnregisterResource(cuda_resource);
+        return false;
+    }
+    
+    // Copy CUDA output data to D3D11 texture (synchronous)
+    // Note: Using synchronous version as requested
+    cuda_result = cudaMemcpy2DToArray(
+        cuda_array, 0, 0,                              // destination: array, x_offset, y_offset
+        cuda_output_data,                              // source: CUDA device memory
+        width * channels * sizeof(float),             // source pitch
+        width * channels * sizeof(float),             // width in bytes
+        height,                                        // height
+        cudaMemcpyDeviceToDevice                       // copy type
+    );
+    
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to copy CUDA output to D3D11 texture: " << cudaGetErrorString(cuda_result) << "\n";
+        cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+        cudaGraphicsUnregisterResource(cuda_resource);
+        return false;
+    }
+    
+    // Synchronize again to ensure copy is complete
+    cuda_result = cudaStreamSynchronize(stream);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to synchronize CUDA stream after copy: " << cudaGetErrorString(cuda_result) << "\n";
+    }
+    
+    // Unmap the resource
+    cuda_result = cudaGraphicsUnmapResources(1, &cuda_resource, stream);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to unmap D3D11 resource: " << cudaGetErrorString(cuda_result) << "\n";
+    }
+    
+    // Unregister the resource
+    cuda_result = cudaGraphicsUnregisterResource(cuda_resource);
+    if (cuda_result != cudaSuccess) {
+        std::cerr << "Failed to unregister D3D11 resource: " << cudaGetErrorString(cuda_result) << "\n";
+    }
+    
+    std::cout << "    ✓ CUDA output successfully written to D3D11 texture (synchronous)\n";
+    return true;
+}
+
 } // anonymous namespace
 
 void start_infer_sbs(
@@ -404,6 +605,17 @@ void start_infer_sbs(
                             if (cuda_status == cudaSuccess) {
                                 checkCudaErrors(cudaSetDevice(cuda_device));
                                 std::cout << "Depth inference thread set CUDA device to " << cuda_device << " (using FFmpeg D3D11 device)" << std::endl;
+                                
+                                // 验证设备设置成功
+                                int current_device;
+                                checkCudaErrors(cudaGetDevice(&current_device));
+                                if (current_device != cuda_device) {
+                                    std::cerr << "CUDA device setting verification failed. Expected: " 
+                                             << cuda_device << ", Actual: " << current_device << "\n";
+                                    output_frame_queue.push(D11Frame::end_signal());
+                                    break;
+                                }
+                                
                                 cuda_device_set = true;
                             } else {
                                 std::cerr << "Failed to get CUDA device for D3D11 adapter: " << cudaGetErrorString(cuda_status) << "\n";
@@ -435,7 +647,7 @@ void start_infer_sbs(
                 continue;
             }
             
-            // Perform CUDA-D3D11 interop
+            // Perform CUDA-D3D11 interop for input
             cudaGraphicsResource_t cuda_resource = nullptr;
             checkCudaErrors(cudaGraphicsD3D11RegisterResource(&cuda_resource, converted_frame.texture, cudaGraphicsRegisterFlagsNone));
 
@@ -448,11 +660,11 @@ void start_infer_sbs(
             float* d_temp_input = nullptr;
             checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_temp_input), input_size));
             
-            checkCudaErrors(cudaMemcpy2DFromArrayAsync(
+            checkCudaErrors(cudaMemcpy2DFromArray(
                 d_temp_input, converted_frame.width * 4 * sizeof(float),
                 cuda_array, 0, 0,
                 converted_frame.width * 4 * sizeof(float), converted_frame.height,
-                cudaMemcpyDeviceToDevice, cuda_stream
+                cudaMemcpyDeviceToDevice
             ));
 
             if (!g_inference_engine->infer(d_temp_input, converted_frame.width, converted_frame.height, cuda_stream)) {
@@ -463,8 +675,50 @@ void start_infer_sbs(
                 continue;
             }
 
-            std::cout << ">>> Stereo inference frame " << processed_count << " completed\n";
+            // Get inference output data
+            float* cuda_output_data = g_inference_engine->get_output_data();
+            
+            // Get output dimensions from inference engine
+            UINT output_width, output_height, output_channels;
+            if (!g_inference_engine->get_output_dimensions(output_width, output_height, output_channels)) {
+                std::cerr << "    ✗ Failed to get output dimensions for frame " << processed_count << "\n";
+                checkCudaErrors(cudaFree(d_temp_input));
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
+                continue;
+            }
+            
+            std::cout << "    → Output dimensions: " << output_width << "x" << output_height << "x" << output_channels << "\n";
+            
+            // Create output D3D11 texture
+            ID3D11Texture2D* d3d11_output_texture = nullptr;
+            if (!create_output_d3d11_texture(output_width, output_height, d3d11_device, &d3d11_output_texture)) {
+                std::cerr << "    ✗ Failed to create output D3D11 texture for frame " << processed_count << "\n";
+                checkCudaErrors(cudaFree(d_temp_input));
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
+                continue;
+            }
+            
+            // Write CUDA output to D3D11 texture (synchronous)
+            if (!write_cuda_output_to_d3d11(cuda_output_data, output_width, output_height, output_channels, 
+                                           d3d11_output_texture, cuda_stream)) {
+                std::cerr << "    ✗ Failed to write CUDA output to D3D11 texture for frame " << processed_count << "\n";
+                d3d11_output_texture->Release();
+                checkCudaErrors(cudaFree(d_temp_input));
+                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
+                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
+                continue;
+            }
 
+            std::cout << ">>> Stereo inference frame " << processed_count << " completed\n";
+            
+            // Create output frame with the result texture
+            D11Frame output_frame(d3d11_output_texture, output_width, output_height);
+            output_frame_queue.push(std::move(output_frame));
+
+            // Clean up
+            d3d11_output_texture->Release(); // D11Frame constructor already AddRef'd
             checkCudaErrors(cudaFree(d_temp_input));
             checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
             checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
