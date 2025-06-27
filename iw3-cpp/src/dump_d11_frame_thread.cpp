@@ -65,7 +65,8 @@ void start_dump_d11_frame_thread(
     D11FrameQueue& input_queue,
     D11FrameQueue& output_queue,
     ID3D11Device* device,
-    ID3D11DeviceContext* context
+    ID3D11DeviceContext* context,
+    const std::string& suffix
 ) {
     // Create debug output directory
     std::filesystem::create_directories("debug_textures");
@@ -82,9 +83,9 @@ void start_dump_d11_frame_thread(
         
         frame_count++;
         
-        // Save frame as DDS file
+        // Save frame as DDS file with suffix to avoid overwrites
         if (frame.texture && device && context) {
-            std::string filename = "debug_textures/frame_" + std::to_string(frame_count) + ".dds";
+            std::string filename = "debug_textures/frame_"+ std::to_string(frame_count)  + "_"  + suffix + ".dds";
             if (!save_texture_as_dds(frame.texture, device, context, filename)) {
                 std::cerr << "Error: Could not save " << filename << std::endl;
             }

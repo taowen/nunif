@@ -25,7 +25,7 @@
 // D3D11VA 头文件已包含在 ffmpeg_wrapper.h 中
 
 // Diagnostic mode toggle - set to true to enable color conversion diagnosis
-constexpr bool ENABLE_COLOR_CONVERSION_DIAGNOSIS = false;
+constexpr bool ENABLE_COLOR_CONVERSION_DIAGNOSIS = true;
 // Diagnostic mode toggle - set to true to enable SBS inference diagnosis
 constexpr bool ENABLE_INFER_SBS_DIAGNOSIS = true;
 
@@ -141,7 +141,7 @@ public:
             // Start diagnosis thread
             diagnose_th = std::thread([this]() {
                 start_dump_d11_frame_thread(convert_color_output, diagnose_color_output, 
-                                                  d3d11_device, d3d11_context);
+                                                  d3d11_device, d3d11_context, "color_conv");
             });
             
             // Start depth inference thread (input from diagnosis thread)
@@ -167,7 +167,7 @@ public:
             // Start SBS diagnosis thread
             diagnose_sbs_th = std::thread([this]() {
                 start_dump_d11_frame_thread(infer_sbs_output, diagnose_sbs_output,
-                                                  d3d11_device, d3d11_context);
+                                                  d3d11_device, d3d11_context, "sbs_infer");
             });
             
             // Start encode thread (input from SBS diagnosis)

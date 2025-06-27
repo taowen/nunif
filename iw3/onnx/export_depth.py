@@ -55,10 +55,7 @@ class StereoDepthModule(nn.Module):
     def forward(self, x):
         # x: BCHW, float32, 0-1, RGBA format (4 channels) from convert_color_thread
         # Extract RGB channels only (discard alpha channel)
-        if x.shape[1] == 4:  # RGBA input
-            x_rgb = x[:, :3, :, :]  # Extract RGB channels, discard alpha
-        else:  # RGB input (fallback)
-            x_rgb = x
+        x_rgb = x[:, :3, :, :]  # Extract RGB channels, discard alpha
             
         depth = self.depth_model_wrapper.infer(
             x_rgb, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
