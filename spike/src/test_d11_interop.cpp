@@ -802,6 +802,11 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
         return;
     }
     
+    // Initialize TensorRT engine
+    std::cout << "\n=== TensorRT Initialization ===" << std::endl;
+    TensorRTInferenceEngine trt_engine;
+    REQUIRE(trt_engine.initialize("stereo_module_half_sbs.onnx"));
+
     // Try to register the texture with CUDA
     cudaGraphicsResource_t cuda_resource = nullptr;
     cudaError_t cuda_status = cudaGraphicsD3D11RegisterResource(
@@ -810,7 +815,6 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
     if (cuda_status == cudaSuccess) {
         std::cout << "Successfully registered D3D11 texture with CUDA" << std::endl;
         
-        // Test mapping the resource
         cudaStream_t stream;
         cudaStreamCreate(&stream);
         
@@ -822,68 +826,39 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
         cuda_status = cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0);
         REQUIRE(cuda_status == cudaSuccess);
         
-        // Test data accessibility - allocate device memory and copy
-        size_t pixel_size = 4 * sizeof(float); // RGBA float32
-        size_t data_size = texture_desc.Width * texture_desc.Height * pixel_size;
-        float* d_temp_buffer = nullptr;
-        
-        cuda_status = cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer), data_size);
+        // Perform inference using the mapped CUDA array
+        std::cout << "\n=== Starting TensorRT Inference ===" << std::endl;
+        bool inference_success = trt_engine.infer(
+            cuda_array, texture_desc.Width, texture_desc.Height, stream);
+        REQUIRE(inference_success);
+
+        // Inference is done, now we can unmap the resource
+        cuda_status = cudaGraphicsUnmapResources(1, &cuda_resource, stream);
         REQUIRE(cuda_status == cudaSuccess);
+
+        // Get inference results and verify
+        float* output_data = trt_engine.get_output_data();
+        REQUIRE(output_data != nullptr);
+
+        UINT out_width, out_height, out_channels;
+        REQUIRE(trt_engine.get_output_dimensions(out_width, out_height, out_channels));
+
+        std::cout << "\n=== Inference Results ===" << std::endl;
+        std::cout << "Input: " << texture_desc.Width << "x" << texture_desc.Height << "x4" << std::endl;
+        std::cout << "Output: " << out_width << "x" << out_height << "x" << out_channels << std::endl;
+
+        // Optional: Copy a sample of output data to host and print
+        std::vector<float> host_output_sample(16);
+        cudaMemcpy(host_output_sample.data(), output_data,
+                   host_output_sample.size() * sizeof(float), cudaMemcpyDeviceToHost);
         
-        // Copy from CUDA array to linear memory
-        cuda_status = cudaMemcpy2DFromArray(
-            d_temp_buffer, texture_desc.Width * pixel_size,
-            cuda_array, 0, 0,
-            texture_desc.Width * pixel_size, texture_desc.Height,
-            cudaMemcpyDeviceToDevice
-        );
-        REQUIRE(cuda_status == cudaSuccess);
-        
-        // Synchronize to ensure copy is complete
-        cudaStreamSynchronize(stream);
-        
-        // Save complete RGBA texture as BMP
-        std::vector<float> host_rgba_data(texture_desc.Width * texture_desc.Height * 4);
-        cuda_status = cudaMemcpy(host_rgba_data.data(), d_temp_buffer, 
-                                host_rgba_data.size() * sizeof(float), cudaMemcpyDeviceToHost);
-        REQUIRE(cuda_status == cudaSuccess);
-        
-        // Generate filename with timestamp for RGBA texture
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << "rgba_texture_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
-           << "_" << texture_desc.Width << "x" << texture_desc.Height << ".bmp";
-        
-        if (save_rgba_as_bmp(ss.str(), host_rgba_data.data(), texture_desc.Width, texture_desc.Height)) {
-            std::cout << "    ✓ RGBA texture saved as: " << ss.str() << std::endl;
-        } else {
-            std::cout << "    ✗ Failed to save RGBA texture as BMP" << std::endl;
+        std::cout << "Sample output values: ";
+        for (int i = 0; i < 4; ++i) {
+            std::cout << host_output_sample[i] << " ";
         }
-        
-        // Test: Copy some data back to host to verify it's valid
-        std::vector<float> host_sample(16); // Sample first 4 pixels (4 components each)
-        cuda_status = cudaMemcpy(host_sample.data(), d_temp_buffer, 
-                                host_sample.size() * sizeof(float), cudaMemcpyDeviceToHost);
-        REQUIRE(cuda_status == cudaSuccess);
-        
-        // Verify the data is in valid range for ONNX input (normalized [0,1])
-        bool valid_range = true;
-        for (float value : host_sample) {
-            if (value < 0.0f || value > 1.0f) {
-                valid_range = false;
-                break;
-            }
-        }
-        REQUIRE(valid_range);
-        
-        std::cout << "Texture data is in valid range [0,1] for ONNX inference" << std::endl;
-        std::cout << "Sample pixel values: R=" << host_sample[0] << " G=" << host_sample[1] 
-                << " B=" << host_sample[2] << " A=" << host_sample[3] << std::endl;
-        
+        std::cout << std::endl;
+
         // Cleanup
-        cudaFree(d_temp_buffer);
-        cudaGraphicsUnmapResources(1, &cuda_resource, stream);
         cudaGraphicsUnregisterResource(cuda_resource);
         cudaStreamDestroy(stream);
     } else {
@@ -914,253 +889,3 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
     av_frame_free(&hw_frame);
     cleanup_context(&hw_ctx);
 }
-
-// TEST_CASE("D3D11 texture to TensorRT inference pipeline") {
-//     const char* input_file = "06 4k.mp4";
-//     const std::string onnx_model_path = "stereo_module_half_sbs.onnx";
-//     const int frame_index = 650;
-    
-//     FFMepgContext hw_ctx;
-//     AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
-    
-//     REQUIRE(hw_frame != nullptr);
-    
-//     // 诊断：检查原始硬件帧的信息
-//     std::cout << "=== Original Hardware Frame Analysis ===" << std::endl;
-//     std::cout << "Frame format: " << av_get_pix_fmt_name((AVPixelFormat)hw_frame->format) << std::endl;
-//     std::cout << "Frame dimensions: " << hw_frame->width << "x" << hw_frame->height << std::endl;
-//     std::cout << "Frame linesize[0]: " << hw_frame->linesize[0] << std::endl;
-//     std::cout << "Frame data[0]: " << (void*)hw_frame->data[0] << std::endl;
-    
-//     // 检查D3D11纹理
-//     ID3D11Texture2D* original_texture = (ID3D11Texture2D*)hw_frame->data[0];
-//     if (original_texture) {
-//         D3D11_TEXTURE2D_DESC original_desc;
-//         original_texture->GetDesc(&original_desc);
-//         std::cout << "Original D3D11 texture format: " << original_desc.Format << std::endl;
-//         std::cout << "Original D3D11 texture dimensions: " << original_desc.Width << "x" << original_desc.Height << std::endl;
-//         std::cout << "Original D3D11 texture usage: " << original_desc.Usage << std::endl;
-//         std::cout << "Original D3D11 texture bind flags: 0x" << std::hex << original_desc.BindFlags << std::dec << std::endl;
-//         std::cout << "Original D3D11 texture misc flags: 0x" << std::hex << original_desc.MiscFlags << std::dec << std::endl;
-//     }
-    
-//     // Convert to RGBA texture
-//     std::cout << "\n=== Color Conversion Analysis ===" << std::endl;
-//     ID3D11Texture2D* rgba_texture = convert_color(&hw_ctx, hw_frame);
-//     REQUIRE(rgba_texture != nullptr);
-    
-//     // Get texture dimensions
-//     D3D11_TEXTURE2D_DESC texture_desc;
-//     rgba_texture->GetDesc(&texture_desc);
-    
-//     std::cout << "RGBA texture format: " << texture_desc.Format << std::endl;
-//     std::cout << "RGBA texture dimensions: " << texture_desc.Width << "x" << texture_desc.Height << std::endl;
-//     std::cout << "RGBA texture usage: " << texture_desc.Usage << std::endl;
-//     std::cout << "RGBA texture bind flags: 0x" << std::hex << texture_desc.BindFlags << std::dec << std::endl;
-//     std::cout << "RGBA texture misc flags: 0x" << std::hex << texture_desc.MiscFlags << std::dec << std::endl;
-    
-//     // 诊断：在注册CUDA之前，先读取D3D11纹理内容
-//     std::cout << "\n=== D3D11 Texture Content Verification ===" << std::endl;
-    
-//     // 创建一个可读的临时纹理
-//     D3D11_TEXTURE2D_DESC staging_desc = texture_desc;
-//     staging_desc.Usage = D3D11_USAGE_STAGING;
-//     staging_desc.BindFlags = 0;
-//     staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-//     staging_desc.MiscFlags = 0;
-    
-//     ID3D11Texture2D* staging_texture = nullptr;
-//     HRESULT hr = hw_ctx.d3d_device->CreateTexture2D(&staging_desc, nullptr, &staging_texture);
-//     if (SUCCEEDED(hr)) {
-//         // 复制RGBA纹理到staging纹理
-//         hw_ctx.d3d_context->CopyResource(staging_texture, rgba_texture);
-        
-//         // 映射并读取数据
-//         D3D11_MAPPED_SUBRESOURCE mapped_resource;
-//         hr = hw_ctx.d3d_context->Map(staging_texture, 0, D3D11_MAP_READ, 0, &mapped_resource);
-//         if (SUCCEEDED(hr)) {
-//             const float* rgba_data = static_cast<const float*>(mapped_resource.pData);
-            
-//             std::cout << "D3D11 RGBA texture content (first 16 values):" << std::endl;
-//             for (int i = 0; i < 16; ++i) {
-//                 std::cout << "  [" << i << "] = " << rgba_data[i] << std::endl;
-//             }
-            
-//             // 检查第一行的几个像素
-//             std::cout << "First row pixels:" << std::endl;
-//             size_t row_pitch_floats = mapped_resource.RowPitch / sizeof(float);
-//             for (int pixel = 0; pixel < 8 && pixel * 4 < row_pitch_floats; ++pixel) {
-//                 int offset = pixel * 4;
-//                 std::cout << "  Pixel[" << pixel << "]: R=" << rgba_data[offset+0] 
-//                           << " G=" << rgba_data[offset+1] << " B=" << rgba_data[offset+2] 
-//                           << " A=" << rgba_data[offset+3] << std::endl;
-//             }
-            
-//             // 检查中间一行的几个像素
-//             if (texture_desc.Height > 100) {
-//                 size_t middle_row_offset = (texture_desc.Height / 2) * row_pitch_floats;
-//                 std::cout << "Middle row pixels:" << std::endl;
-//                 for (int pixel = 0; pixel < 8 && middle_row_offset + pixel * 4 < row_pitch_floats * texture_desc.Height; ++pixel) {
-//                     int offset = middle_row_offset + pixel * 4;
-//                     std::cout << "  Pixel[" << pixel << "]: R=" << rgba_data[offset+0] 
-//                               << " G=" << rgba_data[offset+1] << " B=" << rgba_data[offset+2] 
-//                               << " A=" << rgba_data[offset+3] << std::endl;
-//                 }
-//             }
-            
-//             // 统计整个纹理的数据分布
-//             size_t total_floats = (mapped_resource.RowPitch / sizeof(float)) * texture_desc.Height;
-//             size_t zero_count = 0;
-//             float min_val = rgba_data[0], max_val = rgba_data[0];
-//             double sum_val = 0.0;
-            
-//             // 只检查有效像素数据，跳过可能的padding
-//             size_t pixels_per_row = texture_desc.Width;
-//             size_t floats_per_row = pixels_per_row * 4; // RGBA
-            
-//             for (size_t row = 0; row < texture_desc.Height; ++row) {
-//                 size_t row_start = row * (mapped_resource.RowPitch / sizeof(float));
-//                 for (size_t col = 0; col < floats_per_row; ++col) {
-//                     size_t index = row_start + col;
-//                     if (index < total_floats) {
-//                         float val = rgba_data[index];
-//                         if (val == 0.0f) zero_count++;
-//                         min_val = std::min(min_val, val);
-//                         max_val = std::max(max_val, val);
-//                         sum_val += val;
-//                     }
-//                 }
-//             }
-            
-//             size_t valid_elements = texture_desc.Width * texture_desc.Height * 4;
-//             double avg_val = sum_val / valid_elements;
-            
-//             std::cout << "D3D11 RGBA texture statistics:" << std::endl;
-//             std::cout << "  - Total valid elements: " << valid_elements << std::endl;
-//             std::cout << "  - Zero elements: " << zero_count << " (" << (100.0 * zero_count / valid_elements) << "%)" << std::endl;
-//             std::cout << "  - Data range: [" << min_val << ", " << max_val << "]" << std::endl;
-//             std::cout << "  - Average value: " << avg_val << std::endl;
-//             std::cout << "  - Row pitch: " << mapped_resource.RowPitch << " bytes" << std::endl;
-//             std::cout << "  - Expected row size: " << texture_desc.Width * 4 * sizeof(float) << " bytes" << std::endl;
-            
-//             // 保存D3D11纹理数据作为参考
-//             std::vector<float> d3d11_rgba_data(texture_desc.Width * texture_desc.Height * 4);
-//             for (size_t row = 0; row < texture_desc.Height; ++row) {
-//                 size_t src_row_start = row * (mapped_resource.RowPitch / sizeof(float));
-//                 size_t dst_row_start = row * texture_desc.Width * 4;
-//                 std::memcpy(&d3d11_rgba_data[dst_row_start], &rgba_data[src_row_start], 
-//                            texture_desc.Width * 4 * sizeof(float));
-//             }
-            
-//             auto now = std::chrono::system_clock::now();
-//             auto time_t = std::chrono::system_clock::to_time_t(now);
-//             std::stringstream ss;
-//             ss << "d3d11_rgba_texture_" << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S") 
-//                << "_" << texture_desc.Width << "x" << texture_desc.Height << ".bmp";
-            
-//             if (save_rgba_as_bmp(ss.str(), d3d11_rgba_data.data(), texture_desc.Width, texture_desc.Height)) {
-//                 std::cout << "  ✓ D3D11 RGBA texture saved as: " << ss.str() << std::endl;
-//             }
-            
-//             hw_ctx.d3d_context->Unmap(staging_texture, 0);
-//         } else {
-//             std::cout << "  ✗ Failed to map staging texture for reading" << std::endl;
-//         }
-        
-//         staging_texture->Release();
-//     } else {
-//         std::cout << "  ✗ Failed to create staging texture for verification" << std::endl;
-//     }
-    
-//     // Initialize TensorRT engine
-//     std::cout << "\n=== TensorRT Initialization ===" << std::endl;
-//     TensorRTInferenceEngine trt_engine;
-//     REQUIRE(trt_engine.initialize(onnx_model_path));
-    
-//     // Set up CUDA device for interop
-//     std::cout << "\n=== CUDA Device Setup ===" << std::endl;
-//     int cuda_device = -1;
-//     IDXGIDevice* dxgi_device = nullptr;
-//     HRESULT hr2 = hw_ctx.d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
-//     REQUIRE(SUCCEEDED(hr2));
-    
-//     IDXGIAdapter* dxgi_adapter = nullptr;
-//     hr2 = dxgi_device->GetAdapter(&dxgi_adapter); 
-//     dxgi_device->Release();
-//     REQUIRE(SUCCEEDED(hr2));
-    
-//     cudaError_t cuda_status = cudaD3D11GetDevice(&cuda_device, dxgi_adapter);
-//     dxgi_adapter->Release();
-//     REQUIRE(cuda_status == cudaSuccess);
-    
-//     cuda_status = cudaSetDevice(cuda_device);
-//     REQUIRE(cuda_status == cudaSuccess);
-    
-//     std::cout << "CUDA device " << cuda_device << " set successfully" << std::endl;
-    
-//     // Register texture with CUDA
-//     std::cout << "\n=== CUDA Graphics Resource Registration ===" << std::endl;
-//     cudaGraphicsResource_t cuda_resource = nullptr;
-//     cuda_status = cudaGraphicsD3D11RegisterResource(
-//         &cuda_resource, rgba_texture, cudaGraphicsRegisterFlagsNone);
-//     REQUIRE(cuda_status == cudaSuccess);
-//     std::cout << "D3D11 texture registered with CUDA successfully" << std::endl;
-    
-//     // Create CUDA stream for async operations
-//     cudaStream_t stream;
-//     cudaStreamCreate(&stream);
-    
-//     // Map the CUDA graphics resource to get access to texture data
-//     std::cout << "\n=== CUDA Graphics Resource Mapping ===" << std::endl;
-//     cuda_status = cudaGraphicsMapResources(1, &cuda_resource, stream);
-//     REQUIRE(cuda_status == cudaSuccess);
-//     std::cout << "CUDA graphics resource mapped successfully" << std::endl;
-    
-//     // Get mapped array from the texture
-//     cudaArray_t cuda_array;
-//     cuda_status = cudaGraphicsSubResourceGetMappedArray(&cuda_array, cuda_resource, 0, 0);
-//     REQUIRE(cuda_status == cudaSuccess);
-//     std::cout << "CUDA array obtained from mapped resource" << std::endl;
-    
-//     // 在 mapped 状态下进行推理
-//     std::cout << "\n=== TensorRT Inference ===" << std::endl;
-//     bool inference_success = trt_engine.infer(
-//         cuda_array, texture_desc.Width, texture_desc.Height, stream);
-//     REQUIRE(inference_success);
-    
-//     // 推理完成后再 unmap
-//     cuda_status = cudaGraphicsUnmapResources(1, &cuda_resource, stream);
-//     REQUIRE(cuda_status == cudaSuccess);
-    
-//     // Get inference results
-//     float* output_data = trt_engine.get_output_data();
-//     REQUIRE(output_data != nullptr);
-    
-//     // Verify output dimensions
-//     UINT out_width, out_height, out_channels;
-//     REQUIRE(trt_engine.get_output_dimensions(out_width, out_height, out_channels));
-    
-//     std::cout << "\n=== Final Results ===" << std::endl;
-//     std::cout << "Inference completed:" << std::endl;
-//     std::cout << "Input: " << texture_desc.Width << "x" << texture_desc.Height << "x4" << std::endl;
-//     std::cout << "Output: " << out_width << "x" << out_height << "x" << out_channels << std::endl;
-    
-//     // Optional: Copy first few output values to verify
-//     std::vector<float> host_output(16);
-//     cuda_status = cudaMemcpy(host_output.data(), output_data, 
-//                             host_output.size() * sizeof(float), cudaMemcpyDeviceToHost);
-//     REQUIRE(cuda_status == cudaSuccess);
-    
-//     std::cout << "Sample output values: ";
-//     for (int i = 0; i < 4; ++i) {
-//         std::cout << host_output[i] << " ";
-//     }
-//     std::cout << std::endl;
-    
-//     // Cleanup
-//     cudaStreamDestroy(stream);
-//     cudaGraphicsUnregisterResource(cuda_resource);
-//     rgba_texture->Release();
-//     av_frame_free(&hw_frame);
-//     cleanup_context(&hw_ctx);
-// }
