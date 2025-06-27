@@ -53,11 +53,11 @@ class StereoDepthModule(nn.Module):
         self.side_model = side_model.model if hasattr(side_model, "model") else side_model
 
     def forward(self, x):
-        # x: BCHW, float32, 0-1, BGRA format from D3D11 texture (4 channels)
-        # D3D11 textures are typically in BGRA format, need to convert to RGB
+        # x: BCHW, float32, 0-1, RGBA format from D3D11 texture (4 channels)
+        # D3D11 DXGI_FORMAT_R32G32B32A32_FLOAT textures are in RGBA order, not BGRA
 
-        # Reorder BGRA to RGB and drop alpha channel
-        x_rgb = x[:, [2, 1, 0], :, :]  # BGRA to RGB
+        # Extract RGB channels (drop alpha channel for processing)
+        x_rgb = x[:, :3, :, :]  # Take first 3 channels (RGB)
 
         depth = self.depth_model_wrapper.infer(
             x_rgb, tta=False, low_vram=False, enable_amp=False, edge_dilation=1, depth_aa=False
@@ -84,29 +84,26 @@ class StereoDepthModule(nn.Module):
         # concat along width
         half_sbs = torch.cat([left_half, right_half], dim=3)  # (B, C, H, W)
         
-        # Convert RGB output back to BGRA format for D3D11 texture compatibility
-        half_sbs_bgr = half_sbs[:, [2, 1, 0], :, :]  # RGB to BGR
-
+        # Keep RGB output as RGB format (no channel reordering needed)
         # Add alpha channel (set to 1.0)
         B, C, H, W = half_sbs.shape
         alpha_channel = torch.ones((B, 1, H, W), dtype=half_sbs.dtype, device=half_sbs.device)
-        half_sbs_bgra_final = torch.cat([half_sbs_bgr, alpha_channel], dim=1)  # (B, 4, H, W) - BGRA
+        half_sbs_rgba_final = torch.cat([half_sbs, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
         
-        return half_sbs_bgra_final
+        return half_sbs_rgba_final
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
 
-# 修改测试数据为 BGRA 格式以匹配 D3D11 纹理格式
-logger.debug(f"Converting RGB to BGRA format to match D3D11 texture format")
-# 将 RGB 转换为 BGRA (重新排列通道顺序)
+# 修改测试数据为 RGBA 格式以匹配 D3D11 纹理格式
+logger.debug(f"Using RGBA format to match D3D11 DXGI_FORMAT_R32G32B32A32_FLOAT texture format")
+# 保持 RGB 顺序，添加 alpha 通道
 x_rgb = torch.stack([x1, x2], dim=0)
-x_bgr = x_rgb[:, [2, 1, 0], :, :]  # RGB to BGR
 B, C, H, W = x_rgb.shape
 alpha_channel = torch.ones((B, 1, H, W), dtype=x_rgb.dtype, device=x_rgb.device)
-x = torch.cat([x_bgr, alpha_channel], dim=1)  # (B, 4, H, W) - BGRA
+x = torch.cat([x_rgb, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
 
-logger.debug(f"BGRA stacked x shape: {x.shape}")  # Should be (2, 4, H, W)
+logger.debug(f"RGBA stacked x shape: {x.shape}")  # Should be (2, 4, H, W)
 
 with torch.inference_mode():
     x = x.to(depth_model.device)
@@ -129,7 +126,7 @@ with torch.inference_mode():
         },
     )
     logger.info(f"ONNX model saved to {output_path}")
-    logger.info(f"Model expects BGRA input (4 channels) from D3D11 texture and outputs BGRA (4 channels) for D3D11 compatibility")
+    logger.info(f"Model expects RGBA input (4 channels) from D3D11 texture and outputs RGBA (4 channels) for D3D11 compatibility")
 
 os.makedirs("tmp", exist_ok=True)
 for idx in range(half_sbs.shape[0]):

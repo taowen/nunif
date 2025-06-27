@@ -305,6 +305,8 @@ public:
         }
         
         std::cout << "    ✓ TensorRT synchronous inference completed" << std::endl;
+        std::cout << "    → Input format: RGBA (4 channels)" << std::endl;
+        std::cout << "    → Output format: RGBA (4 channels)" << std::endl;
         std::cout << "    → Input size: " << input_size << " bytes" << std::endl;
         std::cout << "    → Output size: " << output_size << " bytes" << std::endl;
         

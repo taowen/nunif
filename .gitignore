@@ -18,6 +18,7 @@ tmp
 *.mkv
 /debug_textures
 /directxtex_desktop_win10.2025.3.25.2
+/analysis_output
 /data
 /.vscode
 !/data/.keep
