@@ -22,7 +22,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(spike src/main.cpp src/d11_decode.cpp src/convert_color.cpp)
+add_executable(spike src/test_convert_color.cpp src/d11_decode.cpp src/convert_color.cpp)
 
 # Link Catch2 to the executable
 target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)

@@ -13,6 +13,7 @@ tmp
 *.tar
 *.zip
 *.xcf
+*.bmp
 /.vscode
 /data
 !/data/.keep

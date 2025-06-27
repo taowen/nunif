@@ -321,7 +321,7 @@ TEST_CASE("Compare Hardware vs Software Decode") {
     
     // Input file
     const char* input_file = "06 4k.mp4";
-    const int frame_index = 650;
+    const int frame_index = 100;
     
     std::cout << "=== Testing Hardware vs Software Decode Comparison ===" << std::endl;
     std::cout << "Input file: " << input_file << std::endl;

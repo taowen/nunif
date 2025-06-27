@@ -85,7 +85,7 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
  *              - 函数负责：读取frame数据进行颜色转换
  * 
  * @return ID3D11Texture2D* 转换后的RGBA纹理
- *         - 成功：返回有效的D3D11纹理指针，格式为DXGI_FORMAT_R8G8B8A8_UNORM
+ *         - 成功：返回有效的D3D11纹理指针，格式为 DXGI_FORMAT_R32G32B32A32_FLOAT
  *         - 失败：返回nullptr
  *         - 调用者负责：调用Release()释放返回的纹理
  *         - 注意：返回的纹理创建时启用D3D11_RESOURCE_MISC_SHARED，支持CUDA互操作
@@ -110,3 +110,6 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
  *       }
  */
 ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
+
+// 添加保存RGBA数据为BMP文件的函数声明
+void save_rgba_as_bmp(const char* filename, const uint8_t* rgba_data, uint32_t width, uint32_t height);
