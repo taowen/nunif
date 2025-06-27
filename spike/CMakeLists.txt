@@ -12,7 +12,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Add cmake directory to module path
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# Fetch Catch2 for testing
+include(FetchContent)
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.4.0  # 或者使用最新的稳定版本
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Catch2)
+
 add_executable(spike src/main.cpp)
+
+# Link Catch2 to the executable
+target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
 
 # Apply Windows/MSVC compile options
 target_compile_options(spike PRIVATE
