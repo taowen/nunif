@@ -10,6 +10,105 @@
 #undef min
 #endif
 
+/*
+根据这份代码分析，D3D11 NV12格式数据在显存中的实际布局如下：
+
+## NV12格式显存布局总结
+
+### 整体结构
+```
+[Y平面数据 - height * row_pitch 字节]
+[UV平面数据 - (height/2) * row_pitch 字节]
+```
+
+### 关键参数
+- `row_pitch`: 每行实际占用的字节数（包含内存对齐padding）
+- `width`: 图像实际宽度
+- `height`: 图像实际高度
+
+### Y平面布局（亮度）
+```cpp:spike/src/dump_d3d11_avframe.cpp
+// Y平面：width * height 像素，每像素1字节
+for (int y = 0; y < height; y++) {
+    memcpy(result.y_plane.data() + y * width, 
+           mapped_data + y * row_pitch,  // 注意：使用row_pitch而非width
+           width);
+}
+```
+
+### UV平面布局（色度，交错存储）
+```cpp:spike/src/dump_d3d11_avframe.cpp
+// UV平面起始位置：Y平面之后
+uint8_t* uv_start = mapped_data + input_desc.Height * row_pitch;
+
+// UV数据交错存储：UVUVUV...
+for (int y = 0; y < height / 2; y++) {
+    for (int x = 0; x < width / 2; x++) {
+        int src_idx = y * row_pitch + x * 2;  // 每2个字节一组：UV
+        int dst_idx = y * (width / 2) + x;
+        result.u_plane[dst_idx] = uv_start[src_idx];     // U分量
+        result.v_plane[dst_idx] = uv_start[src_idx + 1]; // V分量
+    }
+}
+```
+
+## 常见的CUDA读取错误
+
+### 1. 忽略内存对齐（row_pitch）
+**错误做法：**
+```cpp
+// 错误：直接使用width计算偏移
+Y_offset = y * width;
+```
+
+**正确做法：**
+```cpp
+// 正确：使用row_pitch计算偏移
+Y_offset = y * row_pitch;
+```
+
+### 2. UV平面位置计算错误
+**错误做法：**
+```cpp
+// 错误：使用width * height
+uv_offset = width * height;
+```
+
+**正确做法：**
+```cpp
+// 正确：使用height * row_pitch（考虑内存对齐）
+uv_offset = height * row_pitch;
+```
+
+### 3. UV交错存储理解错误
+**错误做法：**
+```cpp
+// 错误：把UV当作平面存储
+U_value = uv_data[uv_index];
+V_value = uv_data[uv_index + uv_plane_size];
+```
+
+**正确做法：**
+```cpp
+// 正确：UV交错存储，每2字节一组
+U_value = uv_data[uv_index * 2];     // 偶数位置是U
+V_value = uv_data[uv_index * 2 + 1]; // 奇数位置是V
+```
+
+## 完整的内存地址计算公式
+
+```cpp
+// Y平面某像素(x,y)的地址
+Y_address = base_address + y * row_pitch + x;
+
+// UV平面某像素组(x,y)的地址（注意x,y都是UV坐标，范围是原图的一半）
+UV_base = base_address + height * row_pitch;
+U_address = UV_base + y * row_pitch + x * 2;     // U分量
+V_address = UV_base + y * row_pitch + x * 2 + 1; // V分量
+```
+
+**关键点：`row_pitch`通常比`width`大，因为GPU内存需要对齐（如256字节对齐），这是CUDA读取出错的最常见原因。**
+*/
 YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_to_file) {
     YUVData result;
     
