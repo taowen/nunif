@@ -293,26 +293,18 @@ public:
         // Copy input data to device buffer (input_data_device is already on device)
         checkCudaErrors(cudaMemcpyAsync(d_input, input_data_device, input_size, cudaMemcpyDeviceToDevice, stream));
         
-        // Set tensor addresses
-        if (!context->setTensorAddress(engine->getIOTensorName(0), d_input)) {
-            std::cerr << "Failed to set input tensor address" << std::endl;
-            return false;
-        }
-        if (!context->setTensorAddress(engine->getIOTensorName(1), d_output)) {
-            std::cerr << "Failed to set output tensor address" << std::endl;
-            return false;
-        }
+        // Prepare bindings for executeV2
+        void* bindings[2];
+        bindings[0] = d_input;  // input tensor
+        bindings[1] = d_output; // output tensor
         
-        // Execute inference
-        if (!context->enqueueV3(stream)) {
-            std::cerr << "TensorRT inference failed" << std::endl;
+        // Execute synchronous inference
+        if (!context->executeV2(bindings)) {
+            std::cerr << "TensorRT synchronous inference failed" << std::endl;
             return false;
         }
         
-        // Wait for completion
-        checkCudaErrors(cudaStreamSynchronize(stream));
-        
-        std::cout << "    ✓ TensorRT inference completed" << std::endl;
+        std::cout << "    ✓ TensorRT synchronous inference completed" << std::endl;
         std::cout << "    → Input size: " << input_size << " bytes" << std::endl;
         std::cout << "    → Output size: " << output_size << " bytes" << std::endl;
         
@@ -471,61 +463,7 @@ void start_infer_sbs(
                 continue;
             }
 
-            // Get output dimensions after successful inference
-            UINT actual_output_width, actual_output_height, actual_output_channels;
-            if (!g_inference_engine->get_output_dimensions(actual_output_width, actual_output_height, actual_output_channels)) {
-                std::cerr << "    ✗ Failed to get output dimensions for frame " << processed_count << "\n";
-                checkCudaErrors(cudaFree(d_temp_input));
-                checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
-                checkCudaErrors(cudaGraphicsUnregisterResource(cuda_resource));
-                continue;
-            }
-
-            // Create output D3D11 texture using the FFmpeg-provided D3D11 device
-            ID3D11Texture2D* output_texture = nullptr;
-            D3D11_TEXTURE2D_DESC desc = {};
-            desc.Width = actual_output_width;  // Use actual TensorRT output width
-            desc.Height = actual_output_height; // Use actual TensorRT output height
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-            desc.SampleDesc.Count = 1;
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-            
-            HRESULT hr = d3d11_device->CreateTexture2D(&desc, nullptr, &output_texture);
-            if (SUCCEEDED(hr)) {
-                // Register the output texture with CUDA for copying inference results
-                cudaGraphicsResource_t output_cuda_resource = nullptr;
-                checkCudaErrors(cudaGraphicsD3D11RegisterResource(&output_cuda_resource, output_texture, cudaGraphicsRegisterFlagsWriteDiscard));
-                
-                checkCudaErrors(cudaGraphicsMapResources(1, &output_cuda_resource, cuda_stream));
-                cudaArray_t output_cuda_array;
-                checkCudaErrors(cudaGraphicsSubResourceGetMappedArray(&output_cuda_array, output_cuda_resource, 0, 0));
-                
-                // Copy TensorRT inference results to output texture using actual dimensions
-                size_t output_row_pitch = actual_output_width * actual_output_channels * sizeof(float);
-                checkCudaErrors(cudaMemcpy2DToArrayAsync(
-                    output_cuda_array, 0, 0,
-                    g_inference_engine->get_output_data(), output_row_pitch,
-                    output_row_pitch, actual_output_height,
-                    cudaMemcpyDeviceToDevice, cuda_stream
-                ));
-                
-                checkCudaErrors(cudaGraphicsUnmapResources(1, &output_cuda_resource, cuda_stream));
-                checkCudaErrors(cudaGraphicsUnregisterResource(output_cuda_resource));
-                
-                // Create stereo inference result and push to output queue
-                D11Frame stereo_frame(output_texture, actual_output_width, actual_output_height);
-                output_frame_queue.push(std::move(stereo_frame));
-                std::cout << ">>> Stereo inference frame " << processed_count << " completed and queued\n";
-            } else {
-                std::cerr << "    ✗ Failed to create output texture for frame " << processed_count << "\n";
-            }
-            
-            if (output_texture) {
-                output_texture->Release();
-            }
+            std::cout << ">>> Stereo inference frame " << processed_count << " completed\n";
 
             checkCudaErrors(cudaFree(d_temp_input));
             checkCudaErrors(cudaGraphicsUnmapResources(1, &cuda_resource, cuda_stream));
