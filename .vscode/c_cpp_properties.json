@@ -4,7 +4,9 @@
             "name": "Win32",
             "includePath": [
                 "${workspaceFolder}/**",
-                "C:\\games\\ffmpeg-7.1.1\\include"
+                "C:\\games\\ffmpeg-7.1.1\\include",
+                "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\include",
+                "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\TensorRT\\include"
             ],
             "defines": [
                 "_DEBUG",
