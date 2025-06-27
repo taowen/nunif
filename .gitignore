@@ -13,6 +13,7 @@ tmp
 *.tar
 *.zip
 *.xcf
+/.vscode
 /data
 !/data/.keep
 /models
