@@ -17,8 +17,8 @@ from nunif.utils.ui import TorchHubDir
 from nunif.logger import logger
 from iw3.backward_warp import apply_divergence_nn_LR
 
-img_path1 = "iw3/figure/convergence.png"
-img_path2 = "iw3/figure/divergence.png"
+img_path1 = "C:/games/nunif/debug_textures/frame_2_sbs_infer.png"
+img_path2 = "C:/games/nunif/debug_textures/frame_2_sbs_infer.png"
 logger.debug(f"load two images")
 img1 = Image.open(img_path1).convert("RGB")
 img2 = Image.open(img_path2).convert("RGB")
@@ -146,3 +146,13 @@ def compare_outputs(torch_out, onnx_out, name):
     print(f"{name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
 compare_outputs(torch_left_eye, onnx_left_eye, "Left Eye")
+
+# 保存 ONNX 推理输出的图片
+for idx in range(onnx_left_eye.shape[0]):
+    logger.debug(f"Saving onnx_left_eye_{idx}.png shape: {onnx_left_eye[idx].shape}")
+    # 将 numpy 数组转换为 torch tensor，然后转换为 PIL 图像
+    onnx_tensor = torch.from_numpy(onnx_left_eye[idx])
+    TF.to_pil_image(onnx_tensor).save(f"tmp/onnx_left_eye_{idx}.png")
+
+print(f"Saved PyTorch outputs: tmp/left_eye_0.png, tmp/left_eye_1.png")
+print(f"Saved ONNX outputs: tmp/onnx_left_eye_0.png, tmp/onnx_left_eye_1.png")
