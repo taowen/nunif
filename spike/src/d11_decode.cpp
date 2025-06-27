@@ -107,10 +107,9 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
     // 解码循环
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
-    AVFrame* sw_frame = av_frame_alloc();
     AVFrame* result_frame = nullptr;
     
-    if (!packet || !frame || !sw_frame) {
+    if (!packet || !frame) {
         goto cleanup;
     }
     
@@ -134,17 +133,16 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
                 }
                 
                 if (current_pts >= timestamp) {
-                    // 处理硬件帧传输
-                    if (frame->format == AV_PIX_FMT_D3D11) {
-                        if (av_hwframe_transfer_data(sw_frame, frame, 0) >= 0) {
-                            result_frame = av_frame_clone(sw_frame);
-                        }
-                    } else {
-                        result_frame = av_frame_clone(frame);
-                    }
+                    // 直接返回硬件帧，不进行传输
+                    result_frame = av_frame_clone(frame);
                     
                     if (result_frame) {
                         std::cout << "Frame " << theIndex << " decoded successfully" << std::endl;
+                        if (result_frame->format == AV_PIX_FMT_D3D11) {
+                            std::cout << "Hardware frame returned (GPU memory)" << std::endl;
+                        } else {
+                            std::cout << "Software frame returned (CPU memory)" << std::endl;
+                        }
                     }
                     goto cleanup;
                 }
@@ -156,7 +154,6 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
 cleanup:
     if (packet) av_packet_free(&packet);
     if (frame) av_frame_free(&frame);
-    if (sw_frame) av_frame_free(&sw_frame);
     
     return result_frame;
 }

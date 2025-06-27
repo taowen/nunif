@@ -99,13 +99,64 @@ AVFrame* sw_decode(FFMepgContext* ctx, const std::string& inputFile, int theInde
                 }
                 
                 if (frame_count == theIndex) {
-                    // 找到目标帧，复制一份返回
-                    AVFrame* result_frame = av_frame_alloc();
-                    av_frame_ref(result_frame, frame);
+                    // 找到目标帧，先转换格式为NV12，再返回
+                    AVFrame* converted_frame = av_frame_alloc();
+                    converted_frame->format = AV_PIX_FMT_NV12;
+                    converted_frame->width = frame->width;
+                    converted_frame->height = frame->height;
+                    
+                    // 分配转换后帧的缓冲区
+                    if (av_frame_get_buffer(converted_frame, 0) < 0) {
+                        std::cerr << "Could not allocate converted frame buffer" << std::endl;
+                        av_frame_free(&converted_frame);
+                        av_frame_unref(frame);
+                        av_frame_free(&frame);
+                        av_packet_free(&packet);
+                        return nullptr;
+                    }
+                    
+                    // 创建格式转换上下文
+                    SwsContext* sws_ctx = sws_getContext(
+                        frame->width, frame->height, (AVPixelFormat)frame->format,
+                        converted_frame->width, converted_frame->height, AV_PIX_FMT_NV12,
+                        SWS_BILINEAR, nullptr, nullptr, nullptr
+                    );
+                    
+                    if (!sws_ctx) {
+                        std::cerr << "Could not create scaling context" << std::endl;
+                        av_frame_free(&converted_frame);
+                        av_frame_unref(frame);
+                        av_frame_free(&frame);
+                        av_packet_free(&packet);
+                        return nullptr;
+                    }
+                    
+                    // 执行格式转换
+                    sws_scale(sws_ctx, 
+                              frame->data, frame->linesize, 0, frame->height,
+                              converted_frame->data, converted_frame->linesize);
+                    
+                    // 复制其他帧属性
+                    converted_frame->pts = frame->pts;
+                    converted_frame->pkt_dts = frame->pkt_dts;
+                    converted_frame->best_effort_timestamp = frame->best_effort_timestamp;
+                    converted_frame->colorspace = frame->colorspace;
+                    converted_frame->color_range = frame->color_range;
+                    converted_frame->color_primaries = frame->color_primaries;
+                    converted_frame->color_trc = frame->color_trc;
+                    converted_frame->chroma_location = frame->chroma_location;
+                    
+                    std::cout << "✓ Software decode completed, converted from " 
+                              << av_get_pix_fmt_name((AVPixelFormat)frame->format)
+                              << " to " << av_get_pix_fmt_name(AV_PIX_FMT_NV12) << std::endl;
+                    
+                    // 清理资源
+                    sws_freeContext(sws_ctx);
                     av_frame_unref(frame);
                     av_frame_free(&frame);
                     av_packet_free(&packet);
-                    return result_frame;
+                    
+                    return converted_frame;
                 }
                 
                 frame_count++;
@@ -120,151 +171,150 @@ AVFrame* sw_decode(FFMepgContext* ctx, const std::string& inputFile, int theInde
     return nullptr;
 }
 
-// 添加帧对比函数
+// 改进的帧对比函数 - 不做任何转换，要求完全一致
 bool compare_frames(AVFrame* frame1, AVFrame* frame2, double threshold) {
     if (!frame1 || !frame2) {
+        std::cout << "One or both frames are null" << std::endl;
         return false;
     }
     
-    // 检查基本属性
+    // 检查基本属性是否完全一致
     if (frame1->width != frame2->width || frame1->height != frame2->height) {
-        std::cout << "Frame dimensions differ: " 
+        std::cout << "✗ Frame dimensions differ: " 
                   << frame1->width << "x" << frame1->height << " vs " 
                   << frame2->width << "x" << frame2->height << std::endl;
         return false;
     }
     
-    // 添加色彩空间信息打印
-    std::cout << "Frame1 colorspace: " << av_color_space_name(frame1->colorspace) << std::endl;
-    std::cout << "Frame2 colorspace: " << av_color_space_name(frame2->colorspace) << std::endl;
-    std::cout << "Frame1 color_range: " << av_color_range_name(frame1->color_range) << std::endl;
-    std::cout << "Frame2 color_range: " << av_color_range_name(frame2->color_range) << std::endl;
-    std::cout << "Frame1 color_primaries: " << av_color_primaries_name(frame1->color_primaries) << std::endl;
-    std::cout << "Frame2 color_primaries: " << av_color_primaries_name(frame2->color_primaries) << std::endl;
-    std::cout << "Frame1 color_trc: " << av_color_transfer_name(frame1->color_trc) << std::endl;
-    std::cout << "Frame2 color_trc: " << av_color_transfer_name(frame2->color_trc) << std::endl;
-    
-    AVFrame* converted_frame1 = nullptr;
     if (frame1->format != frame2->format) {
-        converted_frame1 = av_frame_alloc();
-        converted_frame1->format = frame2->format;
-        converted_frame1->width = frame1->width;
-        converted_frame1->height = frame1->height;
-        av_frame_get_buffer(converted_frame1, 32);
-
-        SwsContext* conv_ctx = sws_getContext(
-            frame1->width, frame1->height, (AVPixelFormat)frame1->format,
-            frame1->width, frame1->height, (AVPixelFormat)frame2->format,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
-        
-        sws_scale(conv_ctx, frame1->data, frame1->linesize, 0, frame1->height,
-                  converted_frame1->data, converted_frame1->linesize);
-        sws_freeContext(conv_ctx);
-        frame1 = converted_frame1;
-    }
-    
-    // 将两个帧都转换为RGB24格式进行对比，但使用相同的色彩空间参数
-    SwsContext* sws_ctx1 = sws_getContext(
-        frame1->width, frame1->height, (AVPixelFormat)frame1->format,
-        frame1->width, frame1->height, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
-    
-    SwsContext* sws_ctx2 = sws_getContext(
-        frame2->width, frame2->height, (AVPixelFormat)frame2->format,
-        frame2->width, frame2->height, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
-    
-    if (!sws_ctx1 || !sws_ctx2) {
-        if (sws_ctx1) sws_freeContext(sws_ctx1);
-        if (sws_ctx2) sws_freeContext(sws_ctx2);
+        std::cout << "✗ Pixel formats differ: " 
+                  << av_get_pix_fmt_name((AVPixelFormat)frame1->format) << " vs " 
+                  << av_get_pix_fmt_name((AVPixelFormat)frame2->format) << std::endl;
         return false;
     }
     
-    // 设置色彩空间参数 - 强制使用相同的色彩空间
-    int* inv_table1;
-    int* table1;
-    int srcRange1, dstRange1, brightness1, contrast1, saturation1;
-    
-    int* inv_table2;
-    int* table2;
-    int srcRange2, dstRange2, brightness2, contrast2, saturation2;
-    
-    // 获取当前的色彩空间转换表
-    sws_getColorspaceDetails(sws_ctx1, &inv_table1, &srcRange1, &table1, &dstRange1, 
-                            &brightness1, &contrast1, &saturation1);
-    sws_getColorspaceDetails(sws_ctx2, &inv_table2, &srcRange2, &table2, &dstRange2, 
-                            &brightness2, &contrast2, &saturation2);
-    
-    std::cout << "SWS Context1 - srcRange: " << srcRange1 << ", dstRange: " << dstRange1 << std::endl;
-    std::cout << "SWS Context2 - srcRange: " << srcRange2 << ", dstRange: " << dstRange2 << std::endl;
-    
-    // 如果色彩空间参数不同，强制使用相同的参数
-    if (srcRange1 != srcRange2 || dstRange1 != dstRange2) {
-        std::cout << "Color space parameters differ, forcing same parameters..." << std::endl;
-        
-        // 使用BT.709色彩空间和full range
-        const int* bt709_coeffs = sws_getCoefficients(SWS_CS_ITU709);
-        sws_setColorspaceDetails(sws_ctx1, bt709_coeffs, 1, bt709_coeffs, 1, 0, 1 << 16, 1 << 16);
-        sws_setColorspaceDetails(sws_ctx2, bt709_coeffs, 1, bt709_coeffs, 1, 0, 1 << 16, 1 << 16);
+    // 检查色彩空间属性是否完全一致
+    if (frame1->colorspace != frame2->colorspace) {
+        std::cout << "✗ Colorspace differs: " 
+                  << av_color_space_name(frame1->colorspace) << " vs " 
+                  << av_color_space_name(frame2->colorspace) << std::endl;
+        return false;
     }
     
-    // 分配RGB24缓冲区
-    AVFrame* rgb_frame1 = av_frame_alloc();
-    AVFrame* rgb_frame2 = av_frame_alloc();
+    if (frame1->color_range != frame2->color_range) {
+        std::cout << "✗ Color range differs: " 
+                  << av_color_range_name(frame1->color_range) << " vs " 
+                  << av_color_range_name(frame2->color_range) << std::endl;
+        return false;
+    }
     
-    rgb_frame1->format = AV_PIX_FMT_RGB24;
-    rgb_frame1->width = frame1->width;
-    rgb_frame1->height = frame1->height;
-    av_frame_get_buffer(rgb_frame1, 32);
+    if (frame1->color_primaries != frame2->color_primaries) {
+        std::cout << "✗ Color primaries differ: " 
+                  << av_color_primaries_name(frame1->color_primaries) << " vs " 
+                  << av_color_primaries_name(frame2->color_primaries) << std::endl;
+        return false;
+    }
     
-    rgb_frame2->format = AV_PIX_FMT_RGB24;
-    rgb_frame2->width = frame2->width;
-    rgb_frame2->height = frame2->height;
-    av_frame_get_buffer(rgb_frame2, 32);
+    if (frame1->color_trc != frame2->color_trc) {
+        std::cout << "✗ Color transfer characteristics differ: " 
+                  << av_color_transfer_name(frame1->color_trc) << " vs " 
+                  << av_color_transfer_name(frame2->color_trc) << std::endl;
+        return false;
+    }
     
-    // 转换像素格式
-    sws_scale(sws_ctx1, frame1->data, frame1->linesize, 0, frame1->height,
-              rgb_frame1->data, rgb_frame1->linesize);
-    sws_scale(sws_ctx2, frame2->data, frame2->linesize, 0, frame2->height,
-              rgb_frame2->data, rgb_frame2->linesize);
+    // 检查色度采样位置
+    if (frame1->chroma_location != frame2->chroma_location) {
+        std::cout << "✗ Chroma location differs: " 
+                  << frame1->chroma_location << " vs " << frame2->chroma_location << std::endl;
+        return false;
+    }
     
-    // 对比像素数据
+    std::cout << "✓ All frame properties match:" << std::endl;
+    std::cout << "  - Dimensions: " << frame1->width << "x" << frame1->height << std::endl;
+    std::cout << "  - Format: " << av_get_pix_fmt_name((AVPixelFormat)frame1->format) << std::endl;
+    std::cout << "  - Colorspace: " << av_color_space_name(frame1->colorspace) << std::endl;
+    std::cout << "  - Color range: " << av_color_range_name(frame1->color_range) << std::endl;
+    std::cout << "  - Color primaries: " << av_color_primaries_name(frame1->color_primaries) << std::endl;
+    std::cout << "  - Color TRC: " << av_color_transfer_name(frame1->color_trc) << std::endl;
+    
+    // 获取像素格式描述
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get((AVPixelFormat)frame1->format);
+    if (!desc) {
+        std::cout << "✗ Could not get pixel format descriptor" << std::endl;
+        return false;
+    }
+    
+    // 直接比较原始像素数据
     bool frames_match = true;
     double total_diff = 0.0;
     int pixel_count = 0;
+    int max_diff = 0;
     
-    for (int y = 0; y < frame1->height; y++) {
-        uint8_t* line1 = rgb_frame1->data[0] + y * rgb_frame1->linesize[0];
-        uint8_t* line2 = rgb_frame2->data[0] + y * rgb_frame2->linesize[0];
+    // 遍历所有平面（对于YUV格式通常有多个平面）
+    for (int plane = 0; plane < desc->nb_components; plane++) {
+        int plane_idx = desc->comp[plane].plane;
+        int plane_height = frame1->height;
+        int plane_width = frame1->width;
         
-        for (int x = 0; x < frame1->width * 3; x++) {
-            double diff = std::abs(line1[x] - line2[x]) / 255.0;
-            total_diff += diff;
-            pixel_count++;
+        // 计算平面尺寸
+        if (plane_idx > 0) {
+            plane_height = AV_CEIL_RSHIFT(frame1->height, desc->log2_chroma_h);
+            plane_width = AV_CEIL_RSHIFT(frame1->width, desc->log2_chroma_w);
+        }
+        
+        // 检查linesize是否一致
+        if (frame1->linesize[plane_idx] != frame2->linesize[plane_idx]) {
+            std::cout << "✗ Linesize differs for plane " << plane_idx << ": " 
+                      << frame1->linesize[plane_idx] << " vs " << frame2->linesize[plane_idx] << std::endl;
+            return false;
+        }
+        
+        uint8_t* data1 = frame1->data[plane_idx];
+        uint8_t* data2 = frame2->data[plane_idx];
+        int linesize = frame1->linesize[plane_idx];
+        
+        if (!data1 || !data2) {
+            std::cout << "✗ Missing data for plane " << plane_idx << std::endl;
+            return false;
+        }
+        
+        // 按行比较像素数据
+        for (int y = 0; y < plane_height; y++) {
+            uint8_t* line1 = data1 + y * linesize;
+            uint8_t* line2 = data2 + y * linesize;
             
-            if (diff > threshold) {
-                frames_match = false;
+            // 只比较实际像素数据，不包括padding
+            int bytes_per_line = plane_width;
+            if (desc->comp[plane].depth > 8) {
+                bytes_per_line *= 2; // 16-bit
+            }
+            
+            for (int x = 0; x < bytes_per_line; x++) {
+                int diff = std::abs(line1[x] - line2[x]);
+                total_diff += diff / 255.0;
+                pixel_count++;
+                
+                if (diff > max_diff) {
+                    max_diff = diff;
+                }
+                
+                if (diff / 255.0 > threshold) {
+                    frames_match = false;
+                }
             }
         }
     }
     
-    double avg_diff = total_diff / pixel_count;
-    std::cout << "Average pixel difference: " << avg_diff << std::endl;
-    std::cout << "Threshold: " << threshold << std::endl;
-    
-    // 清理资源
-    sws_freeContext(sws_ctx1);
-    sws_freeContext(sws_ctx2);
-    av_frame_free(&rgb_frame1);
-    av_frame_free(&rgb_frame2);
-    if (converted_frame1) {
-        av_frame_free(&converted_frame1);
-    }
+    double avg_diff = pixel_count > 0 ? total_diff / pixel_count : 0.0;
+    std::cout << "  - Average pixel difference: " << avg_diff << std::endl;
+    std::cout << "  - Maximum pixel difference: " << max_diff << "/255 (" << (max_diff/255.0) << ")" << std::endl;
+    std::cout << "  - Threshold: " << threshold << std::endl;
+    std::cout << "  - Total pixels compared: " << pixel_count << std::endl;
     
     return frames_match;
 }
 
-// 添加硬件与软件解码对比测试
+// 改进硬件与软件解码对比测试
 TEST_CASE("Compare Hardware vs Software Decode") {
     // Initialize FFmpeg
     av_log_set_level(AV_LOG_ERROR);
@@ -273,57 +323,78 @@ TEST_CASE("Compare Hardware vs Software Decode") {
     const char* input_file = "06 4k.mp4";
     const int frame_index = 650;
     
+    std::cout << "=== Testing Hardware vs Software Decode Comparison ===" << std::endl;
+    std::cout << "Input file: " << input_file << std::endl;
+    std::cout << "Frame index: " << frame_index << std::endl;
+    
     // 硬件解码
+    std::cout << "\n--- Hardware Decode ---" << std::endl;
     FFMepgContext hw_ctx;
     AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
     REQUIRE(hw_frame != nullptr);
     
     // 软件解码
+    std::cout << "\n--- Software Decode ---" << std::endl;
     FFMepgContext sw_ctx;
     AVFrame* sw_frame = sw_decode(&sw_ctx, input_file, frame_index);
     REQUIRE(sw_frame != nullptr);
     
+    std::cout << "\n--- Frame Information ---" << std::endl;
     std::cout << "Hardware decode format: " << av_get_pix_fmt_name((AVPixelFormat)hw_frame->format) << std::endl;
     std::cout << "Software decode format: " << av_get_pix_fmt_name((AVPixelFormat)sw_frame->format) << std::endl;
     
     // 如果硬件解码是GPU格式，需要传输到CPU
     AVFrame* hw_frame_cpu = nullptr;
     if (hw_frame->format == AV_PIX_FMT_D3D11) {
+        std::cout << "\n--- Transferring Hardware Frame to CPU ---" << std::endl;
         hw_frame_cpu = av_frame_alloc();
         if (av_hwframe_transfer_data(hw_frame_cpu, hw_frame, 0) < 0) {
-            std::cerr << "Failed to transfer hardware frame to CPU" << std::endl;
+            std::cerr << "✗ Failed to transfer hardware frame to CPU" << std::endl;
             av_frame_free(&hw_frame_cpu);
             hw_frame_cpu = nullptr;
         } else {
-            std::cout << "Hardware frame transferred to CPU, format: " << av_get_pix_fmt_name((AVPixelFormat)hw_frame_cpu->format) << std::endl;
+            std::cout << "✓ Hardware frame transferred to CPU" << std::endl;
+            std::cout << "Transferred format: " << av_get_pix_fmt_name((AVPixelFormat)hw_frame_cpu->format) << std::endl;
+            
+            // 重要：从原始硬件帧复制色彩空间信息到传输后的帧
+            // 因为 av_hwframe_transfer_data 可能不会复制所有元数据
+            hw_frame_cpu->colorspace = hw_frame->colorspace;
+            hw_frame_cpu->color_range = hw_frame->color_range;
+            hw_frame_cpu->color_primaries = hw_frame->color_primaries;
+            hw_frame_cpu->color_trc = hw_frame->color_trc;
+            hw_frame_cpu->chroma_location = hw_frame->chroma_location;
+            
+            std::cout << "Color space information copied from hardware frame" << std::endl;
         }
     } else {
         hw_frame_cpu = hw_frame;
+        std::cout << "Hardware frame is already in CPU memory" << std::endl;
     }
     
     if (hw_frame_cpu) {
-        // Copy color space metadata from software frame to hardware frame
-        // This ensures both frames use the same color space conversion parameters
-        hw_frame_cpu->colorspace = sw_frame->colorspace;
-        hw_frame_cpu->color_range = sw_frame->color_range;
-        hw_frame_cpu->color_primaries = sw_frame->color_primaries;
-        hw_frame_cpu->color_trc = sw_frame->color_trc;
+        std::cout << "\n--- Frame Comparison ---" << std::endl;
         
-        std::cout << "Copied color space metadata from software to hardware frame" << std::endl;
+        // 不做任何修改，直接比较原始帧
+        bool frames_match = compare_frames(hw_frame_cpu, sw_frame, 0.02); // 2% 容差
         
-        // 对比两个解码结果
-        bool frames_match = compare_frames(hw_frame_cpu, sw_frame, 0.05); // 5% 容差
-        
+        std::cout << "\n--- Result ---" << std::endl;
         if (frames_match) {
-            std::cout << "✓ Hardware and software decode results match!" << std::endl;
+            std::cout << "✓ SUCCESS: Hardware and software decode results are identical!" << std::endl;
         } else {
-            std::cout << "✗ Hardware and software decode results differ!" << std::endl;
+            std::cout << "✗ FAILURE: Hardware and software decode results differ!" << std::endl;
+            std::cout << "This could indicate:" << std::endl;
+            std::cout << "  - Different color space handling between HW/SW decoders" << std::endl;
+            std::cout << "  - Hardware decoder using different parameters" << std::endl;
+            std::cout << "  - Precision differences in decoding algorithms" << std::endl;
         }
         
         // 如果是传输的帧，需要释放
         if (hw_frame_cpu != hw_frame) {
             av_frame_free(&hw_frame_cpu);
         }
+    } else {
+        std::cout << "\n--- Result ---" << std::endl;
+        std::cout << "✗ FAILURE: Could not transfer hardware frame for comparison" << std::endl;
     }
     
     // Cleanup
