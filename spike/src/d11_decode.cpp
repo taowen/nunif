@@ -46,6 +46,22 @@ static bool initialize_decoder(FFMepgContext* ctx, const std::string& inputFile)
     // 尝试设置D3D11硬件加速
     if (av_hwdevice_ctx_create(&ctx->hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0) >= 0) {
         ctx->codec_ctx->hw_device_ctx = av_buffer_ref(ctx->hw_device_ctx);
+        
+        // 从硬件设备上下文中提取D3D11设备和设备上下文
+        AVHWDeviceContext* hw_device_ctx = (AVHWDeviceContext*)ctx->hw_device_ctx->data;
+        AVD3D11VADeviceContext* d3d11_device_ctx = (AVD3D11VADeviceContext*)hw_device_ctx->hwctx;
+        
+        ctx->d3d_device = d3d11_device_ctx->device;
+        ctx->d3d_context = d3d11_device_ctx->device_context;
+        
+        // 增加引用计数，防止FFmpeg释放时导致野指针
+        if (ctx->d3d_device) {
+            ctx->d3d_device->AddRef();
+        }
+        if (ctx->d3d_context) {
+            ctx->d3d_context->AddRef();
+        }
+        
         std::cout << "D3D11 hardware acceleration enabled" << std::endl;
     } else {
         std::cout << "Failed to create D3D11 context, using software decoding" << std::endl;
@@ -72,6 +88,16 @@ void cleanup_context(FFMepgContext* ctx) {
     }
     if (ctx->hw_device_ctx) {
         av_buffer_unref(&ctx->hw_device_ctx);
+    }
+    
+    // 释放D3D11资源
+    if (ctx->d3d_context) {
+        ctx->d3d_context->Release();
+        ctx->d3d_context = nullptr;
+    }
+    if (ctx->d3d_device) {
+        ctx->d3d_device->Release();
+        ctx->d3d_device = nullptr;
     }
     
     ctx->video_stream_idx = -1;
