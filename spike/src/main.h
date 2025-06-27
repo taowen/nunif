@@ -10,6 +10,7 @@ extern "C" {
 #include <iostream>
 #include <string>
 #include <d3d11.h>
+#include <vector>
 
 struct FFMepgContext {
     AVFormatContext* fmt_ctx = nullptr;
@@ -23,6 +24,17 @@ struct FFMepgContext {
     // D3D11 resources
     ID3D11Device* d3d_device = nullptr;
     ID3D11DeviceContext* d3d_context = nullptr;
+};
+
+struct YUVData {
+    std::vector<uint8_t> y_plane;
+    std::vector<uint8_t> u_plane;
+    std::vector<uint8_t> v_plane;
+    int width;
+    int height;
+    bool valid;
+    
+    YUVData() : width(0), height(0), valid(false) {}
 };
 
 /**
@@ -106,7 +118,16 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
  *       }
  */
 void* convert_color(const FFMepgContext* ctx, AVFrame* frame);
-void dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame);
+
+/**
+ * @brief 将D3D11 AVFrame转换为YUV数据
+ * 
+ * @param ctx FFMepg上下文
+ * @param frame D3D11格式的AVFrame
+ * @param save_to_file 是否同时保存到文件(可选，默认false)
+ * @return YUVData 包含Y、U、V平面数据的结构体
+ */
+YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_to_file = false);
 
 // 添加保存RGBA数据为BMP文件的函数声明
 void save_rgba_as_bmp(const char* filename, const uint8_t* rgba_data, uint32_t width, uint32_t height);

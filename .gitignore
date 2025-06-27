@@ -16,6 +16,7 @@ tmp
 *.bmp
 *.onnx
 *.trt
+*.yuv
 /.vscode
 /data
 !/data/.keep

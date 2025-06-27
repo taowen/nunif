@@ -10,32 +10,40 @@
 #undef min
 #endif
 
-void dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame) {
+YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_to_file) {
+    YUVData result;
+    
     if (!ctx || !frame || !ctx->d3d_device || !ctx->d3d_context) {
         std::cerr << "Error: Invalid context or frame provided." << std::endl;
-        return;
+        return result;
     }
     if (frame->format != AV_PIX_FMT_D3D11) {
         std::cerr << "Error: Expected D3D11 format, got " << frame->format << std::endl;
-        return;
+        return result;
     }
     if (frame->width <= 0 || frame->height <= 0) {
         std::cerr << "Error: Invalid frame dimensions." << std::endl;
-        return;
+        return result;
     }
     if (!frame->data[0]) {
         std::cerr << "Error: D3D11 texture pointer is null." << std::endl;
-        return;
+        return result;
     }
     
     ID3D11Texture2D* input_texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
     int texture_index = (int)(intptr_t)frame->data[1];
     D3D11_TEXTURE2D_DESC input_desc;
     input_texture->GetDesc(&input_desc);
+
+    std::cout << "[dump_d3d11_avframe] Input Texture Desc:" << std::endl;
+    std::cout << "  Width: " << input_desc.Width << ", Height: " << input_desc.Height << std::endl;
+    std::cout << "  MipLevels: " << input_desc.MipLevels << ", ArraySize: " << input_desc.ArraySize << std::endl;
+    std::cout << "  Format: " << input_desc.Format << " (Expected DXGI_FORMAT_NV12=" << DXGI_FORMAT_NV12 << ")" << std::endl;
+    std::cout << "  Texture Index: " << texture_index << std::endl;
     
     if (input_desc.Format != DXGI_FORMAT_NV12) {
         std::cerr << "Error: Expected DXGI_FORMAT_NV12 format, got " << input_desc.Format << std::endl;
-        return;
+        return result;
     }
 
     // Create staging texture for CPU access
@@ -54,7 +62,7 @@ void dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame) {
     HRESULT hr = ctx->d3d_device->CreateTexture2D(&staging_desc, nullptr, &staging_texture);
     if (FAILED(hr)) {
         std::cerr << "Failed to create staging texture: 0x" << std::hex << hr << std::endl;
-        return;
+        return result;
     }
 
     // Copy from D3D11 texture to staging texture
@@ -67,7 +75,7 @@ void dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame) {
     if (FAILED(hr)) {
         std::cerr << "Failed to map staging texture: 0x" << std::hex << hr << std::endl;
         staging_texture->Release();
-        return;
+        return result;
     }
 
     // Extract YUV data from NV12 format
@@ -78,72 +86,56 @@ void dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame) {
     
     // Calculate plane sizes
     int y_plane_size = width * height;
-    int uv_plane_size = width * height / 2; // NV12 UV plane is half height, but interleaved
+    int uv_plane_size = width * height / 4; // U and V planes are each 1/4 the size
     
     // Allocate buffers for separated planes
-    std::vector<uint8_t> y_plane(y_plane_size);
-    std::vector<uint8_t> u_plane(width * height / 4);
-    std::vector<uint8_t> v_plane(width * height / 4);
+    result.y_plane.resize(y_plane_size);
+    result.u_plane.resize(uv_plane_size);
+    result.v_plane.resize(uv_plane_size);
+    result.width = width;
+    result.height = height;
     
     // Copy Y plane
     for (int y = 0; y < height; y++) {
-        memcpy(y_plane.data() + y * width, 
+        memcpy(result.y_plane.data() + y * width, 
                mapped_data + y * row_pitch, 
                width);
     }
     
     // Copy and separate UV plane (NV12 format has interleaved UV)
-    uint8_t* uv_start = mapped_data + height * row_pitch;
+    uint8_t* uv_start = mapped_data + input_desc.Height * row_pitch;
     for (int y = 0; y < height / 2; y++) {
         for (int x = 0; x < width / 2; x++) {
             int src_idx = y * row_pitch + x * 2;
             int dst_idx = y * (width / 2) + x;
-            u_plane[dst_idx] = uv_start[src_idx];     // U component
-            v_plane[dst_idx] = uv_start[src_idx + 1]; // V component
+            result.u_plane[dst_idx] = uv_start[src_idx];     // U component
+            result.v_plane[dst_idx] = uv_start[src_idx + 1]; // V component
         }
     }
     
-    // Create filename with frame dimensions and YUV format info
-    std::string base_filename = "frame_" + std::to_string(width) + "x" + std::to_string(height) + "_8";
+    result.valid = true;
     
-    // Save Y plane
-    std::ofstream y_file(base_filename + "_Y.raw", std::ios::binary);
-    if (y_file.is_open()) {
-        y_file.write(reinterpret_cast<const char*>(y_plane.data()), y_plane_size);
-        y_file.close();
-        std::cout << "Saved Y plane to " << base_filename << "_Y.raw" << std::endl;
-    }
-    
-    // Save U plane
-    std::ofstream u_file(base_filename + "_U.raw", std::ios::binary);
-    if (u_file.is_open()) {
-        u_file.write(reinterpret_cast<const char*>(u_plane.data()), u_plane.size());
-        u_file.close();
-        std::cout << "Saved U plane to " << base_filename << "_U.raw" << std::endl;
-    }
-    
-    // Save V plane
-    std::ofstream v_file(base_filename + "_V.raw", std::ios::binary);
-    if (v_file.is_open()) {
-        v_file.write(reinterpret_cast<const char*>(v_plane.data()), v_plane.size());
-        v_file.close();
-        std::cout << "Saved V plane to " << base_filename << "_V.raw" << std::endl;
-    }
-    
-    // Save interleaved YUV420 format with proper naming
-    std::ofstream yuv_file(base_filename + "_yuv420p.yuv", std::ios::binary);
-    if (yuv_file.is_open()) {
-        yuv_file.write(reinterpret_cast<const char*>(y_plane.data()), y_plane_size);
-        yuv_file.write(reinterpret_cast<const char*>(u_plane.data()), u_plane.size());
-        yuv_file.write(reinterpret_cast<const char*>(v_plane.data()), v_plane.size());
-        yuv_file.close();
-        std::cout << "Saved YUV420P to " << base_filename << "_yuv420p.yuv" << std::endl;
+    // Optionally save to files
+    if (save_to_file) {
+        std::string base_filename = "frame_" + std::to_string(width) + "x" + std::to_string(height) + "_8";
+        
+        // Save interleaved YUV420 format
+        std::ofstream yuv_file(base_filename + "_yuv420p.yuv", std::ios::binary);
+        if (yuv_file.is_open()) {
+            yuv_file.write(reinterpret_cast<const char*>(result.y_plane.data()), result.y_plane.size());
+            yuv_file.write(reinterpret_cast<const char*>(result.u_plane.data()), result.u_plane.size());
+            yuv_file.write(reinterpret_cast<const char*>(result.v_plane.data()), result.v_plane.size());
+            yuv_file.close();
+            std::cout << "Saved YUV420P to " << base_filename << "_yuv420p.yuv" << std::endl;
+        }
     }
     
     // Unmap and release resources
     ctx->d3d_context->Unmap(staging_texture, 0);
     staging_texture->Release();
     
-    std::cout << "Successfully dumped YUV data from D3D11 AVFrame (" 
+    std::cout << "Successfully extracted YUV data from D3D11 AVFrame (" 
               << width << "x" << height << ")" << std::endl;
+    
+    return result;
 }
