@@ -87,7 +87,7 @@ TEST_CASE("Verify RGBA texture for ONNX inference input") {
         // Try to register the texture with CUDA
         cudaGraphicsResource_t cuda_resource = nullptr;
         cuda_status = cudaGraphicsD3D11RegisterResource(
-            &cuda_resource, rgba_texture, cudaGraphicsRegisterFlagsReadOnly);
+            &cuda_resource, rgba_texture, cudaGraphicsRegisterFlagsNone);
         
         if (cuda_status == cudaSuccess) {
             INFO("Successfully registered D3D11 texture with CUDA");
