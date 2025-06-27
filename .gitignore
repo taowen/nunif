@@ -14,6 +14,8 @@ tmp
 *.zip
 *.xcf
 *.bmp
+*.onnx
+*.trt
 /.vscode
 /data
 !/data/.keep
