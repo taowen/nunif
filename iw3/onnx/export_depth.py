@@ -77,20 +77,15 @@ class StereoDepthModule(nn.Module):
             preserve_screen_border=False,
             enable_amp=False
         )
-        # resize left/right to half width
-        B, C, H, W = left.shape
-        left_half = F.interpolate(left, size=(H, W // 2), mode="bilinear", align_corners=False)
-        right_half = F.interpolate(right, size=(H, W // 2), mode="bilinear", align_corners=False)
-        # concat along width
-        half_sbs = torch.cat([left_half, right_half], dim=3)  # (B, C, H, W)
         
-        # Keep RGB output as RGB format (no channel reordering needed)
+        # Only output left eye for color diagnostics
+        # Keep RGB output as RGB format (no channel reordering needed)  
         # Add alpha channel (set to 1.0)
-        B, C, H, W = half_sbs.shape
-        alpha_channel = torch.ones((B, 1, H, W), dtype=half_sbs.dtype, device=half_sbs.device)
-        half_sbs_rgba_final = torch.cat([half_sbs, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
+        B, C, H, W = left.shape
+        alpha_channel = torch.ones((B, 1, H, W), dtype=left.dtype, device=left.device)
+        left_rgba = torch.cat([left, alpha_channel], dim=1)  # (B, 4, H, W) - RGBA
         
-        return half_sbs_rgba_final
+        return left_rgba
 
 # 构建模型
 stereo_module = StereoDepthModule(depth_model, side_model).eval()
@@ -108,10 +103,10 @@ logger.debug(f"RGBA stacked x shape: {x.shape}")  # Should be (2, 4, H, W)
 with torch.inference_mode():
     x = x.to(depth_model.device)
     logger.debug(f"x moved to device: {x.device}, shape: {x.shape}")
-    half_sbs = stereo_module(x)
+    left_eye = stereo_module(x)
 
     # export to onnx
-    output_path = "stereo_module_half_sbs.onnx"
+    output_path = "stereo_module_left_eye.onnx"
     logger.info(f"Exporting ONNX model to {output_path}")
     torch.onnx.export(
         stereo_module,
@@ -119,30 +114,30 @@ with torch.inference_mode():
         output_path,
         opset_version=18,
         input_names=["input"],
-        output_names=["half_sbs"],
+        output_names=["left_eye"],
         dynamic_axes={
             "input": {0: "batch_size", 2: "height", 3: "width"},
-            "half_sbs": {0: "batch_size", 2: "height", 3: "width"},
+            "left_eye": {0: "batch_size", 2: "height", 3: "width"},
         },
     )
     logger.info(f"ONNX model saved to {output_path}")
-    logger.info(f"Model expects RGBA input (4 channels) from D3D11 texture and outputs RGBA (4 channels) for D3D11 compatibility")
+    logger.info(f"Model expects RGBA input (4 channels) from D3D11 texture and outputs left eye RGBA (4 channels)")
 
 os.makedirs("tmp", exist_ok=True)
-for idx in range(half_sbs.shape[0]):
-    logger.debug(f"Saving half_sbs_{idx}.png shape: {half_sbs[idx].shape}")
-    TF.to_pil_image(half_sbs[idx]).save(f"tmp/half_sbs_{idx}.png")
+for idx in range(left_eye.shape[0]):
+    logger.debug(f"Saving left_eye_{idx}.png shape: {left_eye[idx].shape}")
+    TF.to_pil_image(left_eye[idx]).save(f"tmp/left_eye_{idx}.png")
 print('done')
 
 # 验证 ONNX 推理结果和 PyTorch 输出一致性
 import onnxruntime as ort
 import numpy as np
 
-ort_session = ort.InferenceSession("stereo_module_half_sbs.onnx", providers=['CPUExecutionProvider'])
+ort_session = ort.InferenceSession("stereo_module_left_eye.onnx", providers=['CPUExecutionProvider'])
 x_numpy = x.cpu().numpy()
 onnx_outputs = ort_session.run(None, {"input": x_numpy})
-onnx_half_sbs = onnx_outputs[0]
-torch_half_sbs = half_sbs.cpu().numpy()
+onnx_left_eye = onnx_outputs[0]
+torch_left_eye = left_eye.cpu().numpy()
 
 def compare_outputs(torch_out, onnx_out, name):
     diff = np.abs(torch_out - onnx_out)
@@ -150,4 +145,4 @@ def compare_outputs(torch_out, onnx_out, name):
     mean_diff = diff.mean()
     print(f"{name}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
 
-compare_outputs(torch_half_sbs, onnx_half_sbs, "Half Side-by-Side")
+compare_outputs(torch_left_eye, onnx_left_eye, "Left Eye")

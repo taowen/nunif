@@ -565,7 +565,7 @@ void start_infer_sbs(
     // Initialize TensorRT inference engine
     if (!g_inference_engine) {
         g_inference_engine = std::make_unique<TensorRTInferenceEngine>();
-        if (!g_inference_engine->initialize("stereo_module_half_sbs.onnx")) {
+        if (!g_inference_engine->initialize("stereo_module_left_eye.onnx")) {
             std::cerr << "Failed to initialize TensorRT inference engine" << std::endl;
             cudaStreamDestroy(cuda_stream);
             // Send end signal to output queue
