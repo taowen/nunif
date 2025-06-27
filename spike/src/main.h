@@ -20,4 +20,50 @@ struct FFMepgContext {
     bool initialized = false;
 };
 
+/**
+ * @brief 使用D3D11硬件加速解码指定帧
+ * 
+ * @param ctx FFMepg上下文，用于缓存解码器状态
+ *            - 调用者负责：分配FFMepgContext结构体
+ *            - 函数负责：管理ctx内部的FFmpeg资源(fmt_ctx, codec_ctx, hw_device_ctx等)
+ *            - 调用者负责：在使用完毕后调用清理函数释放ctx内部资源
+ * 
+ * @param inputFile 输入视频文件路径
+ *                  - 调用者负责：确保文件路径有效且可访问
+ *                  - 函数负责：打开和关闭文件资源
+ * 
+ * @param theIndex 目标帧索引(从0开始)
+ *                 - 调用者负责：确保索引在有效范围内
+ * 
+ * @return AVFrame* 解码后的帧数据
+ *         - 成功：返回有效的AVFrame指针，已分配内存并包含解码数据
+ *         - 失败：返回nullptr
+ *         - 调用者负责：使用av_frame_free()释放返回的AVFrame
+ *         - 注意：返回的帧已从GPU内存传输到系统内存，格式通常为YUV420P或NV12
+ * 
+ * @note 资源管理责任：
+ *       1. FFMepgContext管理：调用者分配结构体，函数管理内部FFmpeg资源
+ *       2. 返回的AVFrame：调用者必须调用av_frame_free()释放
+ *       3. 上下文可重复使用：相同文件的多次调用会复用已初始化的解码器
+ *       4. 不同文件：函数会自动清理旧资源并重新初始化
+ * 
+ * @example
+ *       FFMepgContext ctx = {};
+ *       AVFrame* frame = d11_decode(&ctx, "video.mp4", 100);
+ *       if (frame) {
+ *           // 使用frame数据...
+ *           av_frame_free(&frame);
+ *       }
+ *       // 清理上下文(需要实现cleanup函数)
+ *       cleanup_context(&ctx);
+ */
 AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theIndex);
+
+/**
+ * @brief 清理FFMepgContext中的所有资源
+ * 
+ * @param ctx 要清理的上下文
+ *            - 函数负责：释放所有内部FFmpeg资源
+ *            - 调用者负责：释放FFMepgContext结构体本身(如果是动态分配的)
+ */
+void cleanup_context(FFMepgContext* ctx);
