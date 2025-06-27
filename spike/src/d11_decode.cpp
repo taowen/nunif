@@ -114,17 +114,15 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
         return nullptr;
     }
     
-    int frame_count = 0;
     AVFrame* result_frame = nullptr;
     
     while (av_read_frame(ctx->fmt_ctx, packet) >= 0) {
         if (packet->stream_index == ctx->video_stream_idx) {
             ret = avcodec_send_packet(ctx->codec_ctx, packet);
-            if (ret < 0 && ret != AVERROR(EAGAIN)) {
-                if (ret == AVERROR_EOF) {
-                    break;
-                }
-                std::cout << "Error sending packet: " << ret << std::endl;
+            if (ret < 0) {
+                char err_buf[AV_ERROR_MAX_STRING_SIZE];
+                av_strerror(ret, err_buf, sizeof(err_buf));
+                std::cout << "Error sending packet: " << err_buf << std::endl;
                 break;
             }
             
@@ -133,31 +131,35 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                     break;
                 } else if (ret < 0) {
-                    std::cout << "Error receiving frame: " << ret << std::endl;
+                    char err_buf[AV_ERROR_MAX_STRING_SIZE];
+                    av_strerror(ret, err_buf, sizeof(err_buf));
+                    std::cout << "Error receiving frame: " << err_buf << std::endl;
                     break;
                 }
-                
-                frame_count++;
-                
-                // 找到目标帧
-                if (frame_count >= target_frame) {
+
+                if (frame->pts == AV_NOPTS_VALUE) {
+                    continue;
+                }
+                int64_t current_frame_pts = frame->pts;
+                if (ctx->video_stream->start_time != AV_NOPTS_VALUE) {
+                    current_frame_pts -= ctx->video_stream->start_time;
+                }
+
+                if (current_frame_pts >= timestamp) {
                     // 如果是硬件解码，转换到系统内存
                     if (frame->format == AV_PIX_FMT_D3D11) {
-                        ret = av_hwframe_transfer_data(sw_frame, frame, 0);
-                        if (ret >= 0) {
+                        if (av_hwframe_transfer_data(sw_frame, frame, 0) >= 0) {
                             result_frame = av_frame_clone(sw_frame);
-                            std::cout << "Frame " << theIndex << " decoded with DX11 hardware acceleration" << std::endl;
                         } else {
                             std::cout << "Failed to transfer hardware frame to system memory" << std::endl;
                         }
                     } else {
                         result_frame = av_frame_clone(frame);
-                        std::cout << "Frame " << theIndex << " decoded with software decoding" << std::endl;
                     }
                     
                     if (result_frame) {
-                        std::cout << "Frame format: " << av_get_pix_fmt_name((AVPixelFormat)result_frame->format) << std::endl;
-                        std::cout << "Frame size: " << result_frame->width << "x" << result_frame->height << std::endl;
+                        std::cout << "Frame " << theIndex << " decoded. Format: " << av_get_pix_fmt_name((AVPixelFormat)result_frame->format) 
+                                  << ", Size: " << result_frame->width << "x" << result_frame->height << std::endl;
                     }
                     
                     goto cleanup;
