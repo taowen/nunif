@@ -200,9 +200,11 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     // Use the actual row pitch from D3D11, not the texture width
     size_t row_pitch = actual_row_pitch;
     size_t texture_height = extent.height;
+    // For NV12 format, the total height is 1.5x the Y-plane height
+    size_t total_copy_height = texture_height * 3 / 2;
     
     // Calculate total buffer size using actual row pitch
-    size_t total_size_bytes = texture_height * row_pitch;
+    size_t total_size_bytes = total_copy_height * row_pitch;
 
     std::cout << "Frame dimensions: " << width << "x" << height << std::endl;
     std::cout << "Texture dimensions: " << extent.width << "x" << texture_height << std::endl;
@@ -223,7 +225,7 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     cuda_status = cudaMemcpy2DFromArray(
         d_buffer, row_pitch,           // destination and pitch
         cuda_array, 0, 0,              // source array and offset
-        row_pitch, texture_height,     // width in bytes and height
+        row_pitch, total_copy_height,  // width in bytes and height
         cudaMemcpyDeviceToDevice
     );
     if (cuda_status != cudaSuccess) {
