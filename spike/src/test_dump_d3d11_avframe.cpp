@@ -167,12 +167,18 @@ CompareResult compare_yuv_data(const YUVData& data1, const YUVData& data2) {
     CompareResult result = {};
     
     if (!data1.valid || !data2.valid || 
-        data1.width != data2.width || data1.height != data2.height) {
+        data1.width != data2.width || data1.height != data2.height ||
+        data1.y_plane.size() != data2.y_plane.size() ||
+        data1.u_plane.size() != data2.u_plane.size() ||
+        data1.v_plane.size() != data2.v_plane.size()) {
         return result;
     }
     
     auto calc_mse_and_max = [](const std::vector<uint8_t>& plane1, 
                                const std::vector<uint8_t>& plane2) -> std::pair<double, int> {
+        if (plane1.empty()) {
+            return { 0.0, 0 };
+        }
         double mse = 0.0;
         int max_diff = 0;
         for (size_t i = 0; i < plane1.size(); i++) {
