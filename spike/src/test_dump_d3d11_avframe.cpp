@@ -219,7 +219,7 @@ CompareResult compare_yuv_data(const YUVData& data1, const YUVData& data2) {
 TEST_CASE("Try dump d3d11 avframe") {
     // Input file
     const char* input_file = "06 4k.mp4";
-    const int frame_index = 200;
+    const int frame_index = 400;
     
     FFMepgContext hw_ctx;
     AVFrame* hw_frame = d11_decode(&hw_ctx, input_file, frame_index);
@@ -235,7 +235,7 @@ TEST_CASE("Try dump d3d11 avframe") {
     REQUIRE(hw_ctx.d3d_context != nullptr);
     
     // 方法1：使用dump_d3d11_avframe获取YUV数据
-    YUVData dump_result = dump_d3d11_avframe(&hw_ctx, hw_frame, true);
+    YUVData dump_result = dump_d3d11_avframe(&hw_ctx, hw_frame);
     REQUIRE(dump_result.valid);
     
     // 方法2：使用FFmpeg标准方法获取YUV数据

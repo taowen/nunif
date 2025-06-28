@@ -127,7 +127,7 @@ void* convert_color(const FFMepgContext* ctx, AVFrame* frame);
  * @param save_to_file 是否同时保存到文件(可选，默认false)
  * @return YUVData 包含Y、U、V平面数据的结构体
  */
-YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_to_file = false);
+YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame);
 
 // 添加保存RGBA数据为BMP文件的函数声明
 void save_rgba_as_bmp(const char* filename, const uint8_t* rgba_data, uint32_t width, uint32_t height);
