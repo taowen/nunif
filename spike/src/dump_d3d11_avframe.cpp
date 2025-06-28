@@ -11,103 +11,71 @@
 #endif
 
 /*
-根据这份代码分析，D3D11 NV12格式数据在显存中的实际布局如下：
+(venv) C:\games\nunif>spike\build\Debug\spike.exe
+Randomness seeded to: 3908875051
+D3D11 hardware acceleration enabled
+Frame 200 decoded successfully
+Hardware frame returned (GPU memory)
+[dump_d3d11_avframe] Input Texture Desc:
+  Width: 3840, Height: 1648
+  MipLevels: 1, ArraySize: 20
+  Format: 103 (Expected DXGI_FORMAT_NV12=103)
+  Texture Index: 17
+[dump_d3d11_avframe] Memory Layout Analysis:
+  Frame dimensions: 3840x1634
+  Row pitch: 3840 bytes
+  Width vs Row pitch difference: 0 bytes (padding)
+  Y plane expected size: 6274560 bytes
+  Y plane actual size with padding: 6274560 bytes
+  UV plane expected size: 3137280 bytes
+  Total mapped data size: 9411840 bytes
+  UV plane offset calculation: 1634 * 3840 = 6274560
+[dump_d3d11_avframe] Y Plane Analysis:
+  First row Y values (first 16 pixels): 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13
+  Second row Y values (first 16 pixels): 21 21 21 21 21 21 21 21 21 21 21 21 21 21 21 21
+[dump_d3d11_avframe] UV Plane Analysis:
+  UV start address offset: 6274560 bytes
+  UV plane dimensions: 1920x817
+  UV interleaved data (first 16 UV pairs): 125 149 125 149 125 149 125 149 125 149 125 149 125 149 125 149 125 148 125 146 125 146 125 146 125 146 125 146 125 146 125 146
+  UV first row analysis:
+    Raw UV data (first 16 bytes): 125 149 125 149 125 149 125 149 125 149 125 149 125 149 125 149
 
-## NV12格式显存布局总结
+    Separated U values: 125 125 125 125 125 125 125 125
+    Separated V values: 149 149 149 149 149 149 149 149
+  UV second row analysis:
+    Raw UV data (first 16 bytes): 125 153 125 153 125 153 125 153 125 153 125 153 125 153 125 154
 
-### 整体结构
-```
-[Y平面数据 - height * row_pitch 字节]
-[UV平面数据 - (height/2) * row_pitch 字节]
-```
+  Memory boundary check:
+    Expected total size: 9411840 bytes
+    UV plane ends at offset: 9411840 bytes
+[dump_d3d11_avframe] Extraction Results:
+  Y plane first 16 values: 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13 13
+  U plane first 8 values: 125 125 125 125 125 125 125 125
+  V plane first 8 values: 149 149 149 149 149 149 149 149
+Saved YUV420P to frame_3840x1634_8_yuv420p.yuv
+Successfully extracted YUV data from D3D11 AVFrame (3840x1634)
+[ffmpeg_d3d11_to_yuv] hw-transferred sw_frame format: nv12
 
-### 关键参数
-- `row_pitch`: 每行实际占用的字节数（包含内存对齐padding）
-- `width`: 图像实际宽度
-- `height`: 图像实际高度
+--- YUV Data Details: dump_d3d11_avframe ---
+Dimensions: 3840x1634
+  Y plane size: 6274560. First 8 bytes: d d d d d d d d
+  U plane size: 1568640. First 8 bytes: 7d 7d 7d 7d 7d 7d 7d 7d
+  V plane size: 1568640. First 8 bytes: 95 95 95 95 95 95 95 95
 
-### Y平面布局（亮度）
-```cpp:spike/src/dump_d3d11_avframe.cpp
-// Y平面：width * height 像素，每像素1字节
-for (int y = 0; y < height; y++) {
-    memcpy(result.y_plane.data() + y * width, 
-           mapped_data + y * row_pitch,  // 注意：使用row_pitch而非width
-           width);
-}
-```
+--- YUV Data Details: ffmpeg_d3d11_to_yuv ---
+Dimensions: 3840x1634
+  Y plane size: 6274560. First 8 bytes: d d d d d d d d
+  U plane size: 1568640. First 8 bytes: 7d 7d 7d 7d 7d 7d 7d 7d
+  V plane size: 1568640. First 8 bytes: 95 95 95 95 95 95 95 95
 
-### UV平面布局（色度，交错存储）
-```cpp:spike/src/dump_d3d11_avframe.cpp
-// UV平面起始位置：Y平面之后
-uint8_t* uv_start = mapped_data + input_desc.Height * row_pitch;
-
-// UV数据交错存储：UVUVUV...
-for (int y = 0; y < height / 2; y++) {
-    for (int x = 0; x < width / 2; x++) {
-        int src_idx = y * row_pitch + x * 2;  // 每2个字节一组：UV
-        int dst_idx = y * (width / 2) + x;
-        result.u_plane[dst_idx] = uv_start[src_idx];     // U分量
-        result.v_plane[dst_idx] = uv_start[src_idx + 1]; // V分量
-    }
-}
-```
-
-## 常见的CUDA读取错误
-
-### 1. 忽略内存对齐（row_pitch）
-**错误做法：**
-```cpp
-// 错误：直接使用width计算偏移
-Y_offset = y * width;
-```
-
-**正确做法：**
-```cpp
-// 正确：使用row_pitch计算偏移
-Y_offset = y * row_pitch;
-```
-
-### 2. UV平面位置计算错误
-**错误做法：**
-```cpp
-// 错误：使用width * height
-uv_offset = width * height;
-```
-
-**正确做法：**
-```cpp
-// 正确：使用height * row_pitch（考虑内存对齐）
-uv_offset = height * row_pitch;
-```
-
-### 3. UV交错存储理解错误
-**错误做法：**
-```cpp
-// 错误：把UV当作平面存储
-U_value = uv_data[uv_index];
-V_value = uv_data[uv_index + uv_plane_size];
-```
-
-**正确做法：**
-```cpp
-// 正确：UV交错存储，每2字节一组
-U_value = uv_data[uv_index * 2];     // 偶数位置是U
-V_value = uv_data[uv_index * 2 + 1]; // 奇数位置是V
-```
-
-## 完整的内存地址计算公式
-
-```cpp
-// Y平面某像素(x,y)的地址
-Y_address = base_address + y * row_pitch + x;
-
-// UV平面某像素组(x,y)的地址（注意x,y都是UV坐标，范围是原图的一半）
-UV_base = base_address + height * row_pitch;
-U_address = UV_base + y * row_pitch + x * 2;     // U分量
-V_address = UV_base + y * row_pitch + x * 2 + 1; // V分量
-```
-
-**关键点：`row_pitch`通常比`width`大，因为GPU内存需要对齐（如256字节对齐），这是CUDA读取出错的最常见原因。**
+=== YUVµò░µì«µ»öΦ╛âτ╗ôµ₧£ ===
+σêåΦ╛¿τÄç: 3840x1634
+Yσ╣│Θ¥ó - MSE: 0, PSNR: 100 dB, µ£Çσñºσ╖«σ╝é: 0
+Uσ╣│Θ¥ó - MSE: 0, PSNR: 100 dB, µ£Çσñºσ╖«σ╝é: 0
+Vσ╣│Θ¥ó - MSE: 0, PSNR: 100 dB, µ£Çσñºσ╖«σ╝é: 0
+Γ£ô dump_d3d11_avframeτÜäτ╗ôµ₧£Σ╕ÄFFmpegµáçσçåµû╣µ│òσƒ║µ£¼Σ╕ÇΦç┤!
+===============================================================================
+All tests passed (14 assertions in 1 test case)
 */
 YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_to_file) {
     YUVData result;
@@ -183,6 +151,20 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     int height = frame->height;
     int row_pitch = mapped_resource.RowPitch;
     
+    // 添加详细的内存布局调试信息
+    std::cout << "[dump_d3d11_avframe] Memory Layout Analysis:" << std::endl;
+    std::cout << "  Frame dimensions: " << width << "x" << height << std::endl;
+    std::cout << "  Row pitch: " << row_pitch << " bytes" << std::endl;
+    std::cout << "  Width vs Row pitch difference: " << (row_pitch - width) << " bytes (padding)" << std::endl;
+    std::cout << "  Y plane expected size: " << (width * height) << " bytes" << std::endl;
+    std::cout << "  Y plane actual size with padding: " << (height * row_pitch) << " bytes" << std::endl;
+    std::cout << "  UV plane expected size: " << (width * height / 2) << " bytes" << std::endl;
+    std::cout << "  Total mapped data size: " << (height * row_pitch + (height / 2) * row_pitch) << " bytes" << std::endl;
+    
+    // 计算UV平面的起始偏移
+    size_t uv_offset = height * row_pitch;
+    std::cout << "  UV plane offset calculation: " << height << " * " << row_pitch << " = " << uv_offset << std::endl;
+    
     // Calculate plane sizes
     int y_plane_size = width * height;
     int uv_plane_size = width * height / 4; // U and V planes are each 1/4 the size
@@ -194,6 +176,22 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     result.width = width;
     result.height = height;
     
+    // 添加Y平面数据样本日志
+    std::cout << "[dump_d3d11_avframe] Y Plane Analysis:" << std::endl;
+    std::cout << "  First row Y values (first 16 pixels): ";
+    for (int i = 0; i < std::min(16, width); i++) {
+        std::cout << (int)mapped_data[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    if (height > 1) {
+        std::cout << "  Second row Y values (first 16 pixels): ";
+        for (int i = 0; i < std::min(16, width); i++) {
+            std::cout << (int)mapped_data[row_pitch + i] << " ";
+        }
+        std::cout << std::endl;
+    }
+    
     // Copy Y plane
     for (int y = 0; y < height; y++) {
         memcpy(result.y_plane.data() + y * width, 
@@ -203,6 +201,52 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     
     // Copy and separate UV plane (NV12 format has interleaved UV)
     uint8_t* uv_start = mapped_data + input_desc.Height * row_pitch;
+    
+    // 添加UV平面详细分析
+    std::cout << "[dump_d3d11_avframe] UV Plane Analysis:" << std::endl;
+    std::cout << "  UV start address offset: " << uv_offset << " bytes" << std::endl;
+    std::cout << "  UV plane dimensions: " << (width/2) << "x" << (height/2) << std::endl;
+    std::cout << "  UV interleaved data (first 16 UV pairs): ";
+    for (int i = 0; i < std::min(32, width); i++) {
+        std::cout << (int)uv_start[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    // 分析UV数据的行布局
+    std::cout << "  UV first row analysis:" << std::endl;
+    std::cout << "    Raw UV data (first " << std::min(16, width) << " bytes): ";
+    for (int i = 0; i < std::min(16, width); i++) {
+        std::cout << (int)uv_start[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    std::cout << "    Separated U values: ";
+    for (int i = 0; i < std::min(8, width/2); i++) {
+        std::cout << (int)uv_start[i * 2] << " ";
+    }
+    std::cout << std::endl;
+    
+    std::cout << "    Separated V values: ";
+    for (int i = 0; i < std::min(8, width/2); i++) {
+        std::cout << (int)uv_start[i * 2 + 1] << " ";
+    }
+    std::cout << std::endl;
+    
+    if (height > 2) {
+        std::cout << "  UV second row analysis:" << std::endl;
+        std::cout << "    Raw UV data (first " << std::min(16, width) << " bytes): ";
+        for (int i = 0; i < std::min(16, width); i++) {
+            std::cout << (int)uv_start[row_pitch + i] << " ";
+        }
+        std::cout << std::endl;
+    }
+    
+    // 验证内存边界
+    size_t expected_total_size = height * row_pitch + (height / 2) * row_pitch;
+    std::cout << "  Memory boundary check:" << std::endl;
+    std::cout << "    Expected total size: " << expected_total_size << " bytes" << std::endl;
+    std::cout << "    UV plane ends at offset: " << (uv_offset + (height / 2) * row_pitch) << " bytes" << std::endl;
+    
     for (int y = 0; y < height / 2; y++) {
         for (int x = 0; x < width / 2; x++) {
             int src_idx = y * row_pitch + x * 2;
@@ -213,6 +257,26 @@ YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame, bool save_t
     }
     
     result.valid = true;
+    
+    // 添加提取结果验证
+    std::cout << "[dump_d3d11_avframe] Extraction Results:" << std::endl;
+    std::cout << "  Y plane first 16 values: ";
+    for (int i = 0; i < std::min(16, (int)result.y_plane.size()); i++) {
+        std::cout << (int)result.y_plane[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    std::cout << "  U plane first 8 values: ";
+    for (int i = 0; i < std::min(8, (int)result.u_plane.size()); i++) {
+        std::cout << (int)result.u_plane[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    std::cout << "  V plane first 8 values: ";
+    for (int i = 0; i < std::min(8, (int)result.v_plane.size()); i++) {
+        std::cout << (int)result.v_plane[i] << " ";
+    }
+    std::cout << std::endl;
     
     // Optionally save to files
     if (save_to_file) {
