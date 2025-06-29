@@ -107,3 +107,25 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
  *       }
  */
 ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
+
+/**
+ * Main inference function with CUDA tensor interface
+ * 
+ * Input requirements (matching export_iw3.py ONNX model):
+ * - Format: RGBA (4 channels) 
+ * - Data type: float32
+ * - Value range: [0.0, 1.0]
+ * - Layout: NCHW (batch, channel, height, width)
+ * - Shape: (1, 4, height, width) - Fixed batch size of 1
+ * - Color space: RGB with alpha channel
+ * 
+ * Output format:
+ * - Format: RGBA (4 channels)
+ * - Data type: float32  
+ * - Value range: [0.0, 1.0]
+ * - Layout: NCHW (batch, channel, height, width/2)
+ * - Shape: (1, 4, height, width/2) - Fixed batch size of 1
+ * - Content: Half side-by-side stereo (left eye | right eye)
+ * - Color space: RGB with alpha channel
+ */
+bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width);
