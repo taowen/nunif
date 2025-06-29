@@ -105,7 +105,7 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
     output_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     output_desc.SampleDesc.Count = 1;
     output_desc.Usage = D3D11_USAGE_DEFAULT;
-    output_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    output_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     output_desc.CPUAccessFlags = 0;
 
     hr = ctx->d3d_device->CreateTexture2D(&output_desc, nullptr, &output_texture);
