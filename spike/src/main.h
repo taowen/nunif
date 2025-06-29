@@ -26,17 +26,6 @@ struct FFMepgContext {
     ID3D11DeviceContext* d3d_context = nullptr;
 };
 
-struct YUVData {
-    std::vector<uint8_t> y_plane;
-    std::vector<uint8_t> u_plane;
-    std::vector<uint8_t> v_plane;
-    int width;
-    int height;
-    bool valid;
-    
-    YUVData() : width(0), height(0), valid(false) {}
-};
-
 /**
  * @brief 清理FFMepgContext中的所有资源
  * 
@@ -86,48 +75,35 @@ void cleanup_context(FFMepgContext* ctx);
 AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theIndex);
 
 /**
- * @brief 将NV12 BT709格式的AVFrame转换为RGBA CUDA内存，支持GPU加速处理
+ * @brief 将NV12格式的D3D11 AVFrame转换为RGBA格式的D3D11纹理
  * 
- * @param ctx FFMepg上下文，包含解码相关信息
- *            - 调用者负责：确保ctx有效
- *            - 函数负责：管理CUDA资源进行颜色转换
+ * @param ctx FFMepg上下文，包含D3D11设备和上下文
+ *            - 调用者负责：确保ctx有效且包含有效的D3D11设备
+ *            - 函数负责：使用D3D11视频处理器进行颜色转换
  * 
- * @param frame 输入的AVFrame，格式应为NV12，色彩空间为BT709
- *              - 调用者负责：确保frame有效且格式正确
- *              - 函数负责：读取frame数据进行颜色转换
+ * @param frame 输入的AVFrame，格式应为AV_PIX_FMT_D3D11，底层纹理格式为DXGI_FORMAT_NV12
+ *              - 调用者负责：确保frame有效且为D3D11格式
+ *              - 函数负责：读取frame中的D3D11纹理数据进行转换
  * 
- * @return void* 转换后的RGBA数据在CUDA设备内存中的指针
- *         - 成功：返回有效的CUDA设备内存指针，数据格式为RGBA float32
+ * @return ID3D11Texture2D* 转换后的RGBA纹理指针
+ *         - 成功：返回有效的ID3D11Texture2D指针，格式为DXGI_FORMAT_R8G8B8A8_UNORM
  *         - 失败：返回nullptr
- *         - 调用者负责：调用cudaFree()释放返回的内存
- *         - 注意：返回的内存直接在GPU显存中，可直接用于CUDA kernel处理
+ *         - 调用者负责：调用Release()方法释放返回的纹理
+ *         - 注意：返回的纹理在GPU显存中，可用于进一步的D3D11处理
  * 
  * @note 功能特性：
- *       1. 颜色转换：NV12 BT709 -> RGBA sRGB
- *       2. GPU加速：使用CUDA kernel进行颜色空间转换
+ *       1. 颜色转换：NV12 -> RGBA (8位无符号归一化)
+ *       2. GPU加速：使用D3D11视频处理器进行硬件加速转换
  *       3. 内存效率：直接在GPU显存中完成转换，避免CPU-GPU数据传输
- *       4. 资源管理：内部管理CUDA上下文和流
- *       5. 数据布局：RGBA数据按行优先顺序存储
+ *       4. 资源管理：内部管理D3D11视频设备、上下文和处理器资源
+ *       5. 色彩空间：支持BT709到sRGB的色彩空间转换
  * 
  * @example
- *       void* cuda_rgba = convert_color(&ctx, frame);
- *       if (cuda_rgba) {
- *           // 可以直接在CUDA kernel中使用此数据
- *           // ... 处理 cuda_rgba ...
- *           cudaFree(cuda_rgba);
+ *       ID3D11Texture2D* rgba_texture = convert_color(&ctx, frame);
+ *       if (rgba_texture) {
+ *           // 可以直接用于D3D11渲染管线
+ *           // ... 使用 rgba_texture ...
+ *           rgba_texture->Release();
  *       }
  */
-void* convert_color(const FFMepgContext* ctx, AVFrame* frame);
-
-/**
- * @brief 将D3D11 AVFrame转换为YUV数据
- * 
- * @param ctx FFMepg上下文
- * @param frame D3D11格式的AVFrame
- * @param save_to_file 是否同时保存到文件(可选，默认false)
- * @return YUVData 包含Y、U、V平面数据的结构体
- */
-YUVData dump_d3d11_avframe(const FFMepgContext* ctx, AVFrame* frame);
-
-// 添加保存RGBA数据为BMP文件的函数声明
-void save_rgba_as_bmp(const char* filename, const uint8_t* rgba_data, uint32_t width, uint32_t height);
+ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
