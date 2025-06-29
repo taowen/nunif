@@ -136,15 +136,6 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
         goto cleanup;
     }
 
-    // Set color space based on frame properties
-    // Validate and configure input color space based on frame properties
-    std::cout << "=== Color Space Validation ===" << std::endl;
-    std::cout << "Frame properties:" << std::endl;
-    std::cout << "  colorspace: " << frame->colorspace << " (expected: " << AVCOL_SPC_BT709 << " for BT.709)" << std::endl;
-    std::cout << "  color_range: " << frame->color_range << " (1=TV/limited, 2=JPEG/full)" << std::endl;
-    std::cout << "  color_primaries: " << frame->color_primaries << std::endl;
-    std::cout << "  color_trc: " << frame->color_trc << std::endl;
-    
     // Validate color space
     color_space_valid = true;
     if (frame->colorspace != AVCOL_SPC_BT709 && frame->colorspace != AVCOL_SPC_UNSPECIFIED) {
@@ -189,16 +180,6 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
     video_context->VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
     video_context->VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
     
-    // Enhanced debugging output
-    std::cout << "=== Applied Color Space Configuration ===" << std::endl;
-    std::cout << "Input color space:" << std::endl;
-    std::cout << "  YCbCr_Matrix: " << input_color_space.YCbCr_Matrix << " (1=BT.709)" << std::endl;
-    std::cout << "  Nominal_Range: " << input_color_space.Nominal_Range << " (1=limited, 2=full)" << std::endl;
-    std::cout << "Output color space:" << std::endl;
-    std::cout << "  RGB_Range: " << output_color_space.RGB_Range << " (0=limited, 1=full)" << std::endl;
-    std::cout << "  Nominal_Range: " << output_color_space.Nominal_Range << " (1=limited, 2=full)" << std::endl;
-    std::cout << "=================================" << std::endl;
-
     // Perform the conversion
     stream_data.Enable = TRUE;
     stream_data.OutputIndex = 0;

@@ -231,7 +231,7 @@ bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width
     IW3TensorRTInference inferencer;
     
     // Initialize the model
-    if (!inferencer.initialize("stereo_module_half_sbs", true)) {
+    if (!inferencer.initialize("stereo_module_half_sbs.onnx", true)) {
         std::cerr << "Failed to initialize IW3 TensorRT inference" << std::endl;
         return false;
     }
@@ -245,52 +245,4 @@ bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width
     std::cout << "Inference completed successfully!" << std::endl;
     
     return true;
-}
-
-// Example usage for testing (can be removed in production)
-int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cout << "Usage: " << argv[0] << " <onnx_model_path> <height> <width>" << std::endl;
-        std::cout << "Note: This example allocates dummy CUDA tensors for testing (batch size fixed to 1)" << std::endl;
-        return -1;
-    }
-    
-    std::string onnxModelPath = argv[1];
-    int height = std::stoi(argv[2]);
-    int width = std::stoi(argv[3]);
-    
-    // Allocate CUDA memory for testing (batch size = 1)
-    const int batchSize = 1;
-    const int inputChannels = 4;
-    const int outputChannels = 4;
-    const int outputWidth = width / 2;
-    
-    size_t inputSize = batchSize * inputChannels * height * width * sizeof(float);
-    size_t outputSize = batchSize * outputChannels * height * outputWidth * sizeof(float);
-    
-    void* inputDevicePtr = nullptr;
-    void* outputDevicePtr = nullptr;
-    
-    if (cudaMalloc(&inputDevicePtr, inputSize) != cudaSuccess) {
-        std::cerr << "Failed to allocate input CUDA memory" << std::endl;
-        return -1;
-    }
-    
-    if (cudaMalloc(&outputDevicePtr, outputSize) != cudaSuccess) {
-        std::cerr << "Failed to allocate output CUDA memory" << std::endl;
-        cudaFree(inputDevicePtr);
-        return -1;
-    }
-    
-    // Initialize input with dummy data (should be replaced with actual image data)
-    cudaMemset(inputDevicePtr, 0, inputSize);
-    
-    // Run inference (batch size now fixed to 1)
-    bool success = inferIW3(inputDevicePtr, outputDevicePtr, height, width);
-    
-    // Cleanup
-    cudaFree(inputDevicePtr);
-    cudaFree(outputDevicePtr);
-    
-    return success ? 0 : -1;
 }

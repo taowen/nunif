@@ -22,7 +22,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(spike src/test_to_cuda_input.cpp src/d11_decode.cpp src/convert_color.cpp src/to_cuda_input.cpp)
+add_executable(spike src/test_infer_iw3.cpp src/d11_decode.cpp src/convert_color.cpp src/to_cuda_input.cpp src/infer_iw3.cpp)
 
 # Link Catch2 to the executable
 target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
