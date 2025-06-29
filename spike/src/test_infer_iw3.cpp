@@ -139,8 +139,7 @@ TEST_CASE("Test inferIW3") {
     // Allocate CUDA memory for inference output
     // Output is half side-by-side stereo, so width is halved.
     // Shape: (1, 4, height, width/2)
-    int output_width = width / 2;
-    size_t cuda_infer_output_size = 1 * 4 * height * output_width * sizeof(float);
+    size_t cuda_infer_output_size = 1 * 4 * height * width * sizeof(float);
     void* cuda_infer_output_ptr = nullptr;
     cuda_err = cudaMalloc(&cuda_infer_output_ptr, cuda_infer_output_size);
     REQUIRE(cuda_err == cudaSuccess);
