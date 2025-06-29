@@ -74,6 +74,11 @@ struct ComputeShaderResources {
 static ComputeShaderResources g_CSResources;
 static int g_lastWidth = 0, g_lastHeight = 0;
 
+// 添加全局变量来跟踪映射状态
+static bool g_isMapped = false;
+static void* g_mappedPtr = nullptr;
+static size_t g_mappedSize = 0;
+
 bool initializeComputeShader(const FFMepgContext* ctx, int width, int height) {
     HRESULT hr;
     
@@ -206,18 +211,24 @@ bool initializeComputeShader(const FFMepgContext* ctx, int width, int height) {
 }
 
 /**
- * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，用作IW3推理输入
+ * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，返回映射的CUDA指针
  * 
  * @param ctx FFMepg上下文，包含D3D11设备和上下文
  * @param rgbaTexture convert_color输出的RGBA8纹理
- * @param cudaOutputPtr 输出的CUDA设备指针，用于IW3推理
- *                      格式要求：float32, NCHW布局, shape=(1,4,H,W)
- * @return bool 转换是否成功
+ * @return void* 映射的CUDA设备指针，格式：float32, NCHW布局, shape=(1,4,H,W)
+ *               失败时返回nullptr
+ * 
+ * @note 返回的指针在使用完毕后必须调用unmap_cuda_input()取消映射
  */
-bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void* cudaOutputPtr) {
-    if (!ctx || !rgbaTexture || !cudaOutputPtr) {
+void* to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture) {
+    if (!ctx || !rgbaTexture) {
         std::cerr << "Error: Invalid parameters for to_cuda_input" << std::endl;
-        return false;
+        return nullptr;
+    }
+    
+    // 如果已经有映射的资源，先取消映射
+    if (g_isMapped) {
+        unmap_cuda_input();
     }
     
     // 获取纹理信息
@@ -226,7 +237,7 @@ bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void*
     
     if (textureDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM) {
         std::cerr << "Error: Expected RGBA8 texture format" << std::endl;
-        return false;
+        return nullptr;
     }
     
     int width = textureDesc.Width;
@@ -234,7 +245,7 @@ bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void*
     
     // 初始化计算着色器资源
     if (!initializeComputeShader(ctx, width, height)) {
-        return false;
+        return nullptr;
     }
     
     HRESULT hr;
@@ -256,7 +267,7 @@ bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void*
     );
     if (FAILED(hr)) {
         std::cerr << "Failed to create input SRV. HRESULT: 0x" << std::hex << hr << std::endl;
-        return false;
+        return nullptr;
     }
     
     // 设置计算着色器资源
@@ -287,49 +298,55 @@ bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void*
     cudaErr = cudaGraphicsMapResources(1, &g_CSResources.cudaResource, 0);
     if (cudaErr != cudaSuccess) {
         std::cerr << "Failed to map CUDA resource: " << cudaGetErrorString(cudaErr) << std::endl;
-        return false;
+        return nullptr;
     }
     
     // 获取CUDA设备指针
-    void* mappedPtr;
-    size_t mappedSize;
-    cudaErr = cudaGraphicsResourceGetMappedPointer(&mappedPtr, &mappedSize, g_CSResources.cudaResource);
+    cudaErr = cudaGraphicsResourceGetMappedPointer(&g_mappedPtr, &g_mappedSize, g_CSResources.cudaResource);
     if (cudaErr != cudaSuccess) {
         std::cerr << "Failed to get mapped pointer: " << cudaGetErrorString(cudaErr) << std::endl;
         cudaGraphicsUnmapResources(1, &g_CSResources.cudaResource, 0);
-        return false;
+        return nullptr;
     }
     
-    // 复制数据到目标CUDA缓冲区
+    g_isMapped = true;
+    
     size_t expectedSize = 1 * 4 * width * height * sizeof(float);
-    if (mappedSize >= expectedSize) {
-        cudaErr = cudaMemcpy(cudaOutputPtr, mappedPtr, expectedSize, cudaMemcpyDeviceToDevice);
-        if (cudaErr != cudaSuccess) {
-            std::cerr << "Failed to copy CUDA data: " << cudaGetErrorString(cudaErr) << std::endl;
-            cudaGraphicsUnmapResources(1, &g_CSResources.cudaResource, 0);
-            return false;
-        }
-    } else {
-        std::cerr << "Mapped size mismatch: " << mappedSize << " vs expected " << expectedSize << std::endl;
-        cudaGraphicsUnmapResources(1, &g_CSResources.cudaResource, 0);
-        return false;
-    }
-    
-    // 取消映射
-    cudaErr = cudaGraphicsUnmapResources(1, &g_CSResources.cudaResource, 0);
-    if (cudaErr != cudaSuccess) {
-        std::cerr << "Failed to unmap CUDA resource: " << cudaGetErrorString(cudaErr) << std::endl;
-        return false;
+    if (g_mappedSize < expectedSize) {
+        std::cerr << "Mapped size mismatch: " << g_mappedSize << " vs expected " << expectedSize << std::endl;
+        unmap_cuda_input();
+        return nullptr;
     }
     
     std::cout << "Successfully converted D3D11 RGBA8 to CUDA float32 NCHW format" << std::endl;
     std::cout << "Output shape: (1, 4, " << height << ", " << width << ")" << std::endl;
+    std::cout << "Mapped CUDA pointer: " << g_mappedPtr << ", size: " << g_mappedSize << std::endl;
     
-    return true;
+    return g_mappedPtr;
+}
+
+/**
+ * @brief 取消CUDA资源映射
+ * 
+ * @note 在使用完to_cuda_input返回的指针后必须调用此函数
+ */
+void unmap_cuda_input() {
+    if (g_isMapped && g_CSResources.cudaResource) {
+        cudaError_t cudaErr = cudaGraphicsUnmapResources(1, &g_CSResources.cudaResource, 0);
+        if (cudaErr != cudaSuccess) {
+            std::cerr << "Failed to unmap CUDA resource: " << cudaGetErrorString(cudaErr) << std::endl;
+        }
+        g_isMapped = false;
+        g_mappedPtr = nullptr;
+        g_mappedSize = 0;
+    }
 }
 
 // 清理全局资源的函数
 void cleanup_cuda_input_resources() {
+    if (g_isMapped) {
+        unmap_cuda_input();
+    }
     g_CSResources.cleanup();
     g_lastWidth = 0;
     g_lastHeight = 0;

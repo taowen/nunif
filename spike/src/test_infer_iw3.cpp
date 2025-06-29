@@ -120,34 +120,27 @@ TEST_CASE("Test inferIW3") {
     ID3D11Texture2D* d3d11_rgba_texture = convert_color(&hw_ctx, hw_frame);
     REQUIRE(d3d11_rgba_texture != nullptr);
     
-    // 分配 CUDA 内存用于输出
-    // 输出格式: float32, NCHW, shape=(1, 4, height, width)
-    int width = hw_frame->width;
-    int height = hw_frame->height;
-    size_t cuda_output_size = 1 * 4 * height * width * sizeof(float); // NCHW format
-    
-    void* cuda_output_ptr = nullptr;
-    cudaError_t cuda_err = cudaMalloc(&cuda_output_ptr, cuda_output_size);
-    REQUIRE(cuda_err == cudaSuccess);
-    std::cout << "Allocated CUDA memory: " << cuda_output_size << " bytes" << std::endl;
-    
-    // 调用 to_cuda_input 转换函数
-    bool conversion_success = to_cuda_input(&hw_ctx, d3d11_rgba_texture, cuda_output_ptr);
-    REQUIRE(conversion_success);
-    std::cout << "to_cuda_input conversion successful!" << std::endl;
+    // 调用 to_cuda_input 转换函数，直接获取映射的CUDA指针
+    void* cuda_input_ptr = to_cuda_input(&hw_ctx, d3d11_rgba_texture);
+    REQUIRE(cuda_input_ptr != nullptr);
+    std::cout << "to_cuda_input conversion successful! CUDA pointer: " << cuda_input_ptr << std::endl;
 
     // Allocate CUDA memory for inference output
-    // Output is half side-by-side stereo, so width is halved.
-    // Shape: (1, 4, height, width/2)
+    int width = hw_frame->width;
+    int height = hw_frame->height;
     size_t cuda_infer_output_size = 1 * 4 * height * width * sizeof(float);
     void* cuda_infer_output_ptr = nullptr;
-    cuda_err = cudaMalloc(&cuda_infer_output_ptr, cuda_infer_output_size);
+    cudaError_t cuda_err = cudaMalloc(&cuda_infer_output_ptr, cuda_infer_output_size);
     REQUIRE(cuda_err == cudaSuccess);
     std::cout << "Allocated CUDA memory for inference output: " << cuda_infer_output_size << " bytes" << std::endl;
 
-    // Run inference
-    bool infer_success = inferIW3(cuda_output_ptr, cuda_infer_output_ptr, height, width);
+    // Run inference using the mapped CUDA pointer directly
+    bool infer_success = inferIW3(cuda_input_ptr, cuda_infer_output_ptr, height, width);
     REQUIRE(infer_success);
+    
+    // 取消CUDA资源映射
+    unmap_cuda_input();
+    std::cout << "Unmapped CUDA input resource." << std::endl;
     
     // Copy output from CUDA device to host
     std::vector<float> host_output_buffer(1 * 4 * height * width);
@@ -163,7 +156,6 @@ TEST_CASE("Test inferIW3") {
     save_rgba_as_bmp("test_infer_iw3_output.bmp", output_image_data, width, height);
     
     // Cleanup
-    cudaFree(cuda_output_ptr);
     cudaFree(cuda_infer_output_ptr);
     d3d11_rgba_texture->Release();
     av_frame_free(&hw_frame);

@@ -131,47 +131,23 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
 bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width);
 
 /**
- * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，用作IW3推理输入
+ * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，返回映射的CUDA指针
  * 
  * @param ctx FFMepg上下文，包含D3D11设备和上下文
- *            - 调用者负责：确保ctx有效且包含有效的D3D11设备
- *            - 函数负责：使用DirectCompute着色器进行GPU加速转换
- * 
  * @param rgbaTexture convert_color输出的RGBA8纹理
- *                    - 格式要求：DXGI_FORMAT_R8G8B8A8_UNORM
- *                    - 调用者负责：确保纹理有效且格式正确
+ * @return void* 映射的CUDA设备指针，格式：float32, NCHW布局, shape=(1,4,H,W)
+ *               失败时返回nullptr
  * 
- * @param cudaOutputPtr 输出的CUDA设备指针，用于IW3推理
- *                      - 格式：float32, NCHW布局
- *                      - 形状：(1, 4, height, width)
- *                      - 调用者负责：分配足够的CUDA内存空间
- * 
- * @return bool 转换是否成功
- *         - true: 成功将D3D11纹理转换为CUDA NCHW格式
- *         - false: 转换失败
- * 
- * @note 技术特性：
- *       1. GPU加速：使用DirectCompute着色器进行并行转换
- *       2. 格式转换：RGBA8 [0,255] -> float32 [0.0,1.0]
- *       3. 布局转换：交错RGBA -> 平面NCHW (batch=1, channels=4)
- *       4. 零拷贝：通过D3D11-CUDA互操作避免CPU-GPU传输
- *       5. 资源复用：相同尺寸的后续调用会复用已创建的资源
- * 
- * @example
- *       // 分配CUDA输出缓冲区
- *       size_t outputSize = 1 * 4 * height * width * sizeof(float);
- *       void* cudaBuffer;
- *       cudaMalloc(&cudaBuffer, outputSize);
- *       
- *       // 转换D3D11纹理到CUDA格式
- *       if (to_cuda_input(&ctx, rgbaTexture, cudaBuffer)) {
- *           // 可以直接用于IW3推理
- *           inferIW3(cudaBuffer, outputBuffer, height, width);
- *       }
- *       
- *       cudaFree(cudaBuffer);
+ * @note 返回的指针在使用完毕后必须调用unmap_cuda_input()取消映射
  */
-bool to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture, void* cudaOutputPtr);
+void* to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture);
+
+/**
+ * @brief 取消CUDA资源映射
+ * 
+ * @note 在使用完to_cuda_input返回的指针后必须调用此函数
+ */
+void unmap_cuda_input();
 
 /**
  * @brief 清理CUDA输入转换相关的全局资源
