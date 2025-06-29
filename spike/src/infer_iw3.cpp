@@ -48,6 +48,22 @@ public:
     }
     
     bool initialize(const std::string& onnxModelPath, bool useFP16 = true) {
+        // Generate TRT cache file path
+        std::string trtCachePath = onnxModelPath;
+        size_t dotPos = trtCachePath.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            trtCachePath = trtCachePath.substr(0, dotPos);
+        }
+        trtCachePath += useFP16 ? "_fp16.trt" : "_fp32.trt";
+        
+        // Try to load cached TRT engine first
+        if (loadCachedEngine(trtCachePath)) {
+            std::cout << "Loaded cached TensorRT engine from: " << trtCachePath << std::endl;
+            return setupInferenceContext();
+        }
+        
+        std::cout << "Building TensorRT engine from ONNX model..." << std::endl;
+        
         // Create builder
         auto builder = std::unique_ptr<IBuilder>(createInferBuilder(mLogger));
         if (!builder) {
@@ -109,6 +125,9 @@ public:
             return false;
         }
         
+        // Save the engine to cache file
+        saveCachedEngine(trtCachePath, serializedEngine->data(), serializedEngine->size());
+        
         // Create runtime and deserialize engine
         mRuntime = std::unique_ptr<IRuntime>(createInferRuntime(mLogger));
         if (!mRuntime) {
@@ -123,25 +142,7 @@ public:
             return false;
         }
         
-        // Create execution context
-        mContext = std::unique_ptr<IExecutionContext>(mEngine->createExecutionContext());
-        if (!mContext) {
-            std::cerr << "Failed to create execution context" << std::endl;
-            return false;
-        }
-        
-        // Get input/output dimensions
-        mInputDims = mEngine->getTensorShape(mInputName.c_str());
-        mOutputDims = mEngine->getTensorShape(mOutputName.c_str());
-        
-        std::cout << "Model loaded successfully!" << std::endl;
-        std::cout << "Input dimensions: ";
-        for (int i = 0; i < mInputDims.nbDims; ++i) {
-            std::cout << mInputDims.d[i] << " ";
-        }
-        std::cout << std::endl;
-        
-        return true;
+        return setupInferenceContext();
     }
     
     /**
@@ -267,6 +268,77 @@ public:
     }
 
 private:
+    bool loadCachedEngine(const std::string& trtCachePath) {
+        std::ifstream file(trtCachePath, std::ios::binary);
+        if (!file.good()) {
+            return false;
+        }
+        
+        // Get file size
+        file.seekg(0, std::ios::end);
+        size_t size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        
+        if (size == 0) {
+            return false;
+        }
+        
+        // Read engine data
+        std::vector<char> engineData(size);
+        file.read(engineData.data(), size);
+        file.close();
+        
+        // Create runtime
+        mRuntime = std::unique_ptr<IRuntime>(createInferRuntime(mLogger));
+        if (!mRuntime) {
+            std::cerr << "Failed to create TensorRT runtime" << std::endl;
+            return false;
+        }
+        
+        // Deserialize engine
+        mEngine = std::unique_ptr<ICudaEngine>(mRuntime->deserializeCudaEngine(
+            engineData.data(), size));
+        if (!mEngine) {
+            std::cerr << "Failed to deserialize cached TensorRT engine" << std::endl;
+            return false;
+        }
+        
+        return true;
+    }
+    
+    void saveCachedEngine(const std::string& trtCachePath, const void* engineData, size_t size) {
+        std::ofstream file(trtCachePath, std::ios::binary);
+        if (file.good()) {
+            file.write(static_cast<const char*>(engineData), size);
+            file.close();
+            std::cout << "Saved TensorRT engine cache to: " << trtCachePath << std::endl;
+        } else {
+            std::cerr << "Failed to save TensorRT engine cache to: " << trtCachePath << std::endl;
+        }
+    }
+    
+    bool setupInferenceContext() {
+        // Create execution context
+        mContext = std::unique_ptr<IExecutionContext>(mEngine->createExecutionContext());
+        if (!mContext) {
+            std::cerr << "Failed to create execution context" << std::endl;
+            return false;
+        }
+        
+        // Get input/output dimensions
+        mInputDims = mEngine->getTensorShape(mInputName.c_str());
+        mOutputDims = mEngine->getTensorShape(mOutputName.c_str());
+        
+        std::cout << "Model loaded successfully!" << std::endl;
+        std::cout << "Input dimensions: ";
+        for (int i = 0; i < mInputDims.nbDims; ++i) {
+            std::cout << mInputDims.d[i] << " ";
+        }
+        std::cout << std::endl;
+        
+        return true;
+    }
+    
     void cleanup() {
         if (mInputDeviceBuffer) {
             cudaFree(mInputDeviceBuffer);
