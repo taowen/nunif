@@ -82,6 +82,16 @@ public:
             std::cerr << "Failed to create builder config" << std::endl;
             return false;
         }
+
+         // Set optimization profile for dynamic shapes
+        auto profile = builder->createOptimizationProfile();
+        const char* input_name = network->getInput(0)->getName();
+        
+        // Set dynamic dimensions: batch=1, channels=4, height=[512,2160], width=[512,4096]  
+        profile->setDimensions(input_name, nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims4{1, 4, 512, 512});
+        profile->setDimensions(input_name, nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims4{1, 4, 1080, 1920});
+        profile->setDimensions(input_name, nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims4{1, 4, 2160, 4096});
+        config->addOptimizationProfile(profile);
         
         // Enable FP16 if requested
         if (useFP16 && builder->platformHasFastFp16()) {
@@ -164,34 +174,92 @@ public:
             return false;
         }
         
-        const int batchSize = 1;        // Fixed batch size
-        const int inputChannels = 4;   // RGBA input
-        const int outputChannels = 4;  // RGBA output
-        
-        // Set dynamic dimensions
-        Dims inputDims{4, {batchSize, inputChannels, height, width}};
-        Dims outputDims{4, {batchSize, outputChannels, height, width}};
-        
-        if (!mContext->setInputShape(mInputName.c_str(), inputDims)) {
+        // Set dynamic input dimensions
+        nvinfer1::Dims4 input_shape{1, 4, static_cast<int>(height), static_cast<int>(width)};
+        if (!mContext->setInputShape(mEngine->getIOTensorName(0), input_shape)) {
             std::cerr << "Failed to set input shape" << std::endl;
             return false;
         }
         
-        // Calculate buffer sizes
-        mInputSize = batchSize * inputChannels * height * width * sizeof(float);
-        mOutputSize = batchSize * outputChannels * height * width * sizeof(float);
+        // Calculate sizes
+        size_t input_size = 1 * 4 * height * width * sizeof(float);
         
-        // Use provided device pointers directly
-        mInputDeviceBuffer = inputDevicePtr;
-        mOutputDeviceBuffer = outputDevicePtr;
+        // Get output dimensions from the context after setting input shape
+        nvinfer1::Dims output_dims_actual = mContext->getTensorShape(mEngine->getIOTensorName(1));
         
-        // Set tensor addresses
-        mContext->setTensorAddress(mInputName.c_str(), mInputDeviceBuffer);
-        mContext->setTensorAddress(mOutputName.c_str(), mOutputDeviceBuffer);
+        // Add detailed output dimension checking
+        uint32_t actual_output_channels = static_cast<uint32_t>(output_dims_actual.d[1]);
+        uint32_t actual_output_height = static_cast<uint32_t>(output_dims_actual.d[2]);
+        uint32_t actual_output_width = static_cast<uint32_t>(output_dims_actual.d[3]);
+        
+        std::cout << "    → Input dimensions: " << width << "x" << height << std::endl;
+        std::cout << "    → Output dimensions: " << actual_output_width << "x" << actual_output_height << "x" << actual_output_channels << std::endl;
+        
+        // Check if output dimensions match input dimensions
+        if (actual_output_height != height || actual_output_width != width) {
+            std::cout << "    ⚠ WARNING: Output dimensions don't match input dimensions!" << std::endl;
+            std::cout << "    → This might cause the white strip issue" << std::endl;
+        }
+
+        size_t output_elements = 1;
+        for (int i = 0; i < output_dims_actual.nbDims; ++i) {
+            if (output_dims_actual.d[i] < 0) {
+                 std::cerr << "    ✗ Invalid output dimension: " << output_dims_actual.d[i] << std::endl;
+                 return false;
+            }
+            output_elements *= output_dims_actual.d[i];
+        }
+        size_t output_size = output_elements * sizeof(float);
+
+        // Allocate input device memory if needed
+        if (mInputSize < input_size) {
+            if (mInputDeviceBuffer) {
+                cudaFree(mInputDeviceBuffer);
+            }
+            cudaError_t err = cudaMalloc(&mInputDeviceBuffer, input_size);
+            if (err != cudaSuccess) {
+                std::cerr << "Failed to allocate input buffer: " << cudaGetErrorString(err) << std::endl;
+                return false;
+            }
+            mInputSize = input_size;
+            std::cout << "    → Allocated input buffer: " << input_size << " bytes\n";
+        }
+        
+        // Allocate output device memory if needed
+        if (mOutputSize < output_size) {
+            if (mOutputDeviceBuffer) {
+                cudaFree(mOutputDeviceBuffer);
+            }
+            cudaError_t err = cudaMalloc(&mOutputDeviceBuffer, output_size);
+            if (err != cudaSuccess) {
+                std::cerr << "Failed to allocate output buffer: " << cudaGetErrorString(err) << std::endl;
+                return false;
+            }
+            mOutputSize = output_size;
+            std::cout << "    → Allocated output buffer: " << output_size << " bytes\n";
+        }
+        
+        // Copy input data to device buffer
+        cudaError_t err = cudaMemcpy(mInputDeviceBuffer, inputDevicePtr, input_size, cudaMemcpyDeviceToDevice);
+        if (err != cudaSuccess) {
+            std::cerr << "Failed to copy input data: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+
+        void* bindings[2];
+        bindings[0] = mInputDeviceBuffer;  // input tensor
+        bindings[1] = mOutputDeviceBuffer; // output tensor
         
         // Execute inference
-        if (!mContext->executeV2(nullptr)) {
+        if (!mContext->executeV2(bindings)) {
             std::cerr << "Inference execution failed" << std::endl;
+            return false;
+        }
+        
+        // Copy output data back to the provided output buffer
+        err = cudaMemcpy(outputDevicePtr, mOutputDeviceBuffer, output_size, cudaMemcpyDeviceToDevice);
+        if (err != cudaSuccess) {
+            std::cerr << "Failed to copy output data: " << cudaGetErrorString(err) << std::endl;
             return false;
         }
         
@@ -200,10 +268,16 @@ public:
 
 private:
     void cleanup() {
-        // Note: We don't free mInputDeviceBuffer and mOutputDeviceBuffer 
-        // as they are managed externally
-        mInputDeviceBuffer = nullptr;
-        mOutputDeviceBuffer = nullptr;
+        if (mInputDeviceBuffer) {
+            cudaFree(mInputDeviceBuffer);
+            mInputDeviceBuffer = nullptr;
+        }
+        if (mOutputDeviceBuffer) {
+            cudaFree(mOutputDeviceBuffer);
+            mOutputDeviceBuffer = nullptr;
+        }
+        mInputSize = 0;
+        mOutputSize = 0;
     }
 };
 
