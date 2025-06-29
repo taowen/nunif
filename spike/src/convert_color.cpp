@@ -52,6 +52,7 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
     ID3D11Texture2D* output_texture = nullptr;
     ID3D11VideoProcessorInputView* input_view = nullptr;
     ID3D11VideoProcessorOutputView* output_view = nullptr;
+    bool color_space_valid = true;
     
     // Initialize structs
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC content_desc = {};
@@ -59,6 +60,8 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {};
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {};
     D3D11_VIDEO_PROCESSOR_STREAM stream_data = {};
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_color_space = {};
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color_space = {};
 
     // Get video device and context
     hr = ctx->d3d_device->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&video_device);
@@ -133,9 +136,68 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame) {
         goto cleanup;
     }
 
-    // Set default color space
-    video_context->VideoProcessorSetStreamColorSpace(video_processor, 0, nullptr);
-    video_context->VideoProcessorSetOutputColorSpace(video_processor, nullptr);
+    // Set color space based on frame properties
+    // Validate and configure input color space based on frame properties
+    std::cout << "=== Color Space Validation ===" << std::endl;
+    std::cout << "Frame properties:" << std::endl;
+    std::cout << "  colorspace: " << frame->colorspace << " (expected: " << AVCOL_SPC_BT709 << " for BT.709)" << std::endl;
+    std::cout << "  color_range: " << frame->color_range << " (1=TV/limited, 2=JPEG/full)" << std::endl;
+    std::cout << "  color_primaries: " << frame->color_primaries << std::endl;
+    std::cout << "  color_trc: " << frame->color_trc << std::endl;
+    
+    // Validate color space
+    color_space_valid = true;
+    if (frame->colorspace != AVCOL_SPC_BT709 && frame->colorspace != AVCOL_SPC_UNSPECIFIED) {
+        std::cerr << "Warning: Unexpected colorspace " << frame->colorspace << ", expected BT.709 (" << AVCOL_SPC_BT709 << ")" << std::endl;
+        color_space_valid = false;
+    }
+    
+    if (frame->color_range != AVCOL_RANGE_MPEG && frame->color_range != AVCOL_RANGE_JPEG && frame->color_range != AVCOL_RANGE_UNSPECIFIED) {
+        std::cerr << "Warning: Unexpected color_range " << frame->color_range << std::endl;
+        color_space_valid = false;
+    }
+    
+    std::cout << "Color space validation: " << (color_space_valid ? "PASSED" : "WARNING") << std::endl;
+    
+    // Configure input color space based on frame properties
+    input_color_space.Usage = 0; // Video processing
+    input_color_space.RGB_Range = 0; // Not RGB input
+    // Use BT.709 if specified or unspecified, otherwise log the deviation
+    input_color_space.YCbCr_Matrix = (frame->colorspace == AVCOL_SPC_BT709 || frame->colorspace == AVCOL_SPC_UNSPECIFIED) ? 1 : 1; // Default to BT.709
+    input_color_space.YCbCr_xvYCC = 0; // Standard YCbCr
+    // Handle color range:
+    // D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235 = 1 (Limited/TV range)
+    // D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255  = 2 (Full/PC range)
+    if (frame->color_range == AVCOL_RANGE_JPEG) {
+        input_color_space.Nominal_Range = 2; // Full range
+    } else if (frame->color_range == AVCOL_RANGE_MPEG) {
+        input_color_space.Nominal_Range = 1; // Limited range
+    } else {
+        // AVCOL_RANGE_UNSPECIFIED - assume limited range for video content
+        input_color_space.Nominal_Range = 1;
+        std::cout << "Note: Unspecified color range, assuming limited range" << std::endl;
+    }
+    
+    // Configure output color space for RGB
+    output_color_space.Usage = 0; // Video processing  
+    output_color_space.RGB_Range = 1; // Full range RGB (0-255). 0=Limited, 1=Full.
+    output_color_space.YCbCr_Matrix = 1; // BT.709 (used for RGB conversion matrix)
+    output_color_space.YCbCr_xvYCC = 0; // Not applicable for RGB
+    output_color_space.Nominal_Range = 2; // Full range for RGB output (0-255)
+    
+    // Set color spaces explicitly
+    video_context->VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
+    video_context->VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
+    
+    // Enhanced debugging output
+    std::cout << "=== Applied Color Space Configuration ===" << std::endl;
+    std::cout << "Input color space:" << std::endl;
+    std::cout << "  YCbCr_Matrix: " << input_color_space.YCbCr_Matrix << " (1=BT.709)" << std::endl;
+    std::cout << "  Nominal_Range: " << input_color_space.Nominal_Range << " (1=limited, 2=full)" << std::endl;
+    std::cout << "Output color space:" << std::endl;
+    std::cout << "  RGB_Range: " << output_color_space.RGB_Range << " (0=limited, 1=full)" << std::endl;
+    std::cout << "  Nominal_Range: " << output_color_space.Nominal_Range << " (1=limited, 2=full)" << std::endl;
+    std::cout << "=================================" << std::endl;
 
     // Perform the conversion
     stream_data.Enable = TRUE;
