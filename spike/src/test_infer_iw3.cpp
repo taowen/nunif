@@ -150,17 +150,17 @@ TEST_CASE("Test inferIW3") {
     REQUIRE(infer_success);
     
     // Copy output from CUDA device to host
-    std::vector<float> host_output_buffer(1 * 4 * height * output_width);
+    std::vector<float> host_output_buffer(1 * 4 * height * width);
     cuda_err = cudaMemcpy(host_output_buffer.data(), cuda_infer_output_ptr, cuda_infer_output_size, cudaMemcpyDeviceToHost);
     REQUIRE(cuda_err == cudaSuccess);
     std::cout << "Copied inference output from device to host." << std::endl;
     
     // Convert NCHW float output to RGBA8 for saving
-    std::vector<uint8_t> output_image_data = nchw_to_rgba(host_output_buffer.data(), 4, height, output_width);
+    std::vector<uint8_t> output_image_data = nchw_to_rgba(host_output_buffer.data(), 4, height, width);
     REQUIRE(!output_image_data.empty());
     
     // Save output image
-    save_rgba_as_bmp("test_infer_iw3_output.bmp", output_image_data, output_width, height);
+    save_rgba_as_bmp("test_infer_iw3_output.bmp", output_image_data, width, height);
     
     // Cleanup
     cudaFree(cuda_output_ptr);
