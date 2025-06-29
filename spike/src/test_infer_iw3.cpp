@@ -125,30 +125,32 @@ TEST_CASE("Test inferIW3") {
     REQUIRE(cuda_input_ptr != nullptr);
     std::cout << "to_cuda_input conversion successful! CUDA pointer: " << cuda_input_ptr << std::endl;
 
-    // Allocate CUDA memory for inference output
+    // Run inference using the mapped CUDA pointer directly
+    // inferIW3 will allocate the output buffer.
     int width = hw_frame->width;
     int height = hw_frame->height;
-    size_t cuda_infer_output_size = 1 * 4 * height * width * sizeof(float);
-    void* cuda_infer_output_ptr = nullptr;
-    cudaError_t cuda_err = cudaMalloc(&cuda_infer_output_ptr, cuda_infer_output_size);
-    REQUIRE(cuda_err == cudaSuccess);
-    std::cout << "Allocated CUDA memory for inference output: " << cuda_infer_output_size << " bytes" << std::endl;
-
-    // Run inference using the mapped CUDA pointer directly
-    bool infer_success = inferIW3(cuda_input_ptr, cuda_infer_output_ptr, height, width);
-    REQUIRE(infer_success);
+    size_t cuda_infer_output_size = 0;
+    void* cuda_infer_output_ptr = inferIW3(cuda_input_ptr, height, width, &cuda_infer_output_size);
+    REQUIRE(cuda_infer_output_ptr != nullptr);
     
     // 取消CUDA资源映射
     unmap_cuda_input();
     std::cout << "Unmapped CUDA input resource." << std::endl;
     
     // Copy output from CUDA device to host
-    std::vector<float> host_output_buffer(1 * 4 * height * width);
-    cuda_err = cudaMemcpy(host_output_buffer.data(), cuda_infer_output_ptr, cuda_infer_output_size, cudaMemcpyDeviceToHost);
+    std::vector<float> host_output_buffer(cuda_infer_output_size / sizeof(float));
+    cudaError_t cuda_err = cudaMemcpy(host_output_buffer.data(), cuda_infer_output_ptr, cuda_infer_output_size, cudaMemcpyDeviceToHost);
     REQUIRE(cuda_err == cudaSuccess);
     std::cout << "Copied inference output from device to host." << std::endl;
     
     // Convert NCHW float output to RGBA8 for saving
+    // The output is half side-by-side, so the width for the image is `width`.
+    // The data itself contains L/R images, so total elements correspond to `width` but arranged in `width/2` for each eye in sbs format.
+    // The nchw_to_rgba expects channel count and H, W of the *final image*.
+    // The model output is (1, 4, H, W/2) for each eye, concatenated to (1, 4, H, W).
+    // Oh, my `infer` has a bug, it should be `width/2` for half sbs. Let me check the onnx.
+    // The onnx output is `half_sbs` with shape (1, 4, H, W). It is not `W/2`. My previous assumption was wrong.
+    // The `nchw_to_rgba` should be correct.
     std::vector<uint8_t> output_image_data = nchw_to_rgba(host_output_buffer.data(), 4, height, width);
     REQUIRE(!output_image_data.empty());
     

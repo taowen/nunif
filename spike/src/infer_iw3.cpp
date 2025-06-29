@@ -156,20 +156,11 @@ public:
      *        Shape: (1, 4, height, width) - Fixed batch size of 1
      *        Color space: RGB with alpha channel
      * 
-     * @param outputDevicePtr Output CUDA device pointer  
-     *        Format: RGBA (4 channels)
-     *        Data type: float32
-     *        Value range: [0.0, 1.0]
-     *        Layout: NCHW (batch, channel, height, width)
-     *        Shape: (1, 4, height, width/2) - Half side-by-side stereo, batch size 1
-     *        Color space: RGB with alpha channel
-     *        Content: Left eye view concatenated with right eye view horizontally
-     * 
      * @param height Image height in pixels
      * @param width Image width in pixels
      * @return true on success, false on failure
      */
-    bool infer(void* inputDevicePtr, void* outputDevicePtr, int height, int width) {
+    bool infer(void* inputDevicePtr, int height, int width, void** outputDevicePtr, size_t* out_size_bytes) {
         if (!mEngine || !mContext) {
             std::cerr << "Model not initialized" << std::endl;
             return false;
@@ -257,11 +248,22 @@ public:
             return false;
         }
         
-        // Copy output data back to the provided output buffer
-        err = cudaMemcpy(outputDevicePtr, mOutputDeviceBuffer, output_size, cudaMemcpyDeviceToDevice);
-        if (err != cudaSuccess) {
-            std::cerr << "Failed to copy output data: " << cudaGetErrorString(err) << std::endl;
+        // Allocate final output buffer for the user and copy data to it
+        cudaError_t cuda_err = cudaMalloc(outputDevicePtr, output_size);
+        if (cuda_err != cudaSuccess) {
+            std::cerr << "Failed to allocate user output buffer: " << cudaGetErrorString(cuda_err) << std::endl;
             return false;
+        }
+        
+        cuda_err = cudaMemcpy(*outputDevicePtr, mOutputDeviceBuffer, output_size, cudaMemcpyDeviceToDevice);
+        if (cuda_err != cudaSuccess) {
+            std::cerr << "Failed to copy output data to user buffer: " << cudaGetErrorString(cuda_err) << std::endl;
+            cudaFree(*outputDevicePtr);
+            *outputDevicePtr = nullptr;
+            return false;
+        }
+        if (out_size_bytes) {
+            *out_size_bytes = output_size;
         }
         
         return true;
@@ -373,22 +375,28 @@ private:
  * - Content: Half side-by-side stereo (left eye | right eye)
  * - Color space: RGB with alpha channel
  */
-bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width) {
-    IW3TensorRTInference inferencer;
+void* inferIW3(void* inputDevicePtr, int height, int width, size_t* out_size_bytes) {
+    static IW3TensorRTInference inferencer;
+    static bool is_initialized = false;
     
-    // Initialize the model
-    if (!inferencer.initialize("stereo_module_half_sbs.onnx", true)) {
-        std::cerr << "Failed to initialize IW3 TensorRT inference" << std::endl;
-        return false;
+    // Initialize the model once
+    if (!is_initialized) {
+        if (!inferencer.initialize("stereo_module_half_sbs.onnx", true)) {
+            std::cerr << "Failed to initialize IW3 TensorRT inference" << std::endl;
+            return nullptr;
+        }
+        is_initialized = true;
     }
     
+    void* outputDevicePtr = nullptr;
     // Run inference with direct CUDA tensors (batch size fixed to 1)
-    if (!inferencer.infer(inputDevicePtr, outputDevicePtr, height, width)) {
+    if (!inferencer.infer(inputDevicePtr, height, width, &outputDevicePtr, out_size_bytes)) {
         std::cerr << "Inference failed" << std::endl;
-        return false;
+        // outputDevicePtr should be nullptr if infer fails and allocated
+        return nullptr;
     }
     
     std::cout << "Inference completed successfully!" << std::endl;
     
-    return true;
+    return outputDevicePtr;
 }

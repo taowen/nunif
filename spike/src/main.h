@@ -127,8 +127,12 @@ ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
  * - Shape: (1, 4, height, width/2) - Fixed batch size of 1
  * - Content: Half side-by-side stereo (left eye | right eye)
  * - Color space: RGB with alpha channel
+ * 
+ * @return void* 指向推理结果的CUDA设备指针。调用者负责使用cudaFree()释放此内存。失败时返回nullptr。
+ * 
+ * @note 内存管理: 调用者必须释放返回的CUDA指针。
  */
-bool inferIW3(void* inputDevicePtr, void* outputDevicePtr, int height, int width);
+void* inferIW3(void* inputDevicePtr, int height, int width, size_t* out_size_bytes);
 
 /**
  * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，返回映射的CUDA指针
