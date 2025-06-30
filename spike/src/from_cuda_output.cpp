@@ -93,8 +93,17 @@ private:
             return true;
         }
         
-        // 清理旧资源
+        // 清理旧资源 - 但保留输出纹理
+        ID3D11Texture2D* preservedOutputTexture = csResources.outputTexture;
+        ID3D11UnorderedAccessView* preservedOutputUAV = csResources.outputUAV;
+        csResources.outputTexture = nullptr;
+        csResources.outputUAV = nullptr;
+        
         csResources.cleanup();
+        
+        // 恢复输出纹理
+        csResources.outputTexture = preservedOutputTexture;
+        csResources.outputUAV = preservedOutputUAV;
         
         // 编译计算着色器
         ID3DBlob* csBlob = nullptr;
@@ -265,7 +274,7 @@ public:
             return nullptr;
         }
         
-        // 初始化计算着色器资源
+        // 初始化compute shader (如果需要) - 先初始化再创建输出纹理
         if (!initializeComputeShader(ctx, width, height)) {
             return nullptr;
         }
@@ -275,49 +284,104 @@ public:
             return nullptr;
         }
         
-        cudaError_t cudaErr;
+        // 直接将CUDA输出指针注册为D3D11互操作资源
+        cudaGraphicsResource* cudaOutputResource = nullptr;
+        HRESULT hr;
+        
+        // 创建一个临时的D3D11缓冲区来包装CUDA内存
+        size_t dataSize = 1 * 4 * width * height * sizeof(float);
+        
+        // 方法1：使用外部CUDA内存创建D3D11缓冲区
+        // 创建共享的D3D11缓冲区
+        D3D11_BUFFER_DESC bufferDesc = {};
+        bufferDesc.ByteWidth = (UINT)dataSize;
+        bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bufferDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED | D3D11_RESOURCE_MISC_SHARED;
+        bufferDesc.StructureByteStride = sizeof(float);
+        
+        ID3D11Buffer* sharedBuffer = nullptr;
+        hr = ctx->d3d_device->CreateBuffer(&bufferDesc, nullptr, &sharedBuffer);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create shared buffer. HRESULT: 0x" << std::hex << hr << std::endl;
+            return nullptr;
+        }
+        
+        // 注册CUDA互操作资源
+        cudaError_t cudaErr = cudaGraphicsD3D11RegisterResource(
+            &cudaOutputResource, sharedBuffer, cudaGraphicsRegisterFlagsNone
+        );
+        
+        if (cudaErr != cudaSuccess) {
+            std::cerr << "Failed to register CUDA output resource: " << cudaGetErrorString(cudaErr) << std::endl;
+            sharedBuffer->Release();
+            return nullptr;
+        }
         
         // 映射D3D11缓冲区到CUDA
-        cudaErr = cudaGraphicsMapResources(1, &csResources.cudaResource, 0);
+        cudaErr = cudaGraphicsMapResources(1, &cudaOutputResource, 0);
         if (cudaErr != cudaSuccess) {
-            std::cerr << "Failed to map from CUDA resource: " << cudaGetErrorString(cudaErr) << std::endl;
+            std::cerr << "Failed to map CUDA output resource: " << cudaGetErrorString(cudaErr) << std::endl;
+            cudaGraphicsUnregisterResource(cudaOutputResource);
+            sharedBuffer->Release();
             return nullptr;
         }
         
         // 获取映射的CUDA指针
         void* mappedPtr;
         size_t mappedSize;
-        cudaErr = cudaGraphicsResourceGetMappedPointer(&mappedPtr, &mappedSize, csResources.cudaResource);
+        cudaErr = cudaGraphicsResourceGetMappedPointer(&mappedPtr, &mappedSize, cudaOutputResource);
         if (cudaErr != cudaSuccess) {
-            std::cerr << "Failed to get from CUDA mapped pointer: " << cudaGetErrorString(cudaErr) << std::endl;
-            cudaGraphicsUnmapResources(1, &csResources.cudaResource, 0);
+            std::cerr << "Failed to get mapped pointer: " << cudaGetErrorString(cudaErr) << std::endl;
+            cudaGraphicsUnmapResources(1, &cudaOutputResource, 0);
+            cudaGraphicsUnregisterResource(cudaOutputResource);
+            sharedBuffer->Release();
             return nullptr;
         }
         
-        // 将CUDA输出数据复制到D3D11缓冲区
-        size_t dataSize = 1 * 4 * width * height * sizeof(float);
+        // 直接将CUDA输出数据复制到映射的缓冲区（这是唯一必要的复制）
         cudaErr = cudaMemcpy(mappedPtr, cudaOutputPtr, dataSize, cudaMemcpyDeviceToDevice);
         if (cudaErr != cudaSuccess) {
             std::cerr << "Failed to copy CUDA output data: " << cudaGetErrorString(cudaErr) << std::endl;
-            cudaGraphicsUnmapResources(1, &csResources.cudaResource, 0);
+            cudaGraphicsUnmapResources(1, &cudaOutputResource, 0);
+            cudaGraphicsUnregisterResource(cudaOutputResource);
+            sharedBuffer->Release();
             return nullptr;
         }
         
         // 取消映射
-        cudaErr = cudaGraphicsUnmapResources(1, &csResources.cudaResource, 0);
+        cudaErr = cudaGraphicsUnmapResources(1, &cudaOutputResource, 0);
         if (cudaErr != cudaSuccess) {
-            std::cerr << "Failed to unmap from CUDA resource: " << cudaGetErrorString(cudaErr) << std::endl;
+            std::cerr << "Failed to unmap CUDA output resource: " << cudaGetErrorString(cudaErr) << std::endl;
+            cudaGraphicsUnregisterResource(cudaOutputResource);
+            sharedBuffer->Release();
+            return nullptr;
+        }
+        
+        // 创建SRV用于compute shader
+        ID3D11ShaderResourceView* inputSRV = nullptr;
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+        srvDesc.Buffer.FirstElement = 0;
+        srvDesc.Buffer.NumElements = 1 * 4 * width * height;
+        
+        hr = ctx->d3d_device->CreateShaderResourceView(sharedBuffer, &srvDesc, &inputSRV);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to create input SRV. HRESULT: 0x" << std::hex << hr << std::endl;
+            cudaGraphicsUnregisterResource(cudaOutputResource);
+            sharedBuffer->Release();
             return nullptr;
         }
         
         // 设置计算着色器资源
         ctx->d3d_context->CSSetShader(csResources.computeShader, nullptr, 0);
         ctx->d3d_context->CSSetConstantBuffers(0, 1, &csResources.constantBuffer);
-        ctx->d3d_context->CSSetShaderResources(0, 1, &csResources.inputSRV);
+        ctx->d3d_context->CSSetShaderResources(0, 1, &inputSRV);
         ctx->d3d_context->CSSetUnorderedAccessViews(0, 1, &csResources.outputUAV, nullptr);
         
         // 执行计算着色器
-        UINT groupX = (width + 15) / 16;   // 16x16 线程组
+        UINT groupX = (width + 15) / 16;
         UINT groupY = (height + 15) / 16;
         ctx->d3d_context->Dispatch(groupX, groupY, 1);
         
@@ -331,13 +395,21 @@ public:
         ctx->d3d_context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
         ctx->d3d_context->CSSetShader(nullptr, nullptr, 0);
         
+        // 清理临时资源
+        inputSRV->Release();
+        cudaGraphicsUnregisterResource(cudaOutputResource);
+        sharedBuffer->Release();
+        
         // 返回输出纹理（调用者负责Release）
-        csResources.outputTexture->AddRef();
-        
-        std::cout << "Successfully converted CUDA float32 NCHW to D3D11 RGBA8 texture" << std::endl;
-        std::cout << "Output texture size: " << width << "x" << height << std::endl;
-        
-        return csResources.outputTexture;
+        if (csResources.outputTexture) {
+            csResources.outputTexture->AddRef();
+            std::cout << "Successfully converted CUDA float32 NCHW to D3D11 RGBA8 texture (direct method)" << std::endl;
+            std::cout << "Output texture size: " << width << "x" << height << std::endl;
+            return csResources.outputTexture;
+        } else {
+            std::cerr << "Error: Output texture is null" << std::endl;
+            return nullptr;
+        }
     }
 
     /**
