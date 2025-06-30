@@ -224,3 +224,55 @@ void* to_cuda_input(ToCudaInputContext* context, const FFMepgContext* ctx, ID3D1
  *       - 失败处理：函数内部清理，不会泄露内存
  */
 void* inferIW3(void* inputDevicePtr, int height, int width, size_t* out_size_bytes);
+
+/**
+ * @brief CUDA输出转换上下文类
+ * 
+ * 封装CUDA到D3D11的纹理转换功能，管理相关资源和状态
+ */
+class FromCudaOutputContext {
+public:
+    FromCudaOutputContext();
+    ~FromCudaOutputContext();
+    
+    // 禁止拷贝构造和赋值
+    FromCudaOutputContext(const FromCudaOutputContext&) = delete;
+    FromCudaOutputContext& operator=(const FromCudaOutputContext&) = delete;
+    
+    /**
+     * @brief 将CUDA float32 NCHW格式转换为D3D11 RGBA8纹理
+     * 
+     * @param ctx FFMepg上下文，包含D3D11设备和上下文
+     * @param cudaOutputPtr inferIW3输出的CUDA设备指针，格式：float32, NCHW, shape=(1,4,H,W/2)
+     * @param height 输出纹理高度
+     * @param width 输出纹理宽度（为inferIW3输入宽度的一半）
+     * @return ID3D11Texture2D* 转换后的RGBA8纹理，失败时返回nullptr
+     * 
+     * @note 调用者负责Release()返回的纹理
+     */
+    ID3D11Texture2D* from_cuda_output(const FFMepgContext* ctx, void* cudaOutputPtr, int height, int width);
+    
+    /**
+     * @brief 清理所有资源
+     */
+    void cleanup();
+
+private:
+    class FromCudaOutputContextImpl;
+    std::unique_ptr<FromCudaOutputContextImpl> pImpl;
+};
+
+/**
+ * @brief 将CUDA float32 NCHW格式转换为D3D11 RGBA8纹理
+ * 
+ * @param context CUDA输出转换上下文
+ * @param ctx FFMepg上下文，包含D3D11设备和上下文
+ * @param cudaOutputPtr inferIW3输出的CUDA设备指针，格式：float32, NCHW, shape=(1,4,H,W/2)
+ * @param height 输出纹理高度
+ * @param width 输出纹理宽度（为inferIW3输入宽度的一半）
+ * @return ID3D11Texture2D* 转换后的RGBA8纹理，失败时返回nullptr
+ * 
+ * @note 调用者负责Release()返回的纹理
+ */
+ID3D11Texture2D* from_cuda_output(FromCudaOutputContext* context, const FFMepgContext* ctx, 
+                                   void* cudaOutputPtr, int height, int width);
