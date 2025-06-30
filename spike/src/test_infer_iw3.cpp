@@ -120,8 +120,9 @@ TEST_CASE("Test inferIW3") {
     ID3D11Texture2D* d3d11_rgba_texture = convert_color(&hw_ctx, hw_frame);
     REQUIRE(d3d11_rgba_texture != nullptr);
     
-    // 调用 to_cuda_input 转换函数，直接获取映射的CUDA指针
-    void* cuda_input_ptr = to_cuda_input(&hw_ctx, d3d11_rgba_texture);
+    // 使用新的ToCudaInputContext类
+    ToCudaInputContext cuda_input_context;
+    void* cuda_input_ptr = cuda_input_context.to_cuda_input(&hw_ctx, d3d11_rgba_texture);
     REQUIRE(cuda_input_ptr != nullptr);
     std::cout << "to_cuda_input conversion successful! CUDA pointer: " << cuda_input_ptr << std::endl;
 
@@ -133,8 +134,8 @@ TEST_CASE("Test inferIW3") {
     void* cuda_infer_output_ptr = inferIW3(cuda_input_ptr, height, width, &cuda_infer_output_size);
     REQUIRE(cuda_infer_output_ptr != nullptr);
     
-    // 取消CUDA资源映射
-    unmap_cuda_input();
+    // 取消CUDA资源映射 - 使用上下文实例
+    cuda_input_context.unmap_cuda_input();
     std::cout << "Unmapped CUDA input resource." << std::endl;
     
     // Copy output from CUDA device to host
@@ -162,6 +163,6 @@ TEST_CASE("Test inferIW3") {
     d3d11_rgba_texture->Release();
     av_frame_free(&hw_frame);
     cleanup_context(&hw_ctx);
-    cleanup_cuda_input_resources();
+    // 上下文会在析构时自动清理资源
     std::cout << "Cleaned up all resources." << std::endl;
 }
