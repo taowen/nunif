@@ -113,32 +113,6 @@ AVFrame* d11_decode(FFMepgContext* ctx, const std::string& inputFile, int theInd
 ID3D11Texture2D* convert_color(const FFMepgContext* ctx, AVFrame* frame);
 
 /**
- * Main inference function with CUDA tensor interface
- * 
- * Input requirements (matching export_iw3.py ONNX model):
- * - Format: RGBA (4 channels) 
- * - Data type: float32
- * - Value range: [0.0, 1.0]
- * - Layout: NCHW (batch, channel, height, width)
- * - Shape: (1, 4, height, width) - Fixed batch size of 1
- * - Color space: RGB with alpha channel
- * 
- * Output format:
- * - Format: RGBA (4 channels)
- * - Data type: float32  
- * - Value range: [0.0, 1.0]
- * - Layout: NCHW (batch, channel, height, width/2)
- * - Shape: (1, 4, height, width/2) - Fixed batch size of 1
- * - Content: Half side-by-side stereo (left eye | right eye)
- * - Color space: RGB with alpha channel
- * 
- * @return void* 指向推理结果的CUDA设备指针。调用者负责使用cudaFree()释放此内存。失败时返回nullptr。
- * 
- * @note 内存管理: 调用者必须释放返回的CUDA指针。
- */
-void* inferIW3(void* inputDevicePtr, int height, int width, size_t* out_size_bytes);
-
-/**
  * @brief CUDA输入转换上下文类
  * 
  * 封装D3D11到CUDA的纹理转换功能，管理相关资源和状态
@@ -196,3 +170,57 @@ private:
  */
 void* to_cuda_input(ToCudaInputContext* context, const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture);
 
+
+/**
+ * Main inference function with CUDA tensor interface
+ * 
+ * Input requirements (matching export_iw3.py ONNX model):
+ * - Format: RGBA (4 channels) 
+ * - Data type: float32
+ * - Value range: [0.0, 1.0]
+ * - Layout: NCHW (batch, channel, height, width)
+ * - Shape: (1, 4, height, width) - Fixed batch size of 1
+ * - Color space: RGB with alpha channel
+ * 
+ * Output format:
+ * - Format: RGBA (4 channels)
+ * - Data type: float32  
+ * - Value range: [0.0, 1.0]
+ * - Layout: NCHW (batch, channel, height, width/2)
+ * - Shape: (1, 4, height, width/2) - Fixed batch size of 1
+ * - Content: Half side-by-side stereo (left eye | right eye)
+ * - Color space: RGB with alpha channel
+ * 
+ * @param inputDevicePtr 输入CUDA设备指针（void*类型）
+ *        - 类型说明：使用void*提供泛型接口，避免强类型约束
+ *        - 实际数据：指向float32格式的NCHW张量数据
+ *        - 内存位置：必须是有效的CUDA设备内存
+ *        - 调用者职责：确保指针有效且数据格式正确
+ *        - 函数职责：只读取数据，不修改指针值
+ * 
+ * @param height 输入图像高度（像素）
+ * 
+ * @param width 输入图像宽度（像素）
+ * 
+ * @param out_size_bytes 输出缓冲区大小（size_t*类型）
+ *        - 类型说明：使用指针类型以便函数修改调用者的变量值
+ *        - 输出参数：函数会写入分配的输出内存字节数
+ *        - 可选参数：可以传入nullptr如果不需要获取大小信息
+ *        - 用途：帮助调用者了解返回的CUDA内存块大小，便于后续操作
+ * 
+ * @return void* 指向推理结果的CUDA设备指针
+ *         - 成功：返回新分配的CUDA设备内存指针，包含推理结果
+ *         - 失败：返回nullptr
+ *         - 调用者职责：使用cudaFree()释放返回的内存
+ *         - 数据格式：与输出格式规范一致的float32 NCHW张量
+ * 
+ * @note 参数设计原理：
+ *       - inputDevicePtr使用void*：输入参数，提供泛型接口，只需读取数据
+ *       - out_size_bytes使用size_t*：输出参数，需要修改调用者变量值
+ *       
+ * @note 内存管理：
+ *       - 输入内存：调用者分配和释放
+ *       - 输出内存：函数分配，调用者释放
+ *       - 失败处理：函数内部清理，不会泄露内存
+ */
+void* inferIW3(void* inputDevicePtr, int height, int width, size_t* out_size_bytes);
