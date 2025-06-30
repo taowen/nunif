@@ -374,17 +374,11 @@ void ToCudaInputContext::cleanup() {
     pImpl->cleanup();
 }
 
-// 保留原有的全局函数接口，但使用静态实例实现
-static ToCudaInputContext g_cudaInputContext;
-
-void* to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture) {
-    return g_cudaInputContext.to_cuda_input(ctx, rgbaTexture);
-}
-
-void unmap_cuda_input() {
-    g_cudaInputContext.unmap_cuda_input();
-}
-
-void cleanup_cuda_input_resources() {
-    g_cudaInputContext.cleanup();
+// 修改全局函数接口，使用传入的上下文参数
+void* to_cuda_input(ToCudaInputContext* context, const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture) {
+    if (!context) {
+        std::cerr << "Error: ToCudaInputContext is null" << std::endl;
+        return nullptr;
+    }
+    return context->to_cuda_input(ctx, rgbaTexture);
 }

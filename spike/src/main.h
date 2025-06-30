@@ -182,29 +182,17 @@ private:
     std::unique_ptr<ToCudaInputContextImpl> pImpl;
 };
 
-// 兼容性接口 - 使用全局实例
+// 兼容性接口 - 不再使用全局实例
 /**
  * @brief 将D3D11 RGBA8纹理转换为CUDA float32 NCHW格式，返回映射的CUDA指针
  * 
+ * @param context CUDA输入转换上下文
  * @param ctx FFMepg上下文，包含D3D11设备和上下文
  * @param rgbaTexture convert_color输出的RGBA8纹理
  * @return void* 映射的CUDA设备指针，格式：float32, NCHW布局, shape=(1,4,H,W)
  *               失败时返回nullptr
  * 
- * @note 返回的指针在使用完毕后必须调用unmap_cuda_input()取消映射
+ * @note 返回的指针在使用完毕后必须调用context->unmap_cuda_input()取消映射
  */
-void* to_cuda_input(const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture);
+void* to_cuda_input(ToCudaInputContext* context, const FFMepgContext* ctx, ID3D11Texture2D* rgbaTexture);
 
-/**
- * @brief 取消CUDA资源映射
- * 
- * @note 在使用完to_cuda_input返回的指针后必须调用此函数
- */
-void unmap_cuda_input();
-
-/**
- * @brief 清理CUDA输入转换相关的全局资源
- * 
- * @note 在程序结束时调用以释放DirectCompute着色器和相关资源
- */
-void cleanup_cuda_input_resources();
