@@ -16,6 +16,7 @@
 #include "vertex_buffer_utils.h"
 #include "audio_state.h"
 #include "dx11_renderer.h"
+#include "ffmpeg_handler.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -33,20 +34,11 @@ extern "C" {
 #pragma comment(lib, "avrt.lib")
 
 // 全局变量
-// FFmpeg 相关
-AVFormatContext* formatContext = nullptr;
-AVCodecContext* videoCodecContext = nullptr;
-AVCodecContext* audioCodecContext = nullptr;
-SwsContext* swsContext = nullptr;
-SwrContext* swrContext = nullptr;
-int videoStreamIndex = -1;
-int audioStreamIndex = -1;
+// FFmpeg 相关 - 现在使用句柄
+FFmpegHandlerHandle ffmpegHandler = nullptr;
 
 // DirectX11 相关 - 使用不透明句柄
 DX11RendererHandle dx11Renderer = nullptr;
-
-// 音频相关 - 移除全局变量声明
-// AudioState audioState; // 删除这行
 
 // 窗口相关
 HWND hwnd = nullptr;
@@ -59,8 +51,6 @@ std::thread audioThread;
 
 // 同步相关
 std::chrono::high_resolution_clock::time_point startTime;
-double videoTimeBase = 0.0;
-double audioTimeBase = 0.0;
 
 // 帧队列
 std::queue<AVFrame*> videoFrameQueue;
@@ -68,7 +58,6 @@ std::mutex videoQueueMutex;
 const size_t maxQueueSize = 10;
 
 // 全局函数声明
-bool initializeFFmpeg(const char* filename);
 bool initializeDX11(HWND hwnd);
 bool initializeAudioState();
 void play();
@@ -76,88 +65,6 @@ void stop();
 void decodingLoop();
 void renderLoop();
 void cleanup();
-
-bool initializeFFmpeg(const char* filename) {
-    // 打开文件
-    if (avformat_open_input(&formatContext, filename, nullptr, nullptr) < 0) {
-        return false;
-    }
-    
-    // 获取流信息
-    if (avformat_find_stream_info(formatContext, nullptr) < 0) {
-        return false;
-    }
-    
-    // 查找视频和音频流
-    for (unsigned int i = 0; i < formatContext->nb_streams; i++) {
-        if (formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && videoStreamIndex == -1) {
-            videoStreamIndex = i;
-        } else if (formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audioStreamIndex == -1) {
-            audioStreamIndex = i;
-        }
-    }
-    
-    // 初始化视频解码器
-    if (videoStreamIndex >= 0) {
-        AVStream* videoStream = formatContext->streams[videoStreamIndex];
-        const AVCodec* videoCodec = avcodec_find_decoder(videoStream->codecpar->codec_id);
-        if (!videoCodec) return false;
-        
-        videoCodecContext = avcodec_alloc_context3(videoCodec);
-        if (!videoCodecContext) return false;
-        
-        if (avcodec_parameters_to_context(videoCodecContext, videoStream->codecpar) < 0) return false;
-        if (avcodec_open2(videoCodecContext, videoCodec, nullptr) < 0) return false;
-        
-        videoTimeBase = av_q2d(videoStream->time_base);
-        
-        // 初始化 swscale
-        swsContext = sws_getContext(
-            videoCodecContext->width, videoCodecContext->height, videoCodecContext->pix_fmt,
-            videoCodecContext->width, videoCodecContext->height, AV_PIX_FMT_RGBA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr
-        );
-    }
-    
-    // 初始化音频解码器
-    if (audioStreamIndex >= 0) {
-        AVStream* audioStream = formatContext->streams[audioStreamIndex];
-        const AVCodec* audioCodec = avcodec_find_decoder(audioStream->codecpar->codec_id);
-        if (!audioCodec) return false;
-        
-        audioCodecContext = avcodec_alloc_context3(audioCodec);
-        if (!audioCodecContext) return false;
-        
-        if (avcodec_parameters_to_context(audioCodecContext, audioStream->codecpar) < 0) return false;
-        if (avcodec_open2(audioCodecContext, audioCodec, nullptr) < 0) return false;
-        
-        audioTimeBase = av_q2d(audioStream->time_base);
-        
-        // 初始化 swresample - 使用兼容的方法
-        SwrContext* localSwrContext = swr_alloc();
-        if (!localSwrContext) return false;
-        
-        // 创建输出通道布局
-        AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-        
-        // 设置输出格式
-        av_opt_set_chlayout(localSwrContext, "out_chlayout", &out_ch_layout, 0);
-        av_opt_set_int(localSwrContext, "out_sample_rate", 48000, 0);
-        av_opt_set_sample_fmt(localSwrContext, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
-        
-        // 设置输入格式
-        av_opt_set_chlayout(localSwrContext, "in_chlayout", &audioCodecContext->ch_layout, 0);
-        av_opt_set_int(localSwrContext, "in_sample_rate", audioCodecContext->sample_rate, 0);
-        av_opt_set_sample_fmt(localSwrContext, "in_sample_fmt", audioCodecContext->sample_fmt, 0);
-        
-        if (swr_init(localSwrContext) < 0) return false;
-        
-        // 需要设置到音频状态中 - 这需要新的函数
-        setSwrContext(localSwrContext);
-    }
-    
-    return true;
-}
 
 bool initializeDX11(HWND hwnd) {
     dx11Renderer = createDX11Renderer(hwnd);
@@ -174,8 +81,9 @@ void play() {
     // 启动解码线程
     decodingThread = std::thread(&decodingLoop);
     
-    // 启动音频播放
-    if (audioStreamIndex >= 0) {
+    // 检查是否有音频流
+    AudioInfo audioInfo;
+    if (getAudioInfo(ffmpegHandler, &audioInfo)) {
         startAudioPlayback();
     }
     
@@ -199,8 +107,17 @@ void decodingLoop() {
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     
+    AVFormatContext* formatContext = getFormatContext(ffmpegHandler);
+    AVCodecContext* videoCodecContext = getVideoCodecContext(ffmpegHandler);
+    AVCodecContext* audioCodecContext = getAudioCodecContext(ffmpegHandler);
+    
+    VideoInfo videoInfo;
+    AudioInfo audioInfo;
+    bool hasVideo = getVideoInfo(ffmpegHandler, &videoInfo);
+    bool hasAudio = getAudioInfo(ffmpegHandler, &audioInfo);
+    
     while (!shouldStop && av_read_frame(formatContext, packet) >= 0) {
-        if (packet->stream_index == videoStreamIndex) {
+        if (hasVideo && packet->stream_index == videoInfo.streamIndex) {
             if (avcodec_send_packet(videoCodecContext, packet) == 0) {
                 while (avcodec_receive_frame(videoCodecContext, frame) == 0) {
                     std::lock_guard<std::mutex> lock(videoQueueMutex);
@@ -210,10 +127,9 @@ void decodingLoop() {
                     }
                 }
             }
-        } else if (packet->stream_index == audioStreamIndex) {
+        } else if (hasAudio && packet->stream_index == audioInfo.streamIndex) {
             if (avcodec_send_packet(audioCodecContext, packet) == 0) {
                 while (avcodec_receive_frame(audioCodecContext, frame) == 0) {
-                    // 使用新的音频状态接口
                     pushAudioFrame(frame);
                 }
             }
@@ -232,6 +148,9 @@ void decodingLoop() {
 }
 
 void renderLoop() {
+    VideoInfo videoInfo;
+    bool hasVideo = getVideoInfo(ffmpegHandler, &videoInfo);
+    
     while (playing && !shouldStop) {
         // 获取当前时间
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -244,7 +163,7 @@ void renderLoop() {
             std::lock_guard<std::mutex> lock(videoQueueMutex);
             while (!videoFrameQueue.empty()) {
                 AVFrame* candidate = videoFrameQueue.front();
-                double frameTime = candidate->pts * videoTimeBase;
+                double frameTime = candidate->pts * videoInfo.timeBase;
                 
                 if (frameTime <= currentSeconds + 0.04) { // 40ms 容差
                     videoFrameQueue.pop();
@@ -257,7 +176,7 @@ void renderLoop() {
         }
         
         if (frame) {
-            updateVideoTexture(dx11Renderer, frame, videoCodecContext, swsContext);
+            updateVideoTexture(dx11Renderer, frame, getVideoCodecContext(ffmpegHandler), getSwsContext(ffmpegHandler));
             av_frame_free(&frame);
         }
         
@@ -285,10 +204,10 @@ void cleanup() {
     cleanupAudioState();
     
     // 清理 FFmpeg
-    if (swsContext) sws_freeContext(swsContext);
-    if (videoCodecContext) avcodec_free_context(&videoCodecContext);
-    if (audioCodecContext) avcodec_free_context(&audioCodecContext);
-    if (formatContext) avformat_close_input(&formatContext);
+    if (ffmpegHandler) {
+        destroyFFmpegHandler(ffmpegHandler);
+        ffmpegHandler = nullptr;
+    }
     
     // 清理 DirectX11
     if (dx11Renderer) {
@@ -360,11 +279,15 @@ int main(int argc, char* argv[]) {
     ShowWindow(hwnd, SW_MAXIMIZE);
     UpdateWindow(hwnd);
     
+    // 初始化FFmpeg处理器
+    ffmpegHandler = createFFmpegHandler(argv[1]);
+    
     // 初始化播放器
-    if (initializeFFmpeg(argv[1]) && initializeDX11(hwnd) && initializeAudioState()) {
+    if (ffmpegHandler && initializeDX11(hwnd) && initializeAudioState()) {
         // 创建视频纹理
-        if (videoCodecContext) {
-            createVideoTexture(dx11Renderer, videoCodecContext->width, videoCodecContext->height);
+        VideoInfo videoInfo;
+        if (getVideoInfo(ffmpegHandler, &videoInfo)) {
+            createVideoTexture(dx11Renderer, videoInfo.width, videoInfo.height);
         }
         
         // 开始播放
