@@ -4,7 +4,6 @@
 
 // 全局变量
 HWND hwnd = nullptr;
-PlayerEngineHandle playerEngine = nullptr;
 
 // 函数声明
 LRESULT CALLBACK WindowProc(HWND hwnd_param, UINT uMsg, WPARAM wParam, LPARAM lParam);
@@ -47,10 +46,7 @@ bool initializeWindow(HINSTANCE hInstance) {
 }
 
 void cleanup() {
-    if (playerEngine) {
-        destroyPlayerEngine(playerEngine);
-        playerEngine = nullptr;
-    }
+    destroyCurrentPlayerEngine();
 }
 
 // 窗口过程
@@ -65,12 +61,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd_param, UINT uMsg, WPARAM wParam, LPARAM lP
         break;
         
     case WM_KEYDOWN:
-        if (wParam == VK_SPACE && playerEngine) {
+        if (wParam == VK_SPACE) {
             // 空格键暂停/播放
-            if (isPlaying(playerEngine)) {
-                stopPlayback(playerEngine);
+            if (isCurrentPlaying()) {
+                stopCurrentPlayback();
             } else {
-                startPlayback(playerEngine);
+                startCurrentPlayback();
             }
         } else if (wParam == VK_ESCAPE) {
             // ESC键退出
@@ -99,8 +95,8 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
-    // 创建播放引擎
-    playerEngine = createPlayerEngine(argv[1], hwnd);
+    // 创建播放引擎（自动设置为当前播放引擎）
+    PlayerEngineHandle playerEngine = createPlayerEngine(argv[1], hwnd);
     if (!playerEngine) {
         std::cerr << "Failed to initialize player engine" << std::endl;
         MessageBoxA(hwnd, "Failed to initialize player engine", "Error", MB_OK | MB_ICONERROR);
@@ -109,7 +105,7 @@ int main(int argc, char* argv[]) {
     }
     
     // 开始播放
-    if (!startPlayback(playerEngine)) {
+    if (!startCurrentPlayback()) {
         std::cerr << "Failed to start playback" << std::endl;
         MessageBoxA(hwnd, "Failed to start playback", "Error", MB_OK | MB_ICONERROR);
         cleanup();

@@ -15,6 +15,9 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
+// 全局当前播放引擎
+static PlayerEngineHandle g_currentPlayerEngine = nullptr;
+
 // 播放引擎状态结构
 struct PlayerEngineState {
     // 播放控制
@@ -84,9 +87,14 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
         createVideoTexture(state->videoInfo.width, state->videoInfo.height);
     }
     
-    return static_cast<PlayerEngineHandle>(state);
+    PlayerEngineHandle handle = static_cast<PlayerEngineHandle>(state);
+    
+    // 自动设置为当前播放引擎
+    g_currentPlayerEngine = handle;
+    
+    return handle;
 }
-
+void stopPlayback(PlayerEngineHandle handle);
 void destroyPlayerEngine(PlayerEngineHandle handle) {
     if (!handle) return;
     
@@ -237,4 +245,27 @@ static void renderLoop(PlayerEngineState* state) {
         
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
+}
+
+
+void destroyCurrentPlayerEngine() {
+    if (g_currentPlayerEngine) {
+        destroyPlayerEngine(g_currentPlayerEngine);
+        g_currentPlayerEngine = nullptr;
+    }
+}
+
+// 便利接口实现
+bool startCurrentPlayback() {
+    return g_currentPlayerEngine ? startPlayback(g_currentPlayerEngine) : false;
+}
+
+void stopCurrentPlayback() {
+    if (g_currentPlayerEngine) {
+        stopPlayback(g_currentPlayerEngine);
+    }
+}
+
+bool isCurrentPlaying() {
+    return g_currentPlayerEngine ? isPlaying(g_currentPlayerEngine) : false;
 } 
