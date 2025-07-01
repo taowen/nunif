@@ -42,8 +42,8 @@ SwrContext* swrContext = nullptr;
 int videoStreamIndex = -1;
 int audioStreamIndex = -1;
 
-// DirectX11 相关 - 替换为渲染器状态
-DX11RendererState dx11State;
+// DirectX11 相关 - 使用不透明句柄
+DX11RendererHandle dx11Renderer = nullptr;
 
 // 音频相关 - 移除全局变量声明
 // AudioState audioState; // 删除这行
@@ -69,7 +69,7 @@ const size_t maxQueueSize = 10;
 
 // 全局函数声明
 bool initializeFFmpeg(const char* filename);
-bool initializeDX11Renderer(HWND hwnd, DX11RendererState* state);
+bool initializeDX11(HWND hwnd);
 bool initializeAudioState();
 void play();
 void stop();
@@ -157,6 +157,11 @@ bool initializeFFmpeg(const char* filename) {
     }
     
     return true;
+}
+
+bool initializeDX11(HWND hwnd) {
+    dx11Renderer = createDX11Renderer(hwnd);
+    return dx11Renderer != nullptr;
 }
 
 void play() {
@@ -252,12 +257,12 @@ void renderLoop() {
         }
         
         if (frame) {
-            updateVideoTexture(&dx11State, frame, videoCodecContext, swsContext);
+            updateVideoTexture(dx11Renderer, frame, videoCodecContext, swsContext);
             av_frame_free(&frame);
         }
         
         // 渲染
-        renderFrame(&dx11State);
+        renderFrame(dx11Renderer);
         
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
@@ -285,8 +290,11 @@ void cleanup() {
     if (audioCodecContext) avcodec_free_context(&audioCodecContext);
     if (formatContext) avformat_close_input(&formatContext);
     
-    // 清理 DirectX11 - 使用新的清理函数
-    cleanupDX11Renderer(&dx11State);
+    // 清理 DirectX11
+    if (dx11Renderer) {
+        destroyDX11Renderer(dx11Renderer);
+        dx11Renderer = nullptr;
+    }
 }
 
 // 窗口过程
@@ -353,10 +361,10 @@ int main(int argc, char* argv[]) {
     UpdateWindow(hwnd);
     
     // 初始化播放器
-    if (initializeFFmpeg(argv[1]) && initializeDX11Renderer(hwnd, &dx11State) && initializeAudioState()) {
+    if (initializeFFmpeg(argv[1]) && initializeDX11(hwnd) && initializeAudioState()) {
         // 创建视频纹理
         if (videoCodecContext) {
-            createVideoTexture(&dx11State, videoCodecContext->width, videoCodecContext->height);
+            createVideoTexture(dx11Renderer, videoCodecContext->width, videoCodecContext->height);
         }
         
         // 开始播放
