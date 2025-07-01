@@ -68,10 +68,19 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     state->hasVideo = getVideoInfo(state->ffmpegHandler, &state->videoInfo);
     state->hasAudio = getAudioInfo(state->ffmpegHandler, &state->audioInfo);
     
-    // 初始化音频系统
-    if (state->hasAudio && !initializeAudioState()) {
-        std::cerr << "Warning: Failed to initialize audio" << std::endl;
-        state->hasAudio = false;
+    // 初始化音频系统 - 传递配置而非直接传递SwrContext
+    if (state->hasAudio) {
+        AudioConfig audioConfig = {
+            .inputSampleRate = state->audioInfo.sampleRate,
+            .inputChannels = state->audioInfo.channels,
+            .inputFormat = getAudioCodecContext(state->ffmpegHandler)->sample_fmt,
+            .inputChannelLayout = getAudioCodecContext(state->ffmpegHandler)->ch_layout
+        };
+        
+        if (!initializeAudioState(&audioConfig)) {
+            std::cerr << "Warning: Failed to initialize audio" << std::endl;
+            state->hasAudio = false;
+        }
     }
     
     // 创建视频纹理

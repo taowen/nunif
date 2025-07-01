@@ -36,7 +36,4 @@ bool getAudioInfo(FFmpegHandlerHandle handle, AudioInfo* info);
 AVFormatContext* getFormatContext(FFmpegHandlerHandle handle);
 AVCodecContext* getVideoCodecContext(FFmpegHandlerHandle handle);
 AVCodecContext* getAudioCodecContext(FFmpegHandlerHandle handle);
-SwsContext* getSwsContext(FFmpegHandlerHandle handle);
-SwrContext* getSwrContext(FFmpegHandlerHandle handle);
-
-void setSwrContextForHandler(FFmpegHandlerHandle handle, SwrContext* swrContext); 
+SwsContext* getSwsContext(FFmpegHandlerHandle handle); 

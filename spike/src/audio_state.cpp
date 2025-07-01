@@ -73,7 +73,7 @@ static void audioLoop() {
     }
 }
 
-bool initializeAudioState() {
+bool initializeAudioState(const AudioConfig* config) {
     CoInitialize(nullptr);
     
     // 创建设备枚举器
@@ -108,6 +108,31 @@ bool initializeAudioState() {
     // 获取渲染客户端
     hr = audioState.audioClient->GetService(__uuidof(IAudioRenderClient), (void**)&audioState.renderClient);
     if (FAILED(hr)) return false;
+    
+    // 内部创建和管理SwrContext - 提高内聚性
+    if (config) {
+        audioState.swrContext = swr_alloc();
+        if (!audioState.swrContext) {
+            return false;
+        }
+        
+        // 创建输出通道布局
+        AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
+        
+        // 设置重采样参数
+        av_opt_set_chlayout(audioState.swrContext, "out_chlayout", &out_ch_layout, 0);
+        av_opt_set_int(audioState.swrContext, "out_sample_rate", 48000, 0);
+        av_opt_set_sample_fmt(audioState.swrContext, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
+        
+        av_opt_set_chlayout(audioState.swrContext, "in_chlayout", &config->inputChannelLayout, 0);
+        av_opt_set_int(audioState.swrContext, "in_sample_rate", config->inputSampleRate, 0);
+        av_opt_set_sample_fmt(audioState.swrContext, "in_sample_fmt", config->inputFormat, 0);
+        
+        if (swr_init(audioState.swrContext) < 0) {
+            swr_free(&audioState.swrContext);
+            return false;
+        }
+    }
     
     return true;
 }
@@ -164,9 +189,10 @@ void cleanupAudioState() {
         }
     }
     
-    // 清理 swrContext
+    // 内部清理SwrContext - 提高内聚性
     if (audioState.swrContext) {
         swr_free(&audioState.swrContext);
+        audioState.swrContext = nullptr;
     }
     
     // 清理音频资源
@@ -176,8 +202,4 @@ void cleanupAudioState() {
     if (audioState.deviceEnumerator) audioState.deviceEnumerator->Release();
     
     CoUninitialize();
-}
-
-void setSwrContext(SwrContext* swrContext) {
-    audioState.swrContext = swrContext;
 } 

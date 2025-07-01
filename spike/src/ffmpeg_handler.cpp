@@ -13,7 +13,6 @@ struct FFmpegHandler {
     AVCodecContext* videoCodecContext = nullptr;
     AVCodecContext* audioCodecContext = nullptr;
     SwsContext* swsContext = nullptr;
-    SwrContext* swrContext = nullptr;
     
     // 流索引
     int videoStreamIndex = -1;
@@ -108,35 +107,6 @@ FFmpegHandlerHandle createFFmpegHandler(const char* filename) {
         }
         
         handler->audioTimeBase = av_q2d(audioStream->time_base);
-        
-        // 初始化 swresample - 使用兼容的方法
-        SwrContext* localSwrContext = swr_alloc();
-        if (!localSwrContext) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
-        }
-        
-        // 创建输出通道布局
-        AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
-        
-        // 设置输出格式
-        av_opt_set_chlayout(localSwrContext, "out_chlayout", &out_ch_layout, 0);
-        av_opt_set_int(localSwrContext, "out_sample_rate", 48000, 0);
-        av_opt_set_sample_fmt(localSwrContext, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
-        
-        // 设置输入格式
-        av_opt_set_chlayout(localSwrContext, "in_chlayout", &handler->audioCodecContext->ch_layout, 0);
-        av_opt_set_int(localSwrContext, "in_sample_rate", handler->audioCodecContext->sample_rate, 0);
-        av_opt_set_sample_fmt(localSwrContext, "in_sample_fmt", handler->audioCodecContext->sample_fmt, 0);
-        
-        if (swr_init(localSwrContext) < 0) {
-            swr_free(&localSwrContext);
-            destroyFFmpegHandler(handler);
-            return nullptr;
-        }
-        
-        handler->swrContext = localSwrContext;
-        setSwrContext(localSwrContext);
     }
     
     return handler;
@@ -146,7 +116,6 @@ void destroyFFmpegHandler(FFmpegHandlerHandle handle) {
     if (!handle) return;
     
     if (handle->swsContext) sws_freeContext(handle->swsContext);
-    if (handle->swrContext) swr_free(&handle->swrContext);
     if (handle->videoCodecContext) avcodec_free_context(&handle->videoCodecContext);
     if (handle->audioCodecContext) avcodec_free_context(&handle->audioCodecContext);
     if (handle->formatContext) avformat_close_input(&handle->formatContext);
@@ -190,14 +159,4 @@ AVCodecContext* getAudioCodecContext(FFmpegHandlerHandle handle) {
 
 SwsContext* getSwsContext(FFmpegHandlerHandle handle) {
     return handle ? handle->swsContext : nullptr;
-}
-
-SwrContext* getSwrContext(FFmpegHandlerHandle handle) {
-    return handle ? handle->swrContext : nullptr;
-}
-
-void setSwrContextForHandler(FFmpegHandlerHandle handle, SwrContext* swrContext) {
-    if (handle) {
-        handle->swrContext = swrContext;
-    }
 } 
