@@ -16,7 +16,7 @@ extern "C" {
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
-// DirectX11 渲染器状态结构 - 现在是内部实现
+// DirectX11 渲染器状态结构 - 内部实现
 struct DX11RendererState {
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* deviceContext = nullptr;
@@ -39,18 +39,19 @@ struct DX11RendererState {
     AVPixelFormat inputPixelFormat = AV_PIX_FMT_NONE;
 };
 
-DX11RendererHandle createDX11Renderer(HWND hwnd) {
-    DX11RendererState* state = new DX11RendererState();
-    
+// 静态全局变量 - 隐藏在实现文件中
+static DX11RendererState dx11State;
+
+bool createDX11Renderer(HWND hwnd) {
     // Get screen dimensions for fullscreen
-    state->windowWidth = GetSystemMetrics(SM_CXSCREEN);
-    state->windowHeight = GetSystemMetrics(SM_CYSCREEN);
+    dx11State.windowWidth = GetSystemMetrics(SM_CXSCREEN);
+    dx11State.windowHeight = GetSystemMetrics(SM_CYSCREEN);
     
     // 创建设备和交换链
     DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
     swapChainDesc.BufferCount = 1;
-    swapChainDesc.BufferDesc.Width = state->windowWidth;
-    swapChainDesc.BufferDesc.Height = state->windowHeight;
+    swapChainDesc.BufferDesc.Width = dx11State.windowWidth;
+    swapChainDesc.BufferDesc.Height = dx11State.windowHeight;
     swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapChainDesc.OutputWindow = hwnd;
@@ -61,30 +62,27 @@ DX11RendererHandle createDX11Renderer(HWND hwnd) {
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
         nullptr, 0, D3D11_SDK_VERSION,
-        &swapChainDesc, &state->swapChain, &state->device, &featureLevel, &state->deviceContext
+        &swapChainDesc, &dx11State.swapChain, &dx11State.device, &featureLevel, &dx11State.deviceContext
     );
     
     if (FAILED(hr)) {
-        delete state;
-        return nullptr;
+        return false;
     }
     
     // 创建渲染目标视图
     ID3D11Texture2D* backBuffer;
-    state->swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
-    state->device->CreateRenderTargetView(backBuffer, nullptr, &state->renderTargetView);
+    dx11State.swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
+    dx11State.device->CreateRenderTargetView(backBuffer, nullptr, &dx11State.renderTargetView);
     backBuffer->Release();
     
     // 创建着色器
-    if (!createShaders(state->device, &state->vertexShader, &state->pixelShader, &state->inputLayout)) {
-        delete state;
-        return nullptr;
+    if (!createShaders(dx11State.device, &dx11State.vertexShader, &dx11State.pixelShader, &dx11State.inputLayout)) {
+        return false;
     }
     
     // 创建顶点缓冲区
-    if (!createVertexBuffer(state->device, &state->vertexBuffer)) {
-        delete state;
-        return nullptr;
+    if (!createVertexBuffer(dx11State.device, &dx11State.vertexBuffer)) {
+        return false;
     }
     
     // 创建采样器状态
@@ -93,52 +91,43 @@ DX11RendererHandle createDX11Renderer(HWND hwnd) {
     samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
     samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    state->device->CreateSamplerState(&samplerDesc, &state->samplerState);
+    dx11State.device->CreateSamplerState(&samplerDesc, &dx11State.samplerState);
     
-    return static_cast<DX11RendererHandle>(state);
+    return true;
 }
 
-void destroyDX11Renderer(DX11RendererHandle handle) {
-    if (!handle) return;
-    
-    DX11RendererState* state = static_cast<DX11RendererState*>(handle);
-    
+void destroyDX11Renderer() {
     // 清理内部SwsContext
-    if (state->internalSwsContext) {
-        sws_freeContext(state->internalSwsContext);
+    if (dx11State.internalSwsContext) {
+        sws_freeContext(dx11State.internalSwsContext);
+        dx11State.internalSwsContext = nullptr;
     }
     
-    if (state->samplerState) state->samplerState->Release();
-    if (state->videoSRV) state->videoSRV->Release();
-    if (state->videoTexture) state->videoTexture->Release();
-    if (state->inputLayout) state->inputLayout->Release();
-    if (state->vertexBuffer) state->vertexBuffer->Release();
-    if (state->pixelShader) state->pixelShader->Release();
-    if (state->vertexShader) state->vertexShader->Release();
-    if (state->renderTargetView) state->renderTargetView->Release();
-    if (state->swapChain) state->swapChain->Release();
-    if (state->deviceContext) state->deviceContext->Release();
-    if (state->device) state->device->Release();
-    
-    delete state;
+    if (dx11State.samplerState) { dx11State.samplerState->Release(); dx11State.samplerState = nullptr; }
+    if (dx11State.videoSRV) { dx11State.videoSRV->Release(); dx11State.videoSRV = nullptr; }
+    if (dx11State.videoTexture) { dx11State.videoTexture->Release(); dx11State.videoTexture = nullptr; }
+    if (dx11State.inputLayout) { dx11State.inputLayout->Release(); dx11State.inputLayout = nullptr; }
+    if (dx11State.vertexBuffer) { dx11State.vertexBuffer->Release(); dx11State.vertexBuffer = nullptr; }
+    if (dx11State.pixelShader) { dx11State.pixelShader->Release(); dx11State.pixelShader = nullptr; }
+    if (dx11State.vertexShader) { dx11State.vertexShader->Release(); dx11State.vertexShader = nullptr; }
+    if (dx11State.renderTargetView) { dx11State.renderTargetView->Release(); dx11State.renderTargetView = nullptr; }
+    if (dx11State.swapChain) { dx11State.swapChain->Release(); dx11State.swapChain = nullptr; }
+    if (dx11State.deviceContext) { dx11State.deviceContext->Release(); dx11State.deviceContext = nullptr; }
+    if (dx11State.device) { dx11State.device->Release(); dx11State.device = nullptr; }
 }
 
-void createVideoTexture(DX11RendererHandle handle, int width, int height) {
-    if (!handle) return;
-    
-    DX11RendererState* state = static_cast<DX11RendererState*>(handle);
-    
+void createVideoTexture(int width, int height) {
     // 记录视频尺寸
-    state->videoWidth = width;
-    state->videoHeight = height;
+    dx11State.videoWidth = width;
+    dx11State.videoHeight = height;
     
-    if (state->videoTexture) {
-        state->videoTexture->Release();
-        state->videoTexture = nullptr;
+    if (dx11State.videoTexture) {
+        dx11State.videoTexture->Release();
+        dx11State.videoTexture = nullptr;
     }
-    if (state->videoSRV) {
-        state->videoSRV->Release();
-        state->videoSRV = nullptr;
+    if (dx11State.videoSRV) {
+        dx11State.videoSRV->Release();
+        dx11State.videoSRV = nullptr;
     }
     
     D3D11_TEXTURE2D_DESC textureDesc = {};
@@ -152,89 +141,83 @@ void createVideoTexture(DX11RendererHandle handle, int width, int height) {
     textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     
-    state->device->CreateTexture2D(&textureDesc, nullptr, &state->videoTexture);
-    state->device->CreateShaderResourceView(state->videoTexture, nullptr, &state->videoSRV);
+    dx11State.device->CreateTexture2D(&textureDesc, nullptr, &dx11State.videoTexture);
+    dx11State.device->CreateShaderResourceView(dx11State.videoTexture, nullptr, &dx11State.videoSRV);
 }
 
-void updateVideoTexture(DX11RendererHandle handle, AVFrame* frame) {
-    if (!handle || !frame) return;
-    
-    DX11RendererState* state = static_cast<DX11RendererState*>(handle);
-    
-    if (!state->videoTexture) return;
+void updateVideoTexture(AVFrame* frame) {
+    if (!frame || !dx11State.videoTexture) return;
     
     // 内部管理SwsContext - 提高内聚性，减少外部依赖
-    if (!state->internalSwsContext || state->inputPixelFormat != frame->format) {
-        if (state->internalSwsContext) {
-            sws_freeContext(state->internalSwsContext);
+    if (!dx11State.internalSwsContext || dx11State.inputPixelFormat != frame->format) {
+        if (dx11State.internalSwsContext) {
+            sws_freeContext(dx11State.internalSwsContext);
         }
         
-        state->inputPixelFormat = static_cast<AVPixelFormat>(frame->format);
-        state->internalSwsContext = sws_getContext(
-            frame->width, frame->height, state->inputPixelFormat,
-            state->videoWidth, state->videoHeight, AV_PIX_FMT_RGBA,
+        dx11State.inputPixelFormat = static_cast<AVPixelFormat>(frame->format);
+        dx11State.internalSwsContext = sws_getContext(
+            frame->width, frame->height, dx11State.inputPixelFormat,
+            dx11State.videoWidth, dx11State.videoHeight, AV_PIX_FMT_RGBA,
             SWS_BILINEAR, nullptr, nullptr, nullptr
         );
     }
     
-    if (!state->internalSwsContext) return;
+    if (!dx11State.internalSwsContext) return;
     
     // 创建临时 RGBA 缓冲区
-    std::vector<uint8_t> rgbaBuffer(state->videoWidth * state->videoHeight * 4);
+    std::vector<uint8_t> rgbaBuffer(dx11State.videoWidth * dx11State.videoHeight * 4);
     
     uint8_t* rgbaData[1] = { rgbaBuffer.data() };
-    int rgbaLinesize[1] = { state->videoWidth * 4 };
+    int rgbaLinesize[1] = { dx11State.videoWidth * 4 };
     
     // 转换为 RGBA
-    sws_scale(state->internalSwsContext, frame->data, frame->linesize, 
+    sws_scale(dx11State.internalSwsContext, frame->data, frame->linesize, 
               0, frame->height, rgbaData, rgbaLinesize);
     
     // 更新纹理
     D3D11_MAPPED_SUBRESOURCE mappedResource;
-    if (SUCCEEDED(state->deviceContext->Map(state->videoTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource))) {
+    if (SUCCEEDED(dx11State.deviceContext->Map(dx11State.videoTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource))) {
         uint8_t* dest = static_cast<uint8_t*>(mappedResource.pData);
         uint8_t* src = rgbaBuffer.data();
         
-        for (int y = 0; y < state->videoHeight; y++) {
-            memcpy(dest + y * mappedResource.RowPitch, src + y * state->videoWidth * 4, state->videoWidth * 4);
+        for (int y = 0; y < dx11State.videoHeight; y++) {
+            memcpy(dest + y * mappedResource.RowPitch, src + y * dx11State.videoWidth * 4, dx11State.videoWidth * 4);
         }
         
-        state->deviceContext->Unmap(state->videoTexture, 0);
+        dx11State.deviceContext->Unmap(dx11State.videoTexture, 0);
     }
 }
 
-void renderFrame(DX11RendererHandle handle) {
-    if (!handle) return;
-    
-    DX11RendererState* state = static_cast<DX11RendererState*>(handle);
+void renderFrame() {
+    if (!dx11State.device) return;
     
     // 渲染
     float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    state->deviceContext->ClearRenderTargetView(state->renderTargetView, clearColor);
+    dx11State.deviceContext->ClearRenderTargetView(dx11State.renderTargetView, clearColor);
     
-    state->deviceContext->OMSetRenderTargets(1, &state->renderTargetView, nullptr);
+    dx11State.deviceContext->OMSetRenderTargets(1, &dx11State.renderTargetView, nullptr);
     
     D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(state->windowWidth);
-    viewport.Height = static_cast<float>(state->windowHeight);
+    viewport.Width = static_cast<float>(dx11State.windowWidth);
+    viewport.Height = static_cast<float>(dx11State.windowHeight);
     viewport.MaxDepth = 1.0f;
-    state->deviceContext->RSSetViewports(1, &viewport);
+    dx11State.deviceContext->RSSetViewports(1, &viewport);
     
-    state->deviceContext->IASetInputLayout(state->inputLayout);
-    state->deviceContext->VSSetShader(state->vertexShader, nullptr, 0);
-    state->deviceContext->PSSetShader(state->pixelShader, nullptr, 0);
+    dx11State.deviceContext->IASetInputLayout(dx11State.inputLayout);
+    dx11State.deviceContext->VSSetShader(dx11State.vertexShader, nullptr, 0);
+    dx11State.deviceContext->PSSetShader(dx11State.pixelShader, nullptr, 0);
     
-    if (state->videoSRV) {
-        state->deviceContext->PSSetShaderResources(0, 1, &state->videoSRV);
-        state->deviceContext->PSSetSamplers(0, 1, &state->samplerState);
+    if (dx11State.videoSRV) {
+        dx11State.deviceContext->PSSetShaderResources(0, 1, &dx11State.videoSRV);
+        dx11State.deviceContext->PSSetSamplers(0, 1, &dx11State.samplerState);
     }
     
     UINT stride = sizeof(Vertex);
     UINT offset = 0;
-    state->deviceContext->IASetVertexBuffers(0, 1, &state->vertexBuffer, &stride, &offset);
-    state->deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    dx11State.deviceContext->IASetVertexBuffers(0, 1, &dx11State.vertexBuffer, &stride, &offset);
+    dx11State.deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     
-    state->deviceContext->Draw(4, 0);
+    dx11State.deviceContext->Draw(4, 0);
     
-    state->swapChain->Present(1, 0);
+    dx11State.swapChain->Present(1, 0);
 } 

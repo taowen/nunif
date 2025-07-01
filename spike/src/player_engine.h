@@ -4,7 +4,6 @@
 
 // 前向声明
 typedef struct FFmpegHandler* FFmpegHandlerHandle;
-typedef void* DX11RendererHandle;
 
 // 播放引擎句柄
 typedef void* PlayerEngineHandle;

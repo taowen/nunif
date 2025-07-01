@@ -18,7 +18,6 @@ extern "C" {
 struct PlayerEngineState {
     // 组件句柄
     FFmpegHandlerHandle ffmpegHandler = nullptr;
-    DX11RendererHandle dx11Renderer = nullptr;
     
     // 播放控制
     std::atomic<bool> playing{false};
@@ -57,8 +56,7 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     }
     
     // 初始化 DirectX11 渲染器
-    state->dx11Renderer = createDX11Renderer(hwnd);
-    if (!state->dx11Renderer) {
+    if (!createDX11Renderer(hwnd)) {
         destroyFFmpegHandler(state->ffmpegHandler);
         delete state;
         return nullptr;
@@ -84,7 +82,7 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     
     // 创建视频纹理
     if (state->hasVideo) {
-        createVideoTexture(state->dx11Renderer, state->videoInfo.width, state->videoInfo.height);
+        createVideoTexture(state->videoInfo.width, state->videoInfo.height);
     }
     
     return static_cast<PlayerEngineHandle>(state);
@@ -107,9 +105,7 @@ void destroyPlayerEngine(PlayerEngineHandle handle) {
     }
     
     // 清理组件
-    if (state->dx11Renderer) {
-        destroyDX11Renderer(state->dx11Renderer);
-    }
+    destroyDX11Renderer();
     if (state->ffmpegHandler) {
         destroyFFmpegHandler(state->ffmpegHandler);
     }
@@ -253,12 +249,12 @@ static void renderLoop(PlayerEngineState* state) {
         }
         
         if (frame && state->hasVideo) {
-            updateVideoTexture(state->dx11Renderer, frame);
+            updateVideoTexture(frame);
             av_frame_free(&frame);
         }
         
         // 渲染
-        renderFrame(state->dx11Renderer);
+        renderFrame();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
