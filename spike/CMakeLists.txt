@@ -22,10 +22,10 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(spike src/test_from_cuda_output.cpp src/d11_decode.cpp src/convert_color.cpp src/to_cuda_input.cpp src/infer_iw3.cpp src/from_cuda_output.cpp)
+add_executable(spike src/mkv_player.cpp src/d11_decode.cpp src/convert_color.cpp src/to_cuda_input.cpp src/infer_iw3.cpp src/from_cuda_output.cpp)
 
 # Link Catch2 to the executable
-target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
+# target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
 
 # Apply Windows/MSVC compile options
 target_compile_options(spike PRIVATE
