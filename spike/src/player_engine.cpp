@@ -2,6 +2,7 @@
 #include "ffmpeg_handler.h"
 #include "dx11_renderer.h"
 #include "audio_state.h"
+#include "video_state.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -25,11 +26,6 @@ struct PlayerEngineState {
     // 同步相关
     std::chrono::high_resolution_clock::time_point startTime;
     
-    // 帧队列
-    std::queue<AVFrame*> videoFrameQueue;
-    std::mutex videoQueueMutex;
-    static const size_t maxQueueSize = 10;
-    
     // 媒体信息缓存
     bool hasVideo = false;
     bool hasAudio = false;
@@ -40,7 +36,6 @@ struct PlayerEngineState {
 // 内部函数声明
 static void decodingLoop(PlayerEngineState* state);
 static void renderLoop(PlayerEngineState* state);
-static void cleanupFrameQueue(PlayerEngineState* state);
 
 PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     PlayerEngineState* state = new PlayerEngineState();
@@ -53,6 +48,14 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     
     // 初始化 DirectX11 渲染器
     if (!createDX11Renderer(hwnd)) {
+        destroyFFmpegHandler();
+        delete state;
+        return nullptr;
+    }
+    
+    // 初始化视频状态管理
+    if (!initializeVideoState()) {
+        destroyDX11Renderer();
         destroyFFmpegHandler();
         delete state;
         return nullptr;
@@ -92,8 +95,8 @@ void destroyPlayerEngine(PlayerEngineHandle handle) {
     // 停止播放
     stopPlayback(handle);
     
-    // 清理帧队列
-    cleanupFrameQueue(state);
+    // 清理视频状态 - 使用新接口
+    cleanupVideoState();
     
     // 清理音频
     if (state->hasAudio) {
@@ -190,11 +193,8 @@ static void decodingLoop(PlayerEngineState* state) {
         if (state->hasVideo && packet->stream_index == state->videoInfo.streamIndex) {
             if (avcodec_send_packet(videoCodecContext, packet) == 0) {
                 while (avcodec_receive_frame(videoCodecContext, frame) == 0) {
-                    std::lock_guard<std::mutex> lock(state->videoQueueMutex);
-                    if (state->videoFrameQueue.size() < state->maxQueueSize) {
-                        AVFrame* clonedFrame = av_frame_clone(frame);
-                        state->videoFrameQueue.push(clonedFrame);
-                    }
+                    // 使用新的视频状态接口
+                    pushVideoFrame(frame);
                 }
             }
         } else if (state->hasAudio && packet->stream_index == state->audioInfo.streamIndex) {
@@ -207,8 +207,8 @@ static void decodingLoop(PlayerEngineState* state) {
         
         av_packet_unref(packet);
         
-        // 队列大小控制
-        if (state->videoFrameQueue.size() >= state->maxQueueSize) {
+        // 队列大小控制 - 使用新接口
+        if (isVideoQueueFull()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
@@ -224,23 +224,8 @@ static void renderLoop(PlayerEngineState* state) {
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - state->startTime);
         double currentSeconds = elapsed.count() / 1000000.0;
         
-        // 从队列中获取视频帧
-        AVFrame* frame = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(state->videoQueueMutex);
-            while (!state->videoFrameQueue.empty()) {
-                AVFrame* candidate = state->videoFrameQueue.front();
-                double frameTime = candidate->pts * state->videoInfo.timeBase;
-                
-                if (frameTime <= currentSeconds + 0.04) { // 40ms 容差
-                    state->videoFrameQueue.pop();
-                    if (frame) av_frame_free(&frame);
-                    frame = candidate;
-                } else {
-                    break;
-                }
-            }
-        }
+        // 从队列中获取视频帧 - 使用新接口
+        AVFrame* frame = getVideoFrameForTime(currentSeconds, state->videoInfo.timeBase);
         
         if (frame && state->hasVideo) {
             updateVideoTexture(frame);
@@ -251,14 +236,5 @@ static void renderLoop(PlayerEngineState* state) {
         renderFrame();
         
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
-    }
-}
-
-static void cleanupFrameQueue(PlayerEngineState* state) {
-    std::lock_guard<std::mutex> lock(state->videoQueueMutex);
-    while (!state->videoFrameQueue.empty()) {
-        AVFrame* frame = state->videoFrameQueue.front();
-        state->videoFrameQueue.pop();
-        av_frame_free(&frame);
     }
 } 
