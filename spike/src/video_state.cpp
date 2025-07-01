@@ -26,9 +26,7 @@ bool initializeVideoState() {
 void cleanupVideoState() {
     std::lock_guard<std::mutex> lock(videoState.videoQueueMutex);
     while (!videoState.videoFrameQueue.empty()) {
-        AVFrame* frame = videoState.videoFrameQueue.front();
         videoState.videoFrameQueue.pop();
-        av_frame_free(&frame);
     }
 }
 
@@ -37,8 +35,7 @@ void pushVideoFrame(AVFrame* frame) {
     
     std::lock_guard<std::mutex> lock(videoState.videoQueueMutex);
     if (videoState.videoFrameQueue.size() < videoState.maxQueueSize) {
-        AVFrame* clonedFrame = av_frame_clone(frame);
-        videoState.videoFrameQueue.push(clonedFrame);
+        videoState.videoFrameQueue.push(frame);
     }
 }
 
@@ -48,11 +45,17 @@ AVFrame* getVideoFrameForTime(double currentSeconds, double timeBase) {
     
     while (!videoState.videoFrameQueue.empty()) {
         AVFrame* candidate = videoState.videoFrameQueue.front();
+        
+        if (!candidate) {
+            std::cerr << "Warning: Found null frame in video queue, removing it" << std::endl;
+            videoState.videoFrameQueue.pop();
+            continue;
+        }
+        
         double frameTime = candidate->pts * timeBase;
         
         if (frameTime <= currentSeconds + 0.04) { // 40ms 容差
             videoState.videoFrameQueue.pop();
-            if (frame) av_frame_free(&frame);
             frame = candidate;
         } else {
             break;
@@ -65,9 +68,7 @@ AVFrame* getVideoFrameForTime(double currentSeconds, double timeBase) {
 void clearVideoFrameQueue() {
     std::lock_guard<std::mutex> lock(videoState.videoQueueMutex);
     while (!videoState.videoFrameQueue.empty()) {
-        AVFrame* frame = videoState.videoFrameQueue.front();
         videoState.videoFrameQueue.pop();
-        av_frame_free(&frame);
     }
 }
 

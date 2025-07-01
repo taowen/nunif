@@ -55,18 +55,15 @@ bool createFFmpegHandler(const char* filename) {
     // 先清理之前的状态
     destroyFFmpegHandler();
     
-    std::cout << "=== FFmpeg Handler Diagnostic Info ===" << std::endl;
-    std::cout << "Opening file: " << filename << std::endl;
-    
     // 打开文件
     if (avformat_open_input(&ffmpegState.formatContext, filename, nullptr, nullptr) < 0) {
-        std::cout << "Error: Cannot open input file" << std::endl;
+        std::cerr << "Error: Cannot open input file" << std::endl;
         return false;
     }
     
     // 获取流信息
     if (avformat_find_stream_info(ffmpegState.formatContext, nullptr) < 0) {
-        std::cout << "Error: Cannot find stream info" << std::endl;
+        std::cerr << "Error: Cannot find stream info" << std::endl;
         avformat_close_input(&ffmpegState.formatContext);
         return false;
     }
@@ -75,138 +72,84 @@ bool createFFmpegHandler(const char* filename) {
     for (unsigned int i = 0; i < ffmpegState.formatContext->nb_streams; i++) {
         if (ffmpegState.formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ffmpegState.videoStreamIndex == -1) {
             ffmpegState.videoStreamIndex = i;
-            std::cout << "Found video stream, index: " << i << std::endl;
         } else if (ffmpegState.formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && ffmpegState.audioStreamIndex == -1) {
             ffmpegState.audioStreamIndex = i;
-            std::cout << "Found audio stream, index: " << i << std::endl;
         }
     }
     
-    // 初始化视频解码器（尝试硬件解码，失败则回退到软件解码）
+    // 初始化视频解码器（仅硬件解码）
     if (ffmpegState.videoStreamIndex >= 0) {
         AVStream* videoStream = ffmpegState.formatContext->streams[ffmpegState.videoStreamIndex];
         
-        // 输出视频编解码器信息
-        const char* codecName = avcodec_get_name(videoStream->codecpar->codec_id);
-        std::cout << "Video codec: " << codecName << " (ID: " << videoStream->codecpar->codec_id << ")" << std::endl;
-        std::cout << "Video resolution: " << videoStream->codecpar->width << "x" << videoStream->codecpar->height << std::endl;
-        
-        // 检查可用的硬件设备类型
-        std::cout << "Available hardware device types:" << std::endl;
-        enum AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
-        while ((type = av_hwdevice_iterate_types(type)) != AV_HWDEVICE_TYPE_NONE) {
-            std::cout << "  - " << av_hwdevice_get_type_name(type) << std::endl;
-        }
-        
-        // 尝试创建 DirectX 11 硬件设备上下文
-        std::cout << "Trying to create D3D11VA hardware device context..." << std::endl;
+        // 创建 DirectX 11 硬件设备上下文
         int ret = av_hwdevice_ctx_create(&ffmpegState.hwDeviceContext, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
         if (ret < 0) {
             char errBuf[256];
             av_strerror(ret, errBuf, sizeof(errBuf));
-            std::cout << "Warning: Failed to create D3D11VA hardware device context: " << errBuf << std::endl;
-            // 不抛出异常，继续使用软件解码
-        } else {
-            std::cout << "D3D11VA hardware device context created successfully" << std::endl;
+            std::cerr << "Error: Failed to create D3D11VA hardware device context: " << errBuf << std::endl;
+            destroyFFmpegHandler();
+            return false;
         }
         
-        // 查找解码器（使用通用解码器但支持硬件加速）
-        const AVCodec* videoCodec = nullptr;
-        bool canUseHardware = false;
-        
-        std::cout << "Looking for decoder..." << std::endl;
-        
-        // 使用通用解码器
-        videoCodec = avcodec_find_decoder(videoStream->codecpar->codec_id);
-        
+        // 查找解码器
+        const AVCodec* videoCodec = avcodec_find_decoder(videoStream->codecpar->codec_id);
         if (!videoCodec) {
-            std::cout << "Error: No suitable decoder found" << std::endl;
-            
-            // 列出所有可用的解码器
-            std::cout << "Available decoders:" << std::endl;
-            const AVCodec* codec = nullptr;
-            void* opaque = nullptr;
-            int count = 0;
-            while ((codec = av_codec_iterate(&opaque)) && count < 20) { // 限制输出数量
-                if (av_codec_is_decoder(codec) && codec->type == AVMEDIA_TYPE_VIDEO) {
-                    std::cout << "  - " << codec->name;
-                    if (codec->long_name) {
-                        std::cout << " (" << codec->long_name << ")";
-                    }
-                    std::cout << std::endl;
-                    count++;
-                }
-            }
-            if (count >= 20) {
-                std::cout << "  ... (and more)" << std::endl;
-            }
-            
+            std::cerr << "Error: No suitable decoder found" << std::endl;
             destroyFFmpegHandler();
             return false;
         }
         
         // 检查解码器是否支持硬件加速
-        if (ffmpegState.hwDeviceContext) {
-            // 检查解码器是否支持 D3D11VA
-            for (int i = 0; ; i++) {
-                const AVCodecHWConfig *config = avcodec_get_hw_config(videoCodec, i);
-                if (!config) {
-                    break;
-                }
-                
-                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
-                    config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
-                    canUseHardware = true;
-                    std::cout << "Decoder supports D3D11VA hardware acceleration" << std::endl;
-                    break;
-                }
+        bool canUseHardware = false;
+        for (int i = 0; ; i++) {
+            const AVCodecHWConfig *config = avcodec_get_hw_config(videoCodec, i);
+            if (!config) {
+                break;
+            }
+            
+            if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+                config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
+                canUseHardware = true;
+                break;
             }
         }
         
-        std::cout << "Found decoder: " << videoCodec->name;
-        if (videoCodec->long_name) {
-            std::cout << " (" << videoCodec->long_name << ")";
+        if (!canUseHardware) {
+            std::cerr << "Error: Decoder does not support D3D11VA hardware acceleration" << std::endl;
+            destroyFFmpegHandler();
+            return false;
         }
-        std::cout << std::endl;
-        std::cout << "Hardware acceleration available: " << (canUseHardware ? "Yes" : "No") << std::endl;
         
         ffmpegState.videoCodecContext = avcodec_alloc_context3(videoCodec);
         if (!ffmpegState.videoCodecContext) {
-            std::cout << "Error: Failed to allocate video codec context" << std::endl;
+            std::cerr << "Error: Failed to allocate video codec context" << std::endl;
             destroyFFmpegHandler();
             return false;
         }
         
         if (avcodec_parameters_to_context(ffmpegState.videoCodecContext, videoStream->codecpar) < 0) {
-            std::cout << "Error: Failed to copy codec parameters to context" << std::endl;
+            std::cerr << "Error: Failed to copy codec parameters to context" << std::endl;
             destroyFFmpegHandler();
             return false;
         }
         
-        // 如果支持硬件加速，设置硬件设备上下文
-        if (canUseHardware && ffmpegState.hwDeviceContext) {
-            std::cout << "Setting up hardware device context..." << std::endl;
-            ffmpegState.videoCodecContext->hw_device_ctx = av_buffer_ref(ffmpegState.hwDeviceContext);
-            ffmpegState.videoCodecContext->get_format = get_hw_format;
-        }
+        // 设置硬件设备上下文
+        ffmpegState.videoCodecContext->hw_device_ctx = av_buffer_ref(ffmpegState.hwDeviceContext);
+        ffmpegState.videoCodecContext->get_format = get_hw_format;
         
-        std::cout << "Trying to open decoder..." << std::endl;
         if (avcodec_open2(ffmpegState.videoCodecContext, videoCodec, nullptr) < 0) {
-            std::cout << "Error: Failed to open decoder" << std::endl;
+            std::cerr << "Error: Failed to open decoder" << std::endl;
             destroyFFmpegHandler();
             return false;
         }
         
         ffmpegState.videoTimeBase = av_q2d(videoStream->time_base);
-        ffmpegState.isHardwareDecoded = canUseHardware;
-        ffmpegState.hwPixelFormat = canUseHardware ? AV_PIX_FMT_D3D11 : AV_PIX_FMT_NONE;
+        ffmpegState.isHardwareDecoded = true;
+        ffmpegState.hwPixelFormat = AV_PIX_FMT_D3D11;
         
-        std::cout << "Decoder setup complete, hardware decoding: " << (ffmpegState.isHardwareDecoded ? "Enabled" : "Disabled") << std::endl;
-        
-        // 初始化 swscale
-        enum AVPixelFormat srcFormat = ffmpegState.isHardwareDecoded ? AV_PIX_FMT_NV12 : ffmpegState.videoCodecContext->pix_fmt;
+        // 初始化 swscale - 硬件解码使用 NV12 格式
         ffmpegState.swsContext = sws_getContext(
-            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, srcFormat,
+            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, AV_PIX_FMT_NV12,
             ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, AV_PIX_FMT_RGBA,
             SWS_BILINEAR, nullptr, nullptr, nullptr
         );
@@ -239,7 +182,6 @@ bool createFFmpegHandler(const char* filename) {
         ffmpegState.audioTimeBase = av_q2d(audioStream->time_base);
     }
     
-    std::cout << "=== FFmpeg Handler Initialization Complete ===" << std::endl;
     return true;
 }
 
