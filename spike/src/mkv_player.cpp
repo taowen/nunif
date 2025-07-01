@@ -14,6 +14,7 @@
 #include <iostream>
 #include "shader_utils.h"
 #include "vertex_buffer_utils.h"
+#include "audio_utils.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -53,13 +54,8 @@ ID3D11Texture2D* videoTexture = nullptr;
 ID3D11ShaderResourceView* videoSRV = nullptr;
 ID3D11SamplerState* samplerState = nullptr;
 
-// 音频相关
-IMMDeviceEnumerator* deviceEnumerator = nullptr;
-IMMDevice* audioDevice = nullptr;
-IAudioClient* audioClient = nullptr;
-IAudioRenderClient* renderClient = nullptr;
-UINT32 bufferFrameCount = 0;
-WAVEFORMATEX* audioFormat = nullptr;
+// 音频相关 - 替换为音频上下文
+AudioContext audioContext;
 
 // 窗口相关
 HWND hwnd = nullptr;
@@ -87,11 +83,10 @@ const size_t maxQueueSize = 10;
 // 全局函数声明
 bool initializeFFmpeg(const char* filename);
 bool initializeDirectX11();
-bool initializeAudio();
+bool initializeAudio(AudioContext& audioCtx);
 void play();
 void stop();
 void decodingLoop();
-void audioLoop();
 void renderLoop();
 void renderFrame();
 void updateVideoTexture(AVFrame* frame);
@@ -155,23 +150,23 @@ bool initializeFFmpeg(const char* filename) {
         audioTimeBase = av_q2d(audioStream->time_base);
         
         // 初始化 swresample - 使用兼容的方法
-        swrContext = swr_alloc();
-        if (!swrContext) return false;
+        audioContext.swrContext = swr_alloc();
+        if (!audioContext.swrContext) return false;
         
         // 创建输出通道布局
         AVChannelLayout out_ch_layout = AV_CHANNEL_LAYOUT_STEREO;
         
         // 设置输出格式
-        av_opt_set_chlayout(swrContext, "out_chlayout", &out_ch_layout, 0);
-        av_opt_set_int(swrContext, "out_sample_rate", 48000, 0);
-        av_opt_set_sample_fmt(swrContext, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
+        av_opt_set_chlayout(audioContext.swrContext, "out_chlayout", &out_ch_layout, 0);
+        av_opt_set_int(audioContext.swrContext, "out_sample_rate", 48000, 0);
+        av_opt_set_sample_fmt(audioContext.swrContext, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
         
         // 设置输入格式
-        av_opt_set_chlayout(swrContext, "in_chlayout", &audioCodecContext->ch_layout, 0);
-        av_opt_set_int(swrContext, "in_sample_rate", audioCodecContext->sample_rate, 0);
-        av_opt_set_sample_fmt(swrContext, "in_sample_fmt", audioCodecContext->sample_fmt, 0);
+        av_opt_set_chlayout(audioContext.swrContext, "in_chlayout", &audioCodecContext->ch_layout, 0);
+        av_opt_set_int(audioContext.swrContext, "in_sample_rate", audioCodecContext->sample_rate, 0);
+        av_opt_set_sample_fmt(audioContext.swrContext, "in_sample_fmt", audioCodecContext->sample_fmt, 0);
         
-        if (swr_init(swrContext) < 0) return false;
+        if (swr_init(audioContext.swrContext) < 0) return false;
     }
     
     return true;
@@ -225,45 +220,6 @@ bool initializeDirectX11() {
     return true;
 }
 
-bool initializeAudio() {
-    CoInitialize(nullptr);
-    
-    // 创建设备枚举器
-    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-        __uuidof(IMMDeviceEnumerator), (void**)&deviceEnumerator);
-    if (FAILED(hr)) return false;
-    
-    // 获取默认音频设备
-    hr = deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice);
-    if (FAILED(hr)) return false;
-    
-    // 激活音频客户端
-    hr = audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&audioClient);
-    if (FAILED(hr)) return false;
-    
-    // 设置音频格式
-    WAVEFORMATEX format = {};
-    format.wFormatTag = WAVE_FORMAT_PCM;
-    format.nChannels = 2;
-    format.nSamplesPerSec = 48000;
-    format.wBitsPerSample = 16;
-    format.nBlockAlign = (format.nChannels * format.wBitsPerSample) / 8;
-    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
-    
-    // 初始化音频客户端
-    hr = audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, &format, nullptr);
-    if (FAILED(hr)) return false;
-    
-    // 获取缓冲区大小
-    audioClient->GetBufferSize(&bufferFrameCount);
-    
-    // 获取渲染客户端
-    hr = audioClient->GetService(__uuidof(IAudioRenderClient), (void**)&renderClient);
-    if (FAILED(hr)) return false;
-    
-    return true;
-}
-
 void play() {
     if (playing) return;
     
@@ -271,13 +227,19 @@ void play() {
     shouldStop = false;
     startTime = std::chrono::high_resolution_clock::now();
     
+    // 设置音频上下文
+    audioContext.audioFrameQueue = &audioFrameQueue;
+    audioContext.audioQueueMutex = &audioQueueMutex;
+    audioContext.shouldStop = &shouldStop;
+    audioContext.maxQueueSize = maxQueueSize;
+    
     // 启动解码线程
     decodingThread = std::thread(&decodingLoop);
     
     // 启动音频线程
     if (audioStreamIndex >= 0) {
-        audioThread = std::thread(&audioLoop);
-        audioClient->Start();
+        audioThread = std::thread(&audioLoop, std::ref(audioContext));
+        audioContext.audioClient->Start();
     }
     
     // 启动渲染循环
@@ -296,8 +258,8 @@ void stop() {
         audioThread.join();
     }
     
-    if (audioClient) {
-        audioClient->Stop();
+    if (audioContext.audioClient) {
+        audioContext.audioClient->Stop();
     }
 }
 
@@ -338,37 +300,6 @@ void decodingLoop() {
     
     av_packet_free(&packet);
     av_frame_free(&frame);
-}
-
-void audioLoop() {
-    BYTE* audioBuffer;
-    UINT32 numFramesPadding;
-    
-    while (!shouldStop) {
-        audioClient->GetCurrentPadding(&numFramesPadding);
-        UINT32 numFramesAvailable = bufferFrameCount - numFramesPadding;
-        
-        if (numFramesAvailable > 0) {
-            std::lock_guard<std::mutex> lock(audioQueueMutex);
-            if (!audioFrameQueue.empty()) {
-                AVFrame* frame = audioFrameQueue.front();
-                audioFrameQueue.pop();
-                
-                if (SUCCEEDED(renderClient->GetBuffer(numFramesAvailable, &audioBuffer))) {
-                    // 重采样音频数据
-                    int outputSamples = swr_convert(swrContext,
-                        &audioBuffer, numFramesAvailable,
-                        (const uint8_t**)frame->data, frame->nb_samples);
-                    
-                    renderClient->ReleaseBuffer(outputSamples, 0);
-                }
-                
-                av_frame_free(&frame);
-            }
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
 }
 
 void renderLoop() {
@@ -504,18 +435,12 @@ void cleanup() {
         }
     }
     
-    {
-        std::lock_guard<std::mutex> lock(audioQueueMutex);
-        while (!audioFrameQueue.empty()) {
-            AVFrame* frame = audioFrameQueue.front();
-            audioFrameQueue.pop();
-            av_frame_free(&frame);
-        }
-    }
+    // 清理音频 - 使用新的清理函数
+    cleanupAudio(audioContext);
     
     // 清理 FFmpeg
     if (swsContext) sws_freeContext(swsContext);
-    if (swrContext) swr_free(&swrContext);
+    if (audioContext.swrContext) swr_free(&audioContext.swrContext);
     if (videoCodecContext) avcodec_free_context(&videoCodecContext);
     if (audioCodecContext) avcodec_free_context(&audioCodecContext);
     if (formatContext) avformat_close_input(&formatContext);
@@ -532,14 +457,6 @@ void cleanup() {
     if (swapChain) swapChain->Release();
     if (deviceContext) deviceContext->Release();
     if (device) device->Release();
-    
-    // 清理音频
-    if (renderClient) renderClient->Release();
-    if (audioClient) audioClient->Release();
-    if (audioDevice) audioDevice->Release();
-    if (deviceEnumerator) deviceEnumerator->Release();
-    
-    CoUninitialize();
 }
 
 // 窗口过程
@@ -606,7 +523,7 @@ int main(int argc, char* argv[]) {
     UpdateWindow(hwnd);
     
     // 初始化播放器
-    if (initializeFFmpeg(argv[1]) && initializeDirectX11() && initializeAudio()) {
+    if (initializeFFmpeg(argv[1]) && initializeDirectX11() && initializeAudio(audioContext)) {
         // 创建视频纹理
         if (videoCodecContext) {
             createVideoTexture(videoCodecContext->width, videoCodecContext->height);
