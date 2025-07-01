@@ -13,6 +13,7 @@
 #include <chrono>
 #include <iostream>
 #include "shader_utils.h"
+#include "vertex_buffer_utils.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -28,11 +29,6 @@ extern "C" {
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "avrt.lib")
-
-struct Vertex {
-    float position[2];
-    float texCoord[2];
-};
 
 // 全局变量
 // FFmpeg 相关
@@ -91,7 +87,6 @@ const size_t maxQueueSize = 10;
 // 全局函数声明
 bool initializeFFmpeg(const char* filename);
 bool initializeDirectX11();
-bool createVertexBuffer();
 bool initializeAudio();
 void play();
 void stop();
@@ -216,8 +211,8 @@ bool initializeDirectX11() {
     // 创建着色器 - 使用新的函数签名
     if (!createShaders(device, &vertexShader, &pixelShader, &inputLayout)) return false;
     
-    // 创建顶点缓冲区
-    if (!createVertexBuffer()) return false;
+    // 创建顶点缓冲区 - 使用新的函数
+    if (!createVertexBuffer(device, &vertexBuffer)) return false;
     
     // 创建采样器状态
     D3D11_SAMPLER_DESC samplerDesc = {};
@@ -228,25 +223,6 @@ bool initializeDirectX11() {
     device->CreateSamplerState(&samplerDesc, &samplerState);
     
     return true;
-}
-
-bool createVertexBuffer() {
-    Vertex vertices[] = {
-        {{-1.0f, -1.0f}, {0.0f, 1.0f}},  // 左下
-        {{-1.0f,  1.0f}, {0.0f, 0.0f}},  // 左上
-        {{ 1.0f, -1.0f}, {1.0f, 1.0f}},  // 右下
-        {{ 1.0f,  1.0f}, {1.0f, 0.0f}}   // 右上
-    };
-    
-    D3D11_BUFFER_DESC bufferDesc = {};
-    bufferDesc.Usage = D3D11_USAGE_DEFAULT;
-    bufferDesc.ByteWidth = sizeof(vertices);
-    bufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    
-    D3D11_SUBRESOURCE_DATA initData = {};
-    initData.pSysMem = vertices;
-    
-    return SUCCEEDED(device->CreateBuffer(&bufferDesc, &initData, &vertexBuffer));
 }
 
 bool initializeAudio() {
