@@ -145,6 +145,17 @@ bool getAudioInfo(FFmpegHandlerHandle handle, AudioInfo* info) {
     return true;
 }
 
+bool getAudioConfig(FFmpegHandlerHandle handle, AudioConfig* config) {
+    if (!handle || !config || handle->audioStreamIndex < 0) return false;
+    
+    config->inputSampleRate = handle->audioCodecContext->sample_rate;
+    config->inputChannels = handle->audioCodecContext->ch_layout.nb_channels;
+    config->inputFormat = handle->audioCodecContext->sample_fmt;
+    config->inputChannelLayout = handle->audioCodecContext->ch_layout;
+    
+    return true;
+}
+
 AVFormatContext* getFormatContext(FFmpegHandlerHandle handle) {
     return handle ? handle->formatContext : nullptr;
 }

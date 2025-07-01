@@ -26,12 +26,18 @@ struct AudioInfo {
     int streamIndex;
 };
 
+// 新增：获取音频配置的封装函数
+struct AudioConfig;  // 前向声明
+
 // 函数声明
 FFmpegHandlerHandle createFFmpegHandler(const char* filename);
 void destroyFFmpegHandler(FFmpegHandlerHandle handle);
 
 bool getVideoInfo(FFmpegHandlerHandle handle, VideoInfo* info);
 bool getAudioInfo(FFmpegHandlerHandle handle, AudioInfo* info);
+
+// 新增：获取音频配置的封装函数
+bool getAudioConfig(FFmpegHandlerHandle handle, AudioConfig* config);
 
 AVFormatContext* getFormatContext(FFmpegHandlerHandle handle);
 AVCodecContext* getVideoCodecContext(FFmpegHandlerHandle handle);

@@ -68,17 +68,16 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     state->hasVideo = getVideoInfo(state->ffmpegHandler, &state->videoInfo);
     state->hasAudio = getAudioInfo(state->ffmpegHandler, &state->audioInfo);
     
-    // 初始化音频系统 - 传递配置而非直接传递SwrContext
+    // 初始化音频系统 - 使用封装的配置获取函数
     if (state->hasAudio) {
-        AudioConfig audioConfig = {
-            .inputSampleRate = state->audioInfo.sampleRate,
-            .inputChannels = state->audioInfo.channels,
-            .inputFormat = getAudioCodecContext(state->ffmpegHandler)->sample_fmt,
-            .inputChannelLayout = getAudioCodecContext(state->ffmpegHandler)->ch_layout
-        };
-        
-        if (!initializeAudioState(&audioConfig)) {
-            std::cerr << "Warning: Failed to initialize audio" << std::endl;
+        AudioConfig audioConfig;
+        if (getAudioConfig(state->ffmpegHandler, &audioConfig)) {
+            if (!initializeAudioState(&audioConfig)) {
+                std::cerr << "Warning: Failed to initialize audio" << std::endl;
+                state->hasAudio = false;
+            }
+        } else {
+            std::cerr << "Warning: Failed to get audio configuration" << std::endl;
             state->hasAudio = false;
         }
     }
