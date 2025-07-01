@@ -31,6 +31,12 @@ struct DX11RendererState {
     ID3D11SamplerState* samplerState = nullptr;
     int windowWidth = 800;
     int windowHeight = 600;
+    
+    // 内部管理像素格式转换 - 提高内聚性
+    SwsContext* internalSwsContext = nullptr;
+    int videoWidth = 0;
+    int videoHeight = 0;
+    AVPixelFormat inputPixelFormat = AV_PIX_FMT_NONE;
 };
 
 DX11RendererHandle createDX11Renderer(HWND hwnd) {
@@ -97,6 +103,11 @@ void destroyDX11Renderer(DX11RendererHandle handle) {
     
     DX11RendererState* state = static_cast<DX11RendererState*>(handle);
     
+    // 清理内部SwsContext
+    if (state->internalSwsContext) {
+        sws_freeContext(state->internalSwsContext);
+    }
+    
     if (state->samplerState) state->samplerState->Release();
     if (state->videoSRV) state->videoSRV->Release();
     if (state->videoTexture) state->videoTexture->Release();
@@ -116,6 +127,10 @@ void createVideoTexture(DX11RendererHandle handle, int width, int height) {
     if (!handle) return;
     
     DX11RendererState* state = static_cast<DX11RendererState*>(handle);
+    
+    // 记录视频尺寸
+    state->videoWidth = width;
+    state->videoHeight = height;
     
     if (state->videoTexture) {
         state->videoTexture->Release();
@@ -141,23 +156,38 @@ void createVideoTexture(DX11RendererHandle handle, int width, int height) {
     state->device->CreateShaderResourceView(state->videoTexture, nullptr, &state->videoSRV);
 }
 
-void updateVideoTexture(DX11RendererHandle handle, AVFrame* frame, AVCodecContext* videoCodecContext, SwsContext* swsContext) {
-    if (!handle) return;
+void updateVideoTexture(DX11RendererHandle handle, AVFrame* frame) {
+    if (!handle || !frame) return;
     
     DX11RendererState* state = static_cast<DX11RendererState*>(handle);
     
-    if (!state->videoTexture || !swsContext) return;
+    if (!state->videoTexture) return;
+    
+    // 内部管理SwsContext - 提高内聚性，减少外部依赖
+    if (!state->internalSwsContext || state->inputPixelFormat != frame->format) {
+        if (state->internalSwsContext) {
+            sws_freeContext(state->internalSwsContext);
+        }
+        
+        state->inputPixelFormat = static_cast<AVPixelFormat>(frame->format);
+        state->internalSwsContext = sws_getContext(
+            frame->width, frame->height, state->inputPixelFormat,
+            state->videoWidth, state->videoHeight, AV_PIX_FMT_RGBA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr
+        );
+    }
+    
+    if (!state->internalSwsContext) return;
     
     // 创建临时 RGBA 缓冲区
-    int width = videoCodecContext->width;
-    int height = videoCodecContext->height;
-    std::vector<uint8_t> rgbaBuffer(width * height * 4);
+    std::vector<uint8_t> rgbaBuffer(state->videoWidth * state->videoHeight * 4);
     
     uint8_t* rgbaData[1] = { rgbaBuffer.data() };
-    int rgbaLinesize[1] = { width * 4 };
+    int rgbaLinesize[1] = { state->videoWidth * 4 };
     
     // 转换为 RGBA
-    sws_scale(swsContext, frame->data, frame->linesize, 0, height, rgbaData, rgbaLinesize);
+    sws_scale(state->internalSwsContext, frame->data, frame->linesize, 
+              0, frame->height, rgbaData, rgbaLinesize);
     
     // 更新纹理
     D3D11_MAPPED_SUBRESOURCE mappedResource;
@@ -165,8 +195,8 @@ void updateVideoTexture(DX11RendererHandle handle, AVFrame* frame, AVCodecContex
         uint8_t* dest = static_cast<uint8_t*>(mappedResource.pData);
         uint8_t* src = rgbaBuffer.data();
         
-        for (int y = 0; y < height; y++) {
-            memcpy(dest + y * mappedResource.RowPitch, src + y * width * 4, width * 4);
+        for (int y = 0; y < state->videoHeight; y++) {
+            memcpy(dest + y * mappedResource.RowPitch, src + y * state->videoWidth * 4, state->videoWidth * 4);
         }
         
         state->deviceContext->Unmap(state->videoTexture, 0);

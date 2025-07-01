@@ -253,9 +253,7 @@ static void renderLoop(PlayerEngineState* state) {
         }
         
         if (frame && state->hasVideo) {
-            updateVideoTexture(state->dx11Renderer, frame, 
-                getVideoCodecContext(state->ffmpegHandler), 
-                getSwsContext(state->ffmpegHandler));
+            updateVideoTexture(state->dx11Renderer, frame);
             av_frame_free(&frame);
         }
         
