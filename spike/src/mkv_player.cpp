@@ -15,6 +15,7 @@
 #include "shader_utils.h"
 #include "vertex_buffer_utils.h"
 #include "audio_state.h"
+#include "dx11_renderer.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -41,26 +42,14 @@ SwrContext* swrContext = nullptr;
 int videoStreamIndex = -1;
 int audioStreamIndex = -1;
 
-// DirectX11 相关
-ID3D11Device* device = nullptr;
-ID3D11DeviceContext* deviceContext = nullptr;
-IDXGISwapChain* swapChain = nullptr;
-ID3D11RenderTargetView* renderTargetView = nullptr;
-ID3D11VertexShader* vertexShader = nullptr;
-ID3D11PixelShader* pixelShader = nullptr;
-ID3D11Buffer* vertexBuffer = nullptr;
-ID3D11InputLayout* inputLayout = nullptr;
-ID3D11Texture2D* videoTexture = nullptr;
-ID3D11ShaderResourceView* videoSRV = nullptr;
-ID3D11SamplerState* samplerState = nullptr;
+// DirectX11 相关 - 替换为渲染器状态
+DX11RendererState dx11State;
 
 // 音频相关 - 移除全局变量声明
 // AudioState audioState; // 删除这行
 
 // 窗口相关
 HWND hwnd = nullptr;
-int windowWidth = 800;
-int windowHeight = 600;
 
 // 播放控制
 std::atomic<bool> playing(false);
@@ -80,15 +69,12 @@ const size_t maxQueueSize = 10;
 
 // 全局函数声明
 bool initializeFFmpeg(const char* filename);
-bool initializeDirectX11();
+bool initializeDX11Renderer(HWND hwnd, DX11RendererState* state);
 bool initializeAudioState();
 void play();
 void stop();
 void decodingLoop();
 void renderLoop();
-void renderFrame();
-void updateVideoTexture(AVFrame* frame);
-void createVideoTexture(int width, int height);
 void cleanup();
 
 bool initializeFFmpeg(const char* filename) {
@@ -173,54 +159,6 @@ bool initializeFFmpeg(const char* filename) {
     return true;
 }
 
-bool initializeDirectX11() {
-    // Get screen dimensions for fullscreen
-    windowWidth = GetSystemMetrics(SM_CXSCREEN);
-    windowHeight = GetSystemMetrics(SM_CYSCREEN);
-    
-    // 创建设备和交换链
-    DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
-    swapChainDesc.BufferCount = 1;
-    swapChainDesc.BufferDesc.Width = windowWidth;
-    swapChainDesc.BufferDesc.Height = windowHeight;
-    swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapChainDesc.OutputWindow = hwnd;
-    swapChainDesc.SampleDesc.Count = 1;
-    swapChainDesc.Windowed = TRUE;
-    
-    D3D_FEATURE_LEVEL featureLevel;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &swapChainDesc, &swapChain, &device, &featureLevel, &deviceContext
-    );
-    
-    if (FAILED(hr)) return false;
-    
-    // 创建渲染目标视图
-    ID3D11Texture2D* backBuffer;
-    swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backBuffer);
-    device->CreateRenderTargetView(backBuffer, nullptr, &renderTargetView);
-    backBuffer->Release();
-    
-    // 创建着色器 - 使用新的函数签名
-    if (!createShaders(device, &vertexShader, &pixelShader, &inputLayout)) return false;
-    
-    // 创建顶点缓冲区 - 使用新的函数
-    if (!createVertexBuffer(device, &vertexBuffer)) return false;
-    
-    // 创建采样器状态
-    D3D11_SAMPLER_DESC samplerDesc = {};
-    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    device->CreateSamplerState(&samplerDesc, &samplerState);
-    
-    return true;
-}
-
 void play() {
     if (playing) return;
     
@@ -290,122 +228,39 @@ void decodingLoop() {
 
 void renderLoop() {
     while (playing && !shouldStop) {
-        renderFrame();
-        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
-    }
-}
-
-void renderFrame() {
-    // 获取当前时间
-    auto currentTime = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime);
-    double currentSeconds = elapsed.count() / 1000000.0;
-    
-    // 从队列中获取视频帧
-    AVFrame* frame = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(videoQueueMutex);
-        while (!videoFrameQueue.empty()) {
-            AVFrame* candidate = videoFrameQueue.front();
-            double frameTime = candidate->pts * videoTimeBase;
-            
-            if (frameTime <= currentSeconds + 0.04) { // 40ms 容差
-                videoFrameQueue.pop();
-                if (frame) av_frame_free(&frame);
-                frame = candidate;
-            } else {
-                break;
+        // 获取当前时间
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(currentTime - startTime);
+        double currentSeconds = elapsed.count() / 1000000.0;
+        
+        // 从队列中获取视频帧
+        AVFrame* frame = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(videoQueueMutex);
+            while (!videoFrameQueue.empty()) {
+                AVFrame* candidate = videoFrameQueue.front();
+                double frameTime = candidate->pts * videoTimeBase;
+                
+                if (frameTime <= currentSeconds + 0.04) { // 40ms 容差
+                    videoFrameQueue.pop();
+                    if (frame) av_frame_free(&frame);
+                    frame = candidate;
+                } else {
+                    break;
+                }
             }
         }
-    }
-    
-    if (frame) {
-        updateVideoTexture(frame);
-        av_frame_free(&frame);
-    }
-    
-    // 渲染
-    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    deviceContext->ClearRenderTargetView(renderTargetView, clearColor);
-    
-    deviceContext->OMSetRenderTargets(1, &renderTargetView, nullptr);
-    
-    D3D11_VIEWPORT viewport = {};
-    viewport.Width = static_cast<float>(windowWidth);
-    viewport.Height = static_cast<float>(windowHeight);
-    viewport.MaxDepth = 1.0f;
-    deviceContext->RSSetViewports(1, &viewport);
-    
-    deviceContext->IASetInputLayout(inputLayout);
-    deviceContext->VSSetShader(vertexShader, nullptr, 0);
-    deviceContext->PSSetShader(pixelShader, nullptr, 0);
-    
-    if (videoSRV) {
-        deviceContext->PSSetShaderResources(0, 1, &videoSRV);
-        deviceContext->PSSetSamplers(0, 1, &samplerState);
-    }
-    
-    UINT stride = sizeof(Vertex);
-    UINT offset = 0;
-    deviceContext->IASetVertexBuffers(0, 1, &vertexBuffer, &stride, &offset);
-    deviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    
-    deviceContext->Draw(4, 0);
-    
-    swapChain->Present(1, 0);
-}
-
-void updateVideoTexture(AVFrame* frame) {
-    if (!videoTexture || !swsContext) return;
-    
-    // 创建临时 RGBA 缓冲区
-    int width = videoCodecContext->width;
-    int height = videoCodecContext->height;
-    std::vector<uint8_t> rgbaBuffer(width * height * 4);
-    
-    uint8_t* rgbaData[1] = { rgbaBuffer.data() };
-    int rgbaLinesize[1] = { width * 4 };
-    
-    // 转换为 RGBA
-    sws_scale(swsContext, frame->data, frame->linesize, 0, height, rgbaData, rgbaLinesize);
-    
-    // 更新纹理
-    D3D11_MAPPED_SUBRESOURCE mappedResource;
-    if (SUCCEEDED(deviceContext->Map(videoTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource))) {
-        uint8_t* dest = static_cast<uint8_t*>(mappedResource.pData);
-        uint8_t* src = rgbaBuffer.data();
         
-        for (int y = 0; y < height; y++) {
-            memcpy(dest + y * mappedResource.RowPitch, src + y * width * 4, width * 4);
+        if (frame) {
+            updateVideoTexture(&dx11State, frame, videoCodecContext, swsContext);
+            av_frame_free(&frame);
         }
         
-        deviceContext->Unmap(videoTexture, 0);
+        // 渲染
+        renderFrame(&dx11State);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
-}
-
-void createVideoTexture(int width, int height) {
-    if (videoTexture) {
-        videoTexture->Release();
-        videoTexture = nullptr;
-    }
-    if (videoSRV) {
-        videoSRV->Release();
-        videoSRV = nullptr;
-    }
-    
-    D3D11_TEXTURE2D_DESC textureDesc = {};
-    textureDesc.Width = width;
-    textureDesc.Height = height;
-    textureDesc.MipLevels = 1;
-    textureDesc.ArraySize = 1;
-    textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    textureDesc.SampleDesc.Count = 1;
-    textureDesc.Usage = D3D11_USAGE_DYNAMIC;
-    textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    
-    device->CreateTexture2D(&textureDesc, nullptr, &videoTexture);
-    device->CreateShaderResourceView(videoTexture, nullptr, &videoSRV);
 }
 
 void cleanup() {
@@ -421,7 +276,7 @@ void cleanup() {
         }
     }
     
-    // 清理音频 - 使用新的清理函数
+    // 清理音频
     cleanupAudioState();
     
     // 清理 FFmpeg
@@ -430,18 +285,8 @@ void cleanup() {
     if (audioCodecContext) avcodec_free_context(&audioCodecContext);
     if (formatContext) avformat_close_input(&formatContext);
     
-    // 清理 DirectX11
-    if (samplerState) samplerState->Release();
-    if (videoSRV) videoSRV->Release();
-    if (videoTexture) videoTexture->Release();
-    if (inputLayout) inputLayout->Release();
-    if (vertexBuffer) vertexBuffer->Release();
-    if (pixelShader) pixelShader->Release();
-    if (vertexShader) vertexShader->Release();
-    if (renderTargetView) renderTargetView->Release();
-    if (swapChain) swapChain->Release();
-    if (deviceContext) deviceContext->Release();
-    if (device) device->Release();
+    // 清理 DirectX11 - 使用新的清理函数
+    cleanupDX11Renderer(&dx11State);
 }
 
 // 窗口过程
@@ -508,10 +353,10 @@ int main(int argc, char* argv[]) {
     UpdateWindow(hwnd);
     
     // 初始化播放器
-    if (initializeFFmpeg(argv[1]) && initializeDirectX11() && initializeAudioState()) {
+    if (initializeFFmpeg(argv[1]) && initializeDX11Renderer(hwnd, &dx11State) && initializeAudioState()) {
         // 创建视频纹理
         if (videoCodecContext) {
-            createVideoTexture(videoCodecContext->width, videoCodecContext->height);
+            createVideoTexture(&dx11State, videoCodecContext->width, videoCodecContext->height);
         }
         
         // 开始播放
