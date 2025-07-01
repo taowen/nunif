@@ -16,9 +16,6 @@ extern "C" {
 
 // 播放引擎状态结构
 struct PlayerEngineState {
-    // 组件句柄
-    FFmpegHandlerHandle ffmpegHandler = nullptr;
-    
     // 播放控制
     std::atomic<bool> playing{false};
     std::atomic<bool> shouldStop{false};
@@ -49,27 +46,26 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
     PlayerEngineState* state = new PlayerEngineState();
     
     // 初始化 FFmpeg 处理器
-    state->ffmpegHandler = createFFmpegHandler(filename);
-    if (!state->ffmpegHandler) {
+    if (!createFFmpegHandler(filename)) {
         delete state;
         return nullptr;
     }
     
     // 初始化 DirectX11 渲染器
     if (!createDX11Renderer(hwnd)) {
-        destroyFFmpegHandler(state->ffmpegHandler);
+        destroyFFmpegHandler();
         delete state;
         return nullptr;
     }
     
     // 获取媒体信息
-    state->hasVideo = getVideoInfo(state->ffmpegHandler, &state->videoInfo);
-    state->hasAudio = getAudioInfo(state->ffmpegHandler, &state->audioInfo);
+    state->hasVideo = getVideoInfo(&state->videoInfo);
+    state->hasAudio = getAudioInfo(&state->audioInfo);
     
     // 初始化音频系统 - 使用封装的配置获取函数
     if (state->hasAudio) {
         AudioConfig audioConfig;
-        if (getAudioConfig(state->ffmpegHandler, &audioConfig)) {
+        if (getAudioConfig(&audioConfig)) {
             if (!initializeAudioState(&audioConfig)) {
                 std::cerr << "Warning: Failed to initialize audio" << std::endl;
                 state->hasAudio = false;
@@ -106,9 +102,7 @@ void destroyPlayerEngine(PlayerEngineHandle handle) {
     
     // 清理组件
     destroyDX11Renderer();
-    if (state->ffmpegHandler) {
-        destroyFFmpegHandler(state->ffmpegHandler);
-    }
+    destroyFFmpegHandler();
     
     delete state;
 }
@@ -188,9 +182,9 @@ static void decodingLoop(PlayerEngineState* state) {
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     
-    AVFormatContext* formatContext = getFormatContext(state->ffmpegHandler);
-    AVCodecContext* videoCodecContext = getVideoCodecContext(state->ffmpegHandler);
-    AVCodecContext* audioCodecContext = getAudioCodecContext(state->ffmpegHandler);
+    AVFormatContext* formatContext = getFormatContext();
+    AVCodecContext* videoCodecContext = getVideoCodecContext();
+    AVCodecContext* audioCodecContext = getAudioCodecContext();
     
     while (!state->shouldStop && av_read_frame(formatContext, packet) >= 0) {
         if (state->hasVideo && packet->stream_index == state->videoInfo.streamIndex) {

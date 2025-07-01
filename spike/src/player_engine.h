@@ -2,9 +2,6 @@
 
 #include <windows.h>
 
-// 前向声明
-typedef struct FFmpegHandler* FFmpegHandlerHandle;
-
 // 播放引擎句柄
 typedef void* PlayerEngineHandle;
 

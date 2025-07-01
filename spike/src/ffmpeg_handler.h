@@ -7,9 +7,6 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-// 不透明句柄类型
-typedef struct FFmpegHandler* FFmpegHandlerHandle;
-
 // 视频信息结构
 struct VideoInfo {
     int width;
@@ -29,17 +26,17 @@ struct AudioInfo {
 // 新增：获取音频配置的封装函数
 struct AudioConfig;  // 前向声明
 
-// 函数声明
-FFmpegHandlerHandle createFFmpegHandler(const char* filename);
-void destroyFFmpegHandler(FFmpegHandlerHandle handle);
+// 函数声明 - 移除句柄参数，内部管理状态
+bool createFFmpegHandler(const char* filename);
+void destroyFFmpegHandler();
 
-bool getVideoInfo(FFmpegHandlerHandle handle, VideoInfo* info);
-bool getAudioInfo(FFmpegHandlerHandle handle, AudioInfo* info);
+bool getVideoInfo(VideoInfo* info);
+bool getAudioInfo(AudioInfo* info);
 
 // 新增：获取音频配置的封装函数
-bool getAudioConfig(FFmpegHandlerHandle handle, AudioConfig* config);
+bool getAudioConfig(AudioConfig* config);
 
-AVFormatContext* getFormatContext(FFmpegHandlerHandle handle);
-AVCodecContext* getVideoCodecContext(FFmpegHandlerHandle handle);
-AVCodecContext* getAudioCodecContext(FFmpegHandlerHandle handle);
-SwsContext* getSwsContext(FFmpegHandlerHandle handle); 
+AVFormatContext* getFormatContext();
+AVCodecContext* getVideoCodecContext();
+AVCodecContext* getAudioCodecContext();
+SwsContext* getSwsContext(); 

@@ -23,151 +23,164 @@ struct FFmpegHandler {
     double audioTimeBase = 0.0;
 };
 
-FFmpegHandlerHandle createFFmpegHandler(const char* filename) {
-    FFmpegHandler* handler = new FFmpegHandler();
+// 静态全局变量 - 隐藏在实现文件中
+static FFmpegHandler ffmpegState;
+
+bool createFFmpegHandler(const char* filename) {
+    // 先清理之前的状态
+    destroyFFmpegHandler();
     
     // 打开文件
-    if (avformat_open_input(&handler->formatContext, filename, nullptr, nullptr) < 0) {
-        delete handler;
-        return nullptr;
+    if (avformat_open_input(&ffmpegState.formatContext, filename, nullptr, nullptr) < 0) {
+        return false;
     }
     
     // 获取流信息
-    if (avformat_find_stream_info(handler->formatContext, nullptr) < 0) {
-        avformat_close_input(&handler->formatContext);
-        delete handler;
-        return nullptr;
+    if (avformat_find_stream_info(ffmpegState.formatContext, nullptr) < 0) {
+        avformat_close_input(&ffmpegState.formatContext);
+        return false;
     }
     
     // 查找视频和音频流
-    for (unsigned int i = 0; i < handler->formatContext->nb_streams; i++) {
-        if (handler->formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && handler->videoStreamIndex == -1) {
-            handler->videoStreamIndex = i;
-        } else if (handler->formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && handler->audioStreamIndex == -1) {
-            handler->audioStreamIndex = i;
+    for (unsigned int i = 0; i < ffmpegState.formatContext->nb_streams; i++) {
+        if (ffmpegState.formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ffmpegState.videoStreamIndex == -1) {
+            ffmpegState.videoStreamIndex = i;
+        } else if (ffmpegState.formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && ffmpegState.audioStreamIndex == -1) {
+            ffmpegState.audioStreamIndex = i;
         }
     }
     
     // 初始化视频解码器
-    if (handler->videoStreamIndex >= 0) {
-        AVStream* videoStream = handler->formatContext->streams[handler->videoStreamIndex];
+    if (ffmpegState.videoStreamIndex >= 0) {
+        AVStream* videoStream = ffmpegState.formatContext->streams[ffmpegState.videoStreamIndex];
         const AVCodec* videoCodec = avcodec_find_decoder(videoStream->codecpar->codec_id);
         if (!videoCodec) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+            destroyFFmpegHandler();
+            return false;
         }
         
-        handler->videoCodecContext = avcodec_alloc_context3(videoCodec);
-        if (!handler->videoCodecContext) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        ffmpegState.videoCodecContext = avcodec_alloc_context3(videoCodec);
+        if (!ffmpegState.videoCodecContext) {
+            destroyFFmpegHandler();
+            return false;
         }
         
-        if (avcodec_parameters_to_context(handler->videoCodecContext, videoStream->codecpar) < 0) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        if (avcodec_parameters_to_context(ffmpegState.videoCodecContext, videoStream->codecpar) < 0) {
+            destroyFFmpegHandler();
+            return false;
         }
-        if (avcodec_open2(handler->videoCodecContext, videoCodec, nullptr) < 0) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        if (avcodec_open2(ffmpegState.videoCodecContext, videoCodec, nullptr) < 0) {
+            destroyFFmpegHandler();
+            return false;
         }
         
-        handler->videoTimeBase = av_q2d(videoStream->time_base);
+        ffmpegState.videoTimeBase = av_q2d(videoStream->time_base);
         
         // 初始化 swscale
-        handler->swsContext = sws_getContext(
-            handler->videoCodecContext->width, handler->videoCodecContext->height, handler->videoCodecContext->pix_fmt,
-            handler->videoCodecContext->width, handler->videoCodecContext->height, AV_PIX_FMT_RGBA,
+        ffmpegState.swsContext = sws_getContext(
+            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, ffmpegState.videoCodecContext->pix_fmt,
+            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, AV_PIX_FMT_RGBA,
             SWS_BILINEAR, nullptr, nullptr, nullptr
         );
     }
     
     // 初始化音频解码器
-    if (handler->audioStreamIndex >= 0) {
-        AVStream* audioStream = handler->formatContext->streams[handler->audioStreamIndex];
+    if (ffmpegState.audioStreamIndex >= 0) {
+        AVStream* audioStream = ffmpegState.formatContext->streams[ffmpegState.audioStreamIndex];
         const AVCodec* audioCodec = avcodec_find_decoder(audioStream->codecpar->codec_id);
         if (!audioCodec) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+            destroyFFmpegHandler();
+            return false;
         }
         
-        handler->audioCodecContext = avcodec_alloc_context3(audioCodec);
-        if (!handler->audioCodecContext) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        ffmpegState.audioCodecContext = avcodec_alloc_context3(audioCodec);
+        if (!ffmpegState.audioCodecContext) {
+            destroyFFmpegHandler();
+            return false;
         }
         
-        if (avcodec_parameters_to_context(handler->audioCodecContext, audioStream->codecpar) < 0) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        if (avcodec_parameters_to_context(ffmpegState.audioCodecContext, audioStream->codecpar) < 0) {
+            destroyFFmpegHandler();
+            return false;
         }
-        if (avcodec_open2(handler->audioCodecContext, audioCodec, nullptr) < 0) {
-            destroyFFmpegHandler(handler);
-            return nullptr;
+        if (avcodec_open2(ffmpegState.audioCodecContext, audioCodec, nullptr) < 0) {
+            destroyFFmpegHandler();
+            return false;
         }
         
-        handler->audioTimeBase = av_q2d(audioStream->time_base);
+        ffmpegState.audioTimeBase = av_q2d(audioStream->time_base);
     }
     
-    return handler;
+    return true;
 }
 
-void destroyFFmpegHandler(FFmpegHandlerHandle handle) {
-    if (!handle) return;
+void destroyFFmpegHandler() {
+    if (ffmpegState.swsContext) { 
+        sws_freeContext(ffmpegState.swsContext); 
+        ffmpegState.swsContext = nullptr;
+    }
+    if (ffmpegState.videoCodecContext) { 
+        avcodec_free_context(&ffmpegState.videoCodecContext);
+    }
+    if (ffmpegState.audioCodecContext) { 
+        avcodec_free_context(&ffmpegState.audioCodecContext);
+    }
+    if (ffmpegState.formatContext) { 
+        avformat_close_input(&ffmpegState.formatContext);
+    }
     
-    if (handle->swsContext) sws_freeContext(handle->swsContext);
-    if (handle->videoCodecContext) avcodec_free_context(&handle->videoCodecContext);
-    if (handle->audioCodecContext) avcodec_free_context(&handle->audioCodecContext);
-    if (handle->formatContext) avformat_close_input(&handle->formatContext);
-    
-    delete handle;
+    // 重置索引
+    ffmpegState.videoStreamIndex = -1;
+    ffmpegState.audioStreamIndex = -1;
+    ffmpegState.videoTimeBase = 0.0;
+    ffmpegState.audioTimeBase = 0.0;
 }
 
-bool getVideoInfo(FFmpegHandlerHandle handle, VideoInfo* info) {
-    if (!handle || !info || handle->videoStreamIndex < 0) return false;
+bool getVideoInfo(VideoInfo* info) {
+    if (!info || ffmpegState.videoStreamIndex < 0) return false;
     
-    info->width = handle->videoCodecContext->width;
-    info->height = handle->videoCodecContext->height;
-    info->timeBase = handle->videoTimeBase;
-    info->streamIndex = handle->videoStreamIndex;
+    info->width = ffmpegState.videoCodecContext->width;
+    info->height = ffmpegState.videoCodecContext->height;
+    info->timeBase = ffmpegState.videoTimeBase;
+    info->streamIndex = ffmpegState.videoStreamIndex;
     
     return true;
 }
 
-bool getAudioInfo(FFmpegHandlerHandle handle, AudioInfo* info) {
-    if (!handle || !info || handle->audioStreamIndex < 0) return false;
+bool getAudioInfo(AudioInfo* info) {
+    if (!info || ffmpegState.audioStreamIndex < 0) return false;
     
-    info->sampleRate = handle->audioCodecContext->sample_rate;
-    info->channels = handle->audioCodecContext->ch_layout.nb_channels;
-    info->timeBase = handle->audioTimeBase;
-    info->streamIndex = handle->audioStreamIndex;
-    
-    return true;
-}
-
-bool getAudioConfig(FFmpegHandlerHandle handle, AudioConfig* config) {
-    if (!handle || !config || handle->audioStreamIndex < 0) return false;
-    
-    config->inputSampleRate = handle->audioCodecContext->sample_rate;
-    config->inputChannels = handle->audioCodecContext->ch_layout.nb_channels;
-    config->inputFormat = handle->audioCodecContext->sample_fmt;
-    config->inputChannelLayout = handle->audioCodecContext->ch_layout;
+    info->sampleRate = ffmpegState.audioCodecContext->sample_rate;
+    info->channels = ffmpegState.audioCodecContext->ch_layout.nb_channels;
+    info->timeBase = ffmpegState.audioTimeBase;
+    info->streamIndex = ffmpegState.audioStreamIndex;
     
     return true;
 }
 
-AVFormatContext* getFormatContext(FFmpegHandlerHandle handle) {
-    return handle ? handle->formatContext : nullptr;
+bool getAudioConfig(AudioConfig* config) {
+    if (!config || ffmpegState.audioStreamIndex < 0) return false;
+    
+    config->inputSampleRate = ffmpegState.audioCodecContext->sample_rate;
+    config->inputChannels = ffmpegState.audioCodecContext->ch_layout.nb_channels;
+    config->inputFormat = ffmpegState.audioCodecContext->sample_fmt;
+    config->inputChannelLayout = ffmpegState.audioCodecContext->ch_layout;
+    
+    return true;
 }
 
-AVCodecContext* getVideoCodecContext(FFmpegHandlerHandle handle) {
-    return handle ? handle->videoCodecContext : nullptr;
+AVFormatContext* getFormatContext() {
+    return ffmpegState.formatContext;
 }
 
-AVCodecContext* getAudioCodecContext(FFmpegHandlerHandle handle) {
-    return handle ? handle->audioCodecContext : nullptr;
+AVCodecContext* getVideoCodecContext() {
+    return ffmpegState.videoCodecContext;
 }
 
-SwsContext* getSwsContext(FFmpegHandlerHandle handle) {
-    return handle ? handle->swsContext : nullptr;
+AVCodecContext* getAudioCodecContext() {
+    return ffmpegState.audioCodecContext;
+}
+
+SwsContext* getSwsContext() {
+    return ffmpegState.swsContext;
 } 
