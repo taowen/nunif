@@ -137,6 +137,9 @@ bool createFFmpegHandler(const char* filename) {
         ffmpegState.videoCodecContext->hw_device_ctx = av_buffer_ref(ffmpegState.hwDeviceContext);
         ffmpegState.videoCodecContext->get_format = get_hw_format;
         
+        // 设置额外的硬件帧数量以避免缓冲池溢出
+        ffmpegState.videoCodecContext->extra_hw_frames = 10;
+        
         if (avcodec_open2(ffmpegState.videoCodecContext, videoCodec, nullptr) < 0) {
             std::cerr << "Error: Failed to open decoder" << std::endl;
             destroyFFmpegHandler();

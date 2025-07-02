@@ -9,4 +9,4 @@ if %ERRORLEVEL% neq 0 (
 )
 popd
 :: Run with verbose output to see stdout
-spike\build\Debug\spike.exe
+spike\build\Debug\spike.exe -v high
