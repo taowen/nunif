@@ -52,8 +52,11 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
         return nullptr;
     }
     
-    // 初始化 DirectX11 渲染器
-    if (!createDX11Renderer(hwnd)) {
+    // 获取 FFmpeg 的 D3D11 device 并初始化渲染器
+    ID3D11Device* d3d11Device = getD3D11Device();
+    ID3D11DeviceContext* d3d11Context = getD3D11DeviceContext();
+    
+    if (!createDX11Renderer(hwnd, d3d11Device, d3d11Context)) {
         destroyFFmpegHandler();
         delete state;
         return nullptr;

@@ -55,4 +55,8 @@ AVCodecContext* getVideoCodecContext();
 AVCodecContext* getAudioCodecContext();
 
 // 新增：获取硬件设备上下文
-AVBufferRef* getHwDeviceContext(); 
+AVBufferRef* getHwDeviceContext();
+
+// 新增：获取 D3D11 Device
+ID3D11Device* getD3D11Device();
+ID3D11DeviceContext* getD3D11DeviceContext(); 

@@ -42,12 +42,25 @@ struct DX11RendererState {
 // 静态全局变量 - 隐藏在实现文件中
 static DX11RendererState dx11State;
 
-bool createDX11Renderer(HWND hwnd) {
+bool createDX11Renderer(HWND hwnd, ID3D11Device* externalDevice, ID3D11DeviceContext* externalContext) {
     // Get screen dimensions for fullscreen
     dx11State.windowWidth = GetSystemMetrics(SM_CXSCREEN);
     dx11State.windowHeight = GetSystemMetrics(SM_CYSCREEN);
     
-    // 创建设备和交换链
+    dx11State.device = externalDevice;
+    dx11State.deviceContext = externalContext;
+    dx11State.device->AddRef();
+    dx11State.deviceContext->AddRef();
+    
+    // 创建交换链（需要从 device 获取 DXGI factory）
+    IDXGIDevice* dxgiDevice = nullptr;
+    IDXGIAdapter* dxgiAdapter = nullptr;
+    IDXGIFactory* dxgiFactory = nullptr;
+    
+    dx11State.device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDevice);
+    dxgiDevice->GetAdapter(&dxgiAdapter);
+    dxgiAdapter->GetParent(__uuidof(IDXGIFactory), (void**)&dxgiFactory);
+    
     DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
     swapChainDesc.BufferCount = 1;
     swapChainDesc.BufferDesc.Width = dx11State.windowWidth;
@@ -58,12 +71,11 @@ bool createDX11Renderer(HWND hwnd) {
     swapChainDesc.SampleDesc.Count = 1;
     swapChainDesc.Windowed = TRUE;
     
-    D3D_FEATURE_LEVEL featureLevel;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &swapChainDesc, &dx11State.swapChain, &dx11State.device, &featureLevel, &dx11State.deviceContext
-    );
+    HRESULT hr = dxgiFactory->CreateSwapChain(dx11State.device, &swapChainDesc, &dx11State.swapChain);
+    
+    dxgiFactory->Release();
+    dxgiAdapter->Release();
+    dxgiDevice->Release();
     
     if (FAILED(hr)) {
         return false;
@@ -145,8 +157,47 @@ void createVideoTexture(int width, int height) {
     dx11State.device->CreateShaderResourceView(dx11State.videoTexture, nullptr, &dx11State.videoSRV);
 }
 
+void updateVideoTextureFromHardwareFrame(AVFrame* frame) {
+    if (!frame || !dx11State.videoTexture) return;
+    
+    // 检查是否是硬件解码帧
+    if (frame->format != AV_PIX_FMT_D3D11) {
+        // 回退到软件解码处理
+        updateVideoTexture(frame);
+        return;
+    }
+    
+    // 获取 D3D11 纹理
+    ID3D11Texture2D* srcTexture = (ID3D11Texture2D*)frame->data[0];
+    int arrayIndex = (int)(intptr_t)frame->data[1];
+    
+    if (!srcTexture) return;
+    
+    // 获取源纹理描述
+    D3D11_TEXTURE2D_DESC srcDesc;
+    srcTexture->GetDesc(&srcDesc);
+    
+    // 创建用于复制的子资源索引
+    UINT srcSubresource = D3D11CalcSubresource(0, arrayIndex, srcDesc.MipLevels);
+    
+    // 直接复制纹理内容
+    dx11State.deviceContext->CopySubresourceRegion(
+        dx11State.videoTexture, 0,
+        0, 0, 0,
+        srcTexture, srcSubresource,
+        nullptr
+    );
+}
+
+// 修改原有的 updateVideoTexture 函数，支持硬件解码帧
 void updateVideoTexture(AVFrame* frame) {
     if (!frame || !dx11State.videoTexture) return;
+    
+    // 如果是硬件解码帧，使用专门的处理函数
+    if (frame->format == AV_PIX_FMT_D3D11) {
+        updateVideoTextureFromHardwareFrame(frame);
+        return;
+    }
     
     // 内部管理SwsContext - 提高内聚性，减少外部依赖
     if (!dx11State.internalSwsContext || dx11State.inputPixelFormat != frame->format) {

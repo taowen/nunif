@@ -251,4 +251,25 @@ AVCodecContext* getAudioCodecContext() {
 
 AVBufferRef* getHwDeviceContext() {
     return ffmpegState.hwDeviceContext;
+}
+
+// 新增：获取 D3D11 Device
+ID3D11Device* getD3D11Device() {
+    if (!ffmpegState.hwDeviceContext) return nullptr;
+    
+    AVHWDeviceContext* hwDeviceContext = (AVHWDeviceContext*)ffmpegState.hwDeviceContext->data;
+    if (hwDeviceContext->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    
+    AVD3D11VADeviceContext* d3d11Context = (AVD3D11VADeviceContext*)hwDeviceContext->hwctx;
+    return d3d11Context->device;
+}
+
+ID3D11DeviceContext* getD3D11DeviceContext() {
+    if (!ffmpegState.hwDeviceContext) return nullptr;
+    
+    AVHWDeviceContext* hwDeviceContext = (AVHWDeviceContext*)ffmpegState.hwDeviceContext->data;
+    if (hwDeviceContext->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    
+    AVD3D11VADeviceContext* d3d11Context = (AVD3D11VADeviceContext*)hwDeviceContext->hwctx;
+    return d3d11Context->device_context;
 } 
