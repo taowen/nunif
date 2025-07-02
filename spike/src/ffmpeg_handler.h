@@ -53,7 +53,6 @@ bool getAudioConfig(AudioConfig* config);
 AVFormatContext* getFormatContext();
 AVCodecContext* getVideoCodecContext();
 AVCodecContext* getAudioCodecContext();
-SwsContext* getSwsContext();
 
 // 新增：获取硬件设备上下文
 AVBufferRef* getHwDeviceContext(); 

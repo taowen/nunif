@@ -16,7 +16,6 @@ struct FFmpegHandler {
     AVFormatContext* formatContext = nullptr;
     AVCodecContext* videoCodecContext = nullptr;
     AVCodecContext* audioCodecContext = nullptr;
-    SwsContext* swsContext = nullptr;
     
     // 硬件解码相关
     AVBufferRef* hwDeviceContext = nullptr;
@@ -149,13 +148,6 @@ bool createFFmpegHandler(const char* filename) {
         ffmpegState.videoTimeBase = av_q2d(videoStream->time_base);
         ffmpegState.isHardwareDecoded = true;
         ffmpegState.hwPixelFormat = AV_PIX_FMT_D3D11;
-        
-        // 初始化 swscale - 硬件解码使用 NV12 格式
-        ffmpegState.swsContext = sws_getContext(
-            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, AV_PIX_FMT_NV12,
-            ffmpegState.videoCodecContext->width, ffmpegState.videoCodecContext->height, AV_PIX_FMT_RGBA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr
-        );
     }
     
     // 初始化音频解码器
@@ -189,10 +181,6 @@ bool createFFmpegHandler(const char* filename) {
 }
 
 void destroyFFmpegHandler() {
-    if (ffmpegState.swsContext) { 
-        sws_freeContext(ffmpegState.swsContext); 
-        ffmpegState.swsContext = nullptr;
-    }
     if (ffmpegState.videoCodecContext) { 
         avcodec_free_context(&ffmpegState.videoCodecContext);
     }
@@ -259,10 +247,6 @@ AVCodecContext* getVideoCodecContext() {
 
 AVCodecContext* getAudioCodecContext() {
     return ffmpegState.audioCodecContext;
-}
-
-SwsContext* getSwsContext() {
-    return ffmpegState.swsContext;
 }
 
 AVBufferRef* getHwDeviceContext() {
