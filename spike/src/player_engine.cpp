@@ -3,6 +3,7 @@
 #include "dx11_renderer.h"
 #include "audio_state.h"
 #include "video_state.h"
+#include "decode_loop.h"
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -26,6 +27,9 @@ struct PlayerEngineState {
     std::thread decodingThread;
     std::thread renderThread;
     
+    // 解码循环实例
+    std::unique_ptr<DecodeLoop> decodeLoop;
+    
     // 同步相关
     std::chrono::high_resolution_clock::time_point startTime;
     
@@ -36,8 +40,7 @@ struct PlayerEngineState {
     AudioInfo audioInfo = {};
 };
 
-// 内部函数声明
-static void decodingLoop(PlayerEngineState* state);
+// 前向声明 - 在结构体定义之后
 static void renderLoop(PlayerEngineState* state);
 
 PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
@@ -87,6 +90,28 @@ PlayerEngineHandle createPlayerEngine(const char* filename, HWND hwnd) {
         createVideoTexture(state->videoInfo.width, state->videoInfo.height);
     }
     
+    // 创建解码循环实例
+    DecodeState decodeState;
+    decodeState.shouldStop = &state->shouldStop;
+    decodeState.hasVideo = state->hasVideo;
+    decodeState.hasAudio = state->hasAudio;
+    decodeState.videoStreamIndex = state->videoInfo.streamIndex;
+    decodeState.audioStreamIndex = state->audioInfo.streamIndex;
+    
+    state->decodeLoop = std::make_unique<DecodeLoop>(
+        decodeState,
+        [](AVFrame* frame) { pushVideoFrame(frame); },  // 视频帧回调
+        [](AVFrame* frame) { pushAudioFrame(frame); },  // 音频帧回调
+        []() { return isVideoQueueFull(); }             // 队列满检查回调
+    );
+    
+    // 设置 FFmpeg 上下文
+    state->decodeLoop->setContexts(
+        getFormatContext(),
+        getVideoCodecContext(),
+        getAudioCodecContext()
+    );
+    
     PlayerEngineHandle handle = static_cast<PlayerEngineHandle>(state);
     
     // 自动设置为当前播放引擎
@@ -131,7 +156,7 @@ bool startPlayback(PlayerEngineHandle handle) {
     
     // 启动解码线程
     state->decodingThread = std::thread([state]() {
-        decodingLoop(state);
+        state->decodeLoop->run();
     });
     
     // 启动音频播放
@@ -188,43 +213,6 @@ bool getMediaDimensions(PlayerEngineHandle handle, int* width, int* height) {
     return true;
 }
 
-// 内部函数实现
-static void decodingLoop(PlayerEngineState* state) {
-    AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    
-    AVFormatContext* formatContext = getFormatContext();
-    AVCodecContext* videoCodecContext = getVideoCodecContext();
-    AVCodecContext* audioCodecContext = getAudioCodecContext();
-    
-    while (!state->shouldStop && av_read_frame(formatContext, packet) >= 0) {
-        if (state->hasVideo && packet->stream_index == state->videoInfo.streamIndex) {
-            if (avcodec_send_packet(videoCodecContext, packet) == 0) {
-                while (avcodec_receive_frame(videoCodecContext, frame) == 0) {
-                    // 使用新的视频状态接口
-                    pushVideoFrame(frame);
-                }
-            }
-        } else if (state->hasAudio && packet->stream_index == state->audioInfo.streamIndex) {
-            if (avcodec_send_packet(audioCodecContext, packet) == 0) {
-                while (avcodec_receive_frame(audioCodecContext, frame) == 0) {
-                    pushAudioFrame(frame);
-                }
-            }
-        }
-        
-        av_packet_unref(packet);
-        
-        // 队列大小控制 - 使用新接口
-        if (isVideoQueueFull()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
-    
-    av_packet_free(&packet);
-    av_frame_free(&frame);
-}
-
 static void renderLoop(PlayerEngineState* state) {
     while (state->playing && !state->shouldStop) {
         // 获取当前时间
@@ -246,7 +234,6 @@ static void renderLoop(PlayerEngineState* state) {
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
     }
 }
-
 
 void destroyCurrentPlayerEngine() {
     if (g_currentPlayerEngine) {
