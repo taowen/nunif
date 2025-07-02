@@ -9,4 +9,4 @@ if %ERRORLEVEL% neq 0 (
 )
 popd
 :: Run with verbose output to see stdout
-spike\build\Debug\spike.exe "c:\Users\taowen\Downloads\iw3\test.mkv"
+spike\build\Debug\spike.exe

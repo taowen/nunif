@@ -22,7 +22,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(spike src/mkv_player.cpp src/shader_utils.cpp src/vertex_buffer_utils.cpp src/audio_state.cpp src/dx11_renderer.cpp src/ffmpeg_handler.cpp src/player_engine.cpp src/video_state.cpp src/decode_loop.cpp)
+add_executable(spike tests/test_video_file_info.cpp src/video_file_info.cpp)
 
 # Link Catch2 to the executable
 target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
