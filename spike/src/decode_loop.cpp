@@ -28,9 +28,9 @@ void DecodeLoop::run() {
     }
     
     AVPacket* packet = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
     
     while (!m_state.shouldStop->load() && av_read_frame(m_formatContext, packet) >= 0) {
+        AVFrame* frame = av_frame_alloc();
         if (m_state.hasVideo && packet->stream_index == m_state.videoStreamIndex) {
             processVideoPacket(packet, frame);
         } else if (m_state.hasAudio && packet->stream_index == m_state.audioStreamIndex) {
@@ -46,7 +46,6 @@ void DecodeLoop::run() {
     }
     
     av_packet_free(&packet);
-    av_frame_free(&frame);
 }
 
 void DecodeLoop::processVideoPacket(AVPacket* packet, AVFrame* frame) {
