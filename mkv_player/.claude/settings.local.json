@@ -6,7 +6,12 @@
       "Bash(buildDebugspike.exe)",
       "Bash(mv:*)",
       "Bash(grep:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(./spike.exe --list-tests)",
+      "Bash(./spike.exe -t \"[packet_demuxer],[frame_decoder]\" \"~[requires_test_file]\")",
+      "Bash(./build/Debug/spike.exe \"[packet_demuxer]\" \"~[requires_test_file]\")",
+      "Bash(./build/Debug/spike.exe \"[frame_decoder]\" \"~[requires_test_file]\")",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

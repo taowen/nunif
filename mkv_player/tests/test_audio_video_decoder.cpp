@@ -1,5 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
-#include "../src/audio_video_decoder.h"
+#include "../src/audio_video_decoder_old.h"
 #include "../src/mkv_stream_reader.h"
 #include <filesystem>
 #include <iostream>
