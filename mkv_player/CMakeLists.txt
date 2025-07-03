@@ -16,13 +16,14 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/catchorg/Catch2.git
     GIT_TAG        v3.4.0  # 或者使用最新的稳定版本
     GIT_SHALLOW    TRUE
+    UPDATE_DISCONNECTED TRUE
 )
 FetchContent_MakeAvailable(Catch2)
 
-add_executable(spike src/main.cpp)
+add_executable(spike tests/test_mkv_stream_reader.cpp src/mkv_stream_reader.cpp)
 
 # Link Catch2 to the executable
-# target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
+target_link_libraries(spike PRIVATE Catch2::Catch2WithMain)
 
 # Apply Windows/MSVC compile options
 target_compile_options(spike PRIVATE

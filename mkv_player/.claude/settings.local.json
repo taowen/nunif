@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe:*)",
+      "Bash(mkdir:*)",
+      "Bash(buildDebugspike.exe)"
+    ],
+    "deny": []
+  }
+}
