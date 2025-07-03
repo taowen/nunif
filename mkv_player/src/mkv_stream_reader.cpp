@@ -136,6 +136,20 @@ double MKVStreamReader::getCurrentTime() const {
     return 0.0;
 }
 
+AVCodecParameters* MKVStreamReader::getVideoCodecParameters() const {
+    if (!is_open_ || stream_info_.video_stream_index < 0) {
+        return nullptr;
+    }
+    return format_context_->streams[stream_info_.video_stream_index]->codecpar;
+}
+
+AVCodecParameters* MKVStreamReader::getAudioCodecParameters() const {
+    if (!is_open_ || stream_info_.audio_stream_index < 0) {
+        return nullptr;
+    }
+    return format_context_->streams[stream_info_.audio_stream_index]->codecpar;
+}
+
 void MKVStreamReader::close() {
     if (format_context_) {
         avformat_close_input(&format_context_);

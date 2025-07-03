@@ -3,7 +3,10 @@
     "allow": [
       "Bash(cmd.exe:*)",
       "Bash(mkdir:*)",
-      "Bash(buildDebugspike.exe)"
+      "Bash(buildDebugspike.exe)",
+      "Bash(mv:*)",
+      "Bash(grep:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }

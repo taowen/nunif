@@ -46,6 +46,10 @@ public:
     bool isEOF() const;
     double getCurrentTime() const;
     
+    // 获取编解码器参数（用于解码器初始化）
+    AVCodecParameters* getVideoCodecParameters() const;
+    AVCodecParameters* getAudioCodecParameters() const;
+    
     void close();
 
 private:
