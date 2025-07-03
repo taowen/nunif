@@ -64,8 +64,3 @@ cmd.exe /c "build\\Debug\\spike.exe --help"
 - CUDA 12.9 (位于 C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9)
 - TensorRT 10 (位于 C:/Program Files/NVIDIA GPU Computing Toolkit/TensorRT)
 - Catch2 v3.4.0 (通过FetchContent自动获取)
-
-## 注意事项
-- 项目使用C++20标准
-- 在WSL中可以直接调用Windows构建工具
-- 无需SSH到Windows环境

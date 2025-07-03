@@ -2,8 +2,8 @@
 #include "../src/mkv_stream_reader.h"
 #include <filesystem>
 
-// 测试用MKV文件路径 - 需要你提供一个真实的MKV文件
-const std::string TEST_MKV_FILE = "test_data/sample.mkv";
+// 测试用MKV文件路径 - 使用硬件解码器友好的测试文件
+const std::string TEST_MKV_FILE = "test_data/sample_hw.mkv";
 
 TEST_CASE("MKVStreamReader basic functionality", "[mkv_reader]") {
     MKVStreamReader reader;
