@@ -56,12 +56,16 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
                      << "x" << decoded_frames.rgb_frame.height << std::endl;
             std::cout << "Frame timestamp: " << decoded_frames.rgb_frame.timestamp << std::endl;
             
-            // 1. 读取纹理数据
+            // 1. 读取纹理数据 - 使用RGB解码器的D3D11设备，不是测试创建的设备
             std::vector<RGBVerification::PixelData> pixel_data;
             int width, height;
             
+            // 获取RGB解码器内部使用的D3D11设备
+            ID3D11Device* rgb_device = decoder.getFrameDecoder()->getD3D11Device();
+            ID3D11DeviceContext* rgb_context = decoder.getFrameDecoder()->getD3D11Context();
+            
             bool read_success = RGBVerification::readTextureData(
-                device, context, decoded_frames.rgb_frame.rgb_texture, 
+                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture, 
                 pixel_data, width, height
             );
             
@@ -95,7 +99,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
             bool save_success = RGBVerification::saveTextureAsBMP(
-                device, context, decoded_frames.rgb_frame.rgb_texture, filename
+                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture, filename
             );
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;

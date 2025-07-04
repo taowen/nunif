@@ -59,6 +59,9 @@ public:
     int getVideoWidth() const { return video_width_; }
     int getVideoHeight() const { return video_height_; }
     
+    // 获取内部FrameDecoder的访问（用于测试）
+    FrameDecoder* getFrameDecoder() { return &frame_decoder_; }
+    
     // 资源管理
     void flush();
     void close();
