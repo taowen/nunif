@@ -50,35 +50,28 @@ bool FrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 5. 创建DirectX11设备
-    if (!createD3D11Device()) {
-        std::cerr << "Failed to create D3D11 device" << std::endl;
-        demuxer_.close();
-        return false;
-    }
-    
-    // 6. 创建硬件上下文
+    // 5. 创建硬件上下文（FFmpeg会创建自己的D3D11设备）
     if (!createHardwareContext()) {
         std::cerr << "Failed to create hardware context" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 7. 配置视频解码器
+    // 6. 配置视频解码器
     if (!configureVideoDecoder(video_codec_params)) {
         std::cerr << "Failed to configure video decoder" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 8. 配置音频解码器
+    // 7. 配置音频解码器
     if (!configureAudioDecoder(audio_codec_params)) {
         std::cerr << "Failed to configure audio decoder" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 9. 初始化音频重采样器
+    // 8. 初始化音频重采样器
     if (!initializeAudioResampler()) {
         std::cerr << "Failed to initialize audio resampler" << std::endl;
         demuxer_.close();
@@ -269,7 +262,33 @@ bool FrameDecoder::createHardwareContext() {
         return false;
     }
     
+    // 从硬件设备上下文中提取D3D11设备和设备上下文（参考d11_decode.cpp）
+    AVHWDeviceContext* hw_device_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
+    AVD3D11VADeviceContext* d3d11_device_ctx = (AVD3D11VADeviceContext*)hw_device_ctx->hwctx;
+    
+    // 使用FFmpeg创建的D3D11设备，而不是自己创建的
+    if (d3d11_device_) {
+        d3d11_device_->Release();
+        d3d11_device_ = nullptr;
+    }
+    if (d3d11_context_) {
+        d3d11_context_->Release();
+        d3d11_context_ = nullptr;
+    }
+    
+    d3d11_device_ = d3d11_device_ctx->device;
+    d3d11_context_ = d3d11_device_ctx->device_context;
+    
+    // 增加引用计数，防止FFmpeg释放时导致野指针
+    if (d3d11_device_) {
+        d3d11_device_->AddRef();
+    }
+    if (d3d11_context_) {
+        d3d11_context_->AddRef();
+    }
+    
     std::cout << "D3D11VA hardware context created successfully" << std::endl;
+    std::cout << "Using FFmpeg's D3D11 device for hardware acceleration" << std::endl;
     return true;
 }
 
