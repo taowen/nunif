@@ -174,74 +174,9 @@ AVPacket* PacketDemuxer::findBestVideoPacket(double target_timestamp) {
         return nullptr;
     }
     
-    AVPacket* best_packet = nullptr;
-    double min_diff = std::numeric_limits<double>::max();
-    
-    // 创建临时队列来存储检查过的包
-    std::queue<AVPacket*> temp_queue;
-    
-    // 遍历视频缓冲区找到最佳匹配
-    while (!video_buffer_.empty()) {
-        AVPacket* pkt = video_buffer_.front();
-        video_buffer_.pop();
-        
-        double video_ts = getPacketTimestamp(pkt, false);
-        double diff = std::abs(video_ts - target_timestamp);
-        
-        // 如果这个包更接近目标时间戳
-        if (diff < min_diff) {
-            // 释放之前的最佳包（如果有）
-            if (best_packet) {
-                av_packet_free(&best_packet);
-            }
-            best_packet = pkt;
-            min_diff = diff;
-        } else {
-            // 如果时间戳已经超过目标太多，保留在缓冲区
-            if (video_ts > target_timestamp + SYNC_THRESHOLD) {
-                temp_queue.push(pkt);
-                break;
-            } else {
-                // 丢弃过时的包
-                av_packet_free(&pkt);
-            }
-        }
-        
-        // 如果找到足够好的匹配，停止搜索
-        if (min_diff < SYNC_THRESHOLD / 2) {
-            break;
-        }
-    }
-    
-    // 将剩余的包放回缓冲区
-    while (!video_buffer_.empty()) {
-        temp_queue.push(video_buffer_.front());
-        video_buffer_.pop();
-    }
-    
-    // 恢复缓冲区
-    video_buffer_ = std::move(temp_queue);
-    
-    // 如果没有找到合适的视频包，但差异太大，返回nullptr
-    if (best_packet && min_diff > SYNC_THRESHOLD) {
-        // 如果视频包太新，放回缓冲区
-        if (getPacketTimestamp(best_packet, false) > target_timestamp) {
-            // 创建新队列，将best_packet放在前面
-            std::queue<AVPacket*> new_queue;
-            new_queue.push(best_packet);
-            while (!video_buffer_.empty()) {
-                new_queue.push(video_buffer_.front());
-                video_buffer_.pop();
-            }
-            video_buffer_ = std::move(new_queue);
-            best_packet = nullptr;
-        }
-        // 如果视频包太旧，直接丢弃
-        else {
-            av_packet_free(&best_packet);
-            best_packet = nullptr;
-        }
-    }
+    // 简化逻辑：直接获取队列的第一个包，不再进行复杂的同步和丢弃
+    AVPacket* best_packet = video_buffer_.front();
+    video_buffer_.pop();
     
     return best_packet;
 }

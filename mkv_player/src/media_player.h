@@ -4,6 +4,7 @@
 #include "rgb_frame_decoder.h"
 #include <memory>
 #include <string>
+#include <chrono>
 
 /**
  * 媒体播放器类
@@ -87,6 +88,7 @@ private:
     // 同步相关
     double last_video_timestamp_;
     double last_audio_timestamp_;
+    std::chrono::high_resolution_clock::time_point playback_start_time_;
     
     // 内部方法
     bool initializeSink();

@@ -7,6 +7,9 @@
 #include <Windows.h>
 #include <dsound.h>
 #include <chrono>
+#include <wrl/client.h>
+
+using Microsoft::WRL::ComPtr;
 
 /**
  * GUI媒体播放Sink实现
@@ -47,22 +50,22 @@ private:
     bool window_should_close_;
     
     // DirectX11渲染组件
-    ID3D11Device* d3d11_device_;
-    ID3D11DeviceContext* d3d11_context_;
-    IDXGISwapChain* swap_chain_;
-    ID3D11RenderTargetView* render_target_view_;
+    ComPtr<ID3D11Device> d3d11_device_;
+    ComPtr<ID3D11DeviceContext> d3d11_context_;
+    ComPtr<IDXGISwapChain> swap_chain_;
+    ComPtr<ID3D11RenderTargetView> render_target_view_;
     
     // 渲染管线
-    ID3D11VertexShader* vertex_shader_;
-    ID3D11PixelShader* pixel_shader_;
-    ID3D11InputLayout* input_layout_;
-    ID3D11Buffer* vertex_buffer_;
-    ID3D11SamplerState* sampler_state_;
+    ComPtr<ID3D11VertexShader> vertex_shader_;
+    ComPtr<ID3D11PixelShader> pixel_shader_;
+    ComPtr<ID3D11InputLayout> input_layout_;
+    ComPtr<ID3D11Buffer> vertex_buffer_;
+    ComPtr<ID3D11SamplerState> sampler_state_;
     D3D11_VIEWPORT viewport_;
     
     // DirectSound音频组件
-    IDirectSound8* dsound_;
-    IDirectSoundBuffer8* sound_buffer_;
+    ComPtr<IDirectSound8> dsound_;
+    ComPtr<IDirectSoundBuffer8> sound_buffer_;
     DWORD sound_buffer_size_;
     DWORD write_position_;
     

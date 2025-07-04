@@ -99,7 +99,7 @@ private:
     bool video_processor_initialized_;
     
     // 内部方法
-    bool convertNV12ToRGB(AVFrame* nv12_frame, TextureSlot* slot);
+    bool convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_frame, TextureSlot* slot);
     bool ensureVideoProcessor();
     bool createTextureSlot(TextureSlot* slot, int width, int height);
     void releaseTextureSlot(TextureSlot* slot);

@@ -100,21 +100,21 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         return false;
     }
     
-    // 从池中获取音频帧
-    decoded_frames.audio_frame.frame = getNextAudioFrame();
-    if (!decoded_frames.audio_frame.frame) {
-        decoded_frames.audio_frame.is_valid = false;
-        decoded_frames.video_frame.is_valid = false;
-        return false;
-    }
-    
-    // 从池中获取视频帧
-    decoded_frames.video_frame.frame = getNextVideoFrame();
-    if (!decoded_frames.video_frame.frame) {
-        decoded_frames.audio_frame.is_valid = false;
-        decoded_frames.video_frame.is_valid = false;
-        return false;
-    }
+    // 从池中获取下一帧的索引
+    int audio_idx = current_audio_frame_index_;
+    int video_idx = current_video_frame_index_;
+    AVFrame* audio_frame = audio_frame_pool_[audio_idx];
+    AVFrame* video_frame = video_frame_pool_[video_idx];
+
+    // 清理之前的数据
+    av_frame_unref(audio_frame);
+    av_frame_unref(video_frame);
+
+    // 设置帧的所有权信息
+    decoded_frames.audio_frame.owner = this;
+    decoded_frames.audio_frame.pool_index = audio_idx;
+    decoded_frames.video_frame.owner = this;
+    decoded_frames.video_frame.pool_index = video_idx;
     
     // 重置有效标志
     decoded_frames.audio_frame.is_valid = false;
@@ -134,7 +134,7 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     if (synced_packets.audio_packet) {
         decoded_frames.audio_frame.is_valid = decodeAudioPacket(
             synced_packets.audio_packet, 
-            decoded_frames.audio_frame.frame
+            audio_frame
         );
         av_packet_free(&synced_packets.audio_packet);
     }
@@ -143,9 +143,17 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     if (synced_packets.video_packet) {
         decoded_frames.video_frame.is_valid = decodeVideoPacket(
             synced_packets.video_packet,
-            decoded_frames.video_frame.frame
+            video_frame
         );
         av_packet_free(&synced_packets.video_packet);
+    }
+
+    // 如果成功解码，移动到下一个槽位
+    if (decoded_frames.audio_frame.is_valid) {
+        current_audio_frame_index_ = (current_audio_frame_index_ + 1) % AVFRAME_POOL_SIZE;
+    }
+    if (decoded_frames.video_frame.is_valid) {
+        current_video_frame_index_ = (current_video_frame_index_ + 1) % AVFRAME_POOL_SIZE;
     }
     
     // 至少要有一个有效帧
@@ -221,6 +229,14 @@ const char* FrameDecoder::getAudioCodecName() const {
     }
     return nullptr;
 }
+
+AVFrame* FrameDecoder::getFrameFromPool(int index, bool is_audio) const {
+    if (index < 0 || index >= AVFRAME_POOL_SIZE) {
+        return nullptr;
+    }
+    return is_audio ? audio_frame_pool_[index] : video_frame_pool_[index];
+}
+
 
 void FrameDecoder::flush() {
     if (is_initialized_) {
@@ -459,37 +475,6 @@ void FrameDecoder::initializeFramePools() {
     current_video_frame_index_ = 0;
 }
 
-AVFrame* FrameDecoder::getNextAudioFrame() {
-    if (!audio_frame_pool_[current_audio_frame_index_]) {
-        return nullptr;
-    }
-    
-    AVFrame* frame = audio_frame_pool_[current_audio_frame_index_];
-    
-    // 清理之前的数据
-    av_frame_unref(frame);
-    
-    // 移动到下一个槽位
-    current_audio_frame_index_ = (current_audio_frame_index_ + 1) % AVFRAME_POOL_SIZE;
-    
-    return frame;
-}
-
-AVFrame* FrameDecoder::getNextVideoFrame() {
-    if (!video_frame_pool_[current_video_frame_index_]) {
-        return nullptr;
-    }
-    
-    AVFrame* frame = video_frame_pool_[current_video_frame_index_];
-    
-    // 清理之前的数据
-    av_frame_unref(frame);
-    
-    // 移动到下一个槽位
-    current_video_frame_index_ = (current_video_frame_index_ + 1) % AVFRAME_POOL_SIZE;
-    
-    return frame;
-}
 
 void FrameDecoder::releaseFramePools() {
     // 释放音频帧池

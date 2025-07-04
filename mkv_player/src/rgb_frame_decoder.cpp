@@ -92,20 +92,15 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         return false;
     }
     
-    // 1. 从内部FrameDecoder获取原始帧
+    // 1. 从内部FrameDecoder获取原始帧的描述信息（非指针）
     FrameDecoder::DecodedFrames raw_frames;
-    raw_frames.video_frame.frame = av_frame_alloc();
-    raw_frames.audio_frame.frame = av_frame_alloc();
-    
     if (!frame_decoder_.readNextFrames(raw_frames)) {
-        av_frame_free(&raw_frames.video_frame.frame);
-        av_frame_free(&raw_frames.audio_frame.frame);
         decoded_frames.audio_frame.is_valid = false;
         decoded_frames.rgb_frame.is_valid = false;
         return false;
     }
     
-    // 2. 直接传递音频帧
+    // 2. 直接传递音频帧描述符
     decoded_frames.audio_frame = raw_frames.audio_frame;
     
     // 3. 转换视频帧为RGB（使用纹理池）
@@ -117,13 +112,12 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         if (!slot->is_created || slot->width != video_width_ || slot->height != video_height_) {
             if (!createTextureSlot(slot, video_width_, video_height_)) {
                 decoded_frames.rgb_frame.is_valid = false;
-                av_frame_free(&raw_frames.video_frame.frame);
                 return false;
             }
         }
         
         // 转换到纹理槽
-        if (convertNV12ToRGB(raw_frames.video_frame.frame, slot)) {
+        if (convertNV12ToRGB(raw_frames.video_frame, slot)) {
             decoded_frames.rgb_frame.rgb_texture = slot->texture;
             decoded_frames.rgb_frame.rgb_srv = slot->srv;
             decoded_frames.rgb_frame.width = slot->width;
@@ -140,14 +134,14 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         decoded_frames.rgb_frame.is_valid = false;
     }
     
-    // 4. 释放原始视频帧（音频帧已转移）
-    av_frame_free(&raw_frames.video_frame.frame);
+    // 4. 注意：不再需要释放任何AVFrame，因为所有权从未转移
     
     return decoded_frames.audio_frame.is_valid || decoded_frames.rgb_frame.is_valid;
 }
 
 
-bool RGBFrameDecoder::convertNV12ToRGB(AVFrame* nv12_frame, TextureSlot* slot) {
+bool RGBFrameDecoder::convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_frame_desc, TextureSlot* slot) {
+    AVFrame* nv12_frame = nv12_frame_desc.get();
     if (!nv12_frame || !d3d11_device_ || !d3d11_context_ || !slot) {
         std::cerr << "Error: Invalid frame, device, or slot provided." << std::endl;
         return false;

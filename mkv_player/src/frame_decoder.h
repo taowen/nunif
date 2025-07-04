@@ -15,9 +15,25 @@ extern "C" {
 class FrameDecoder {
 public:
     struct DecodedFrame {
-        AVFrame* frame = nullptr;
+        FrameDecoder* owner = nullptr; // 指向拥有此帧的解码器
+        int pool_index = -1;           // 在池中的索引
         double timestamp = 0.0;
         bool is_valid = false;
+
+        AVFrame* get() const {
+            if (owner && pool_index != -1) {
+                return owner->getFrameFromPool(pool_index, false); // false for video
+            }
+            return nullptr;
+        }
+
+        // 兼容音频帧的get方法
+        AVFrame* getAudioFrame() const {
+            if (owner && pool_index != -1) {
+                return owner->getFrameFromPool(pool_index, true); // true for audio
+            }
+            return nullptr;
+        }
     };
     
     struct DecodedFrames {
@@ -50,6 +66,9 @@ public:
     // 获取内部D3D11设备（用于RGB转换器）
     ID3D11Device* getD3D11Device() { return d3d11_device_; }
     ID3D11DeviceContext* getD3D11Context() { return d3d11_context_; }
+    
+    // 获取池中的帧（供DecodedFrame使用）
+    AVFrame* getFrameFromPool(int index, bool is_audio) const;
     
     // 资源管理
     void flush();

@@ -5,9 +5,14 @@
 #include <thread>
 #include <chrono>
 
-int main() {
-    std::cout << "=== GUI Media Player Test ===" << std::endl;
+int main(int argc, char* argv[]) {
+    std::cout << "=== GUI Media Player ===" << std::endl;
     
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <path_to_mkv_file>" << std::endl;
+        return 1;
+    }
+
     // 创建GUI sink
     auto gui_sink = std::make_unique<GUIMediaSink>();
     
@@ -18,19 +23,17 @@ int main() {
         return 1;
     }
     
-    // 打开测试文件
-    std::string test_file = "test_data/sample_hw.mkv";
-    if (!player.openFile(test_file)) {
-        std::cerr << "Failed to open test file: " << test_file << std::endl;
+    // 打开文件
+    std::string media_file = argv[1];
+    if (!player.openFile(media_file)) {
+        std::cerr << "Failed to open file: " << media_file << std::endl;
         return 1;
     }
     
-    std::cout << "\\nStarting GUI playback..." << std::endl;
+    std::cout << "\\nPlaying: " << media_file << std::endl;
     std::cout << "Controls:" << std::endl;
     std::cout << "  SPACE - Pause/Resume" << std::endl;
     std::cout << "  ESC   - Exit" << std::endl;
-    std::cout << "\\nPress any key to start...";
-    std::cin.get();
     
     // 获取GUI sink的窗口句柄
     GUIMediaSink* gui_sink_ptr = static_cast<GUIMediaSink*>(player.getMediaSink());
@@ -41,9 +44,8 @@ int main() {
     
     // 主播放循环
     int frames_played = 0;
-    const int max_frames = 1000; // 播放最多1000帧，防止无限循环
-    
-    while (frames_played < max_frames) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    while (true) {
         // 处理窗口消息
         if (!gui_sink_ptr->processWindowMessages()) {
             std::cout << "\\nUser requested exit." << std::endl;
@@ -57,7 +59,10 @@ int main() {
         }
         
         frames_played++;
-        
+        auto current_time = std::chrono::high_resolution_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
+        std::cout << "\\rFrames played: " << frames_played << " | Elapsed time: " << elapsed_ms << "ms" << std::flush;
+
         // 短暂休眠以避免过度占用CPU
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }

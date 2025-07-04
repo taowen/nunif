@@ -68,17 +68,6 @@ LRESULT CALLBACK GUIMediaSink::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 GUIMediaSink::GUIMediaSink()
     : window_handle_(nullptr)
     , window_should_close_(false)
-    , d3d11_device_(nullptr)
-    , d3d11_context_(nullptr)
-    , swap_chain_(nullptr)
-    , render_target_view_(nullptr)
-    , vertex_shader_(nullptr)
-    , pixel_shader_(nullptr)
-    , input_layout_(nullptr)
-    , vertex_buffer_(nullptr)
-    , sampler_state_(nullptr)
-    , dsound_(nullptr)
-    , sound_buffer_(nullptr)
     , sound_buffer_size_(0)
     , write_position_(0)
     , audio_clock_(0.0)
@@ -354,15 +343,14 @@ bool GUIMediaSink::initializeDirectX11() {
     }
     
     // 创建渲染目标视图
-    ID3D11Texture2D* back_buffer = nullptr;
-    hr = swap_chain_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back_buffer);
+    ComPtr<ID3D11Texture2D> back_buffer;
+    hr = swap_chain_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)back_buffer.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Failed to get back buffer" << std::endl;
         return false;
     }
     
-    hr = d3d11_device_->CreateRenderTargetView(back_buffer, nullptr, &render_target_view_);
-    back_buffer->Release();
+    hr = d3d11_device_->CreateRenderTargetView(back_buffer.Get(), nullptr, &render_target_view_);
     
     if (FAILED(hr)) {
         std::cerr << "Failed to create render target view" << std::endl;
@@ -378,7 +366,7 @@ bool GUIMediaSink::initializeDirectX11() {
     viewport_.MaxDepth = 1.0f;
     
     d3d11_context_->RSSetViewports(1, &viewport_);
-    d3d11_context_->OMSetRenderTargets(1, &render_target_view_, nullptr);
+    d3d11_context_->OMSetRenderTargets(1, render_target_view_.GetAddressOf(), nullptr);
     
     return true;
 }
@@ -417,16 +405,15 @@ bool GUIMediaSink::initializeDirectSound() {
     buffer_desc.lpwfxFormat = &wave_format;
     
     // 创建音频缓冲区
-    IDirectSoundBuffer* temp_buffer = nullptr;
-    hr = dsound_->CreateSoundBuffer(&buffer_desc, &temp_buffer, nullptr);
+    ComPtr<IDirectSoundBuffer> temp_buffer;
+    hr = dsound_->CreateSoundBuffer(&buffer_desc, temp_buffer.GetAddressOf(), nullptr);
     if (FAILED(hr)) {
         std::cerr << "Failed to create sound buffer" << std::endl;
         return false;
     }
     
     // 查询IDirectSoundBuffer8接口
-    hr = temp_buffer->QueryInterface(IID_IDirectSoundBuffer8, (void**)&sound_buffer_);
-    temp_buffer->Release();
+    hr = temp_buffer->QueryInterface(IID_IDirectSoundBuffer8, (void**)sound_buffer_.GetAddressOf());
     
     if (FAILED(hr)) {
         std::cerr << "Failed to query IDirectSoundBuffer8 interface" << std::endl;
@@ -441,8 +428,8 @@ bool GUIMediaSink::initializeDirectSound() {
 
 bool GUIMediaSink::createRenderPipeline() {
     // 编译顶点着色器
-    ID3DBlob* vs_blob = nullptr;
-    ID3DBlob* error_blob = nullptr;
+    ComPtr<ID3DBlob> vs_blob;
+    ComPtr<ID3DBlob> error_blob;
     
     const char* vs_source = getVertexShaderSource();
     HRESULT hr = D3DCompile(vs_source, strlen(vs_source), nullptr, nullptr, nullptr,
@@ -452,7 +439,6 @@ bool GUIMediaSink::createRenderPipeline() {
         if (error_blob) {
             std::cerr << "Vertex shader compilation error: " 
                       << (char*)error_blob->GetBufferPointer() << std::endl;
-            error_blob->Release();
         }
         return false;
     }
@@ -461,7 +447,6 @@ bool GUIMediaSink::createRenderPipeline() {
                                           vs_blob->GetBufferSize(), 
                                           nullptr, &vertex_shader_);
     if (FAILED(hr)) {
-        vs_blob->Release();
         return false;
     }
     
@@ -475,14 +460,14 @@ bool GUIMediaSink::createRenderPipeline() {
                                          vs_blob->GetBufferPointer(),
                                          vs_blob->GetBufferSize(),
                                          &input_layout_);
-    vs_blob->Release();
     
     if (FAILED(hr)) {
         return false;
     }
     
     // 编译像素着色器
-    ID3DBlob* ps_blob = nullptr;
+    ComPtr<ID3DBlob> ps_blob;
+    error_blob.Reset(); // 重置错误blob
     const char* ps_source = getPixelShaderSource();
     hr = D3DCompile(ps_source, strlen(ps_source), nullptr, nullptr, nullptr,
                    "main", "ps_5_0", 0, 0, &ps_blob, &error_blob);
@@ -491,7 +476,6 @@ bool GUIMediaSink::createRenderPipeline() {
         if (error_blob) {
             std::cerr << "Pixel shader compilation error: " 
                       << (char*)error_blob->GetBufferPointer() << std::endl;
-            error_blob->Release();
         }
         return false;
     }
@@ -499,7 +483,6 @@ bool GUIMediaSink::createRenderPipeline() {
     hr = d3d11_device_->CreatePixelShader(ps_blob->GetBufferPointer(),
                                          ps_blob->GetBufferSize(),
                                          nullptr, &pixel_shader_);
-    ps_blob->Release();
     
     if (FAILED(hr)) {
         return false;
@@ -548,22 +531,22 @@ bool GUIMediaSink::createRenderPipeline() {
 void GUIMediaSink::renderTextureToScreen(ID3D11Texture2D* texture, ID3D11ShaderResourceView* srv) {
     // 清空渲染目标
     float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    d3d11_context_->ClearRenderTargetView(render_target_view_, clear_color);
+    d3d11_context_->ClearRenderTargetView(render_target_view_.Get(), clear_color);
     
     // 设置渲染管线
-    d3d11_context_->IASetInputLayout(input_layout_);
-    d3d11_context_->VSSetShader(vertex_shader_, nullptr, 0);
-    d3d11_context_->PSSetShader(pixel_shader_, nullptr, 0);
+    d3d11_context_->IASetInputLayout(input_layout_.Get());
+    d3d11_context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
+    d3d11_context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
     
     // 设置顶点缓冲区
     UINT stride = sizeof(float) * 4; // x, y, u, v
     UINT offset = 0;
-    d3d11_context_->IASetVertexBuffers(0, 1, &vertex_buffer_, &stride, &offset);
+    d3d11_context_->IASetVertexBuffers(0, 1, vertex_buffer_.GetAddressOf(), &stride, &offset);
     d3d11_context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     
     // 设置纹理和采样器
     d3d11_context_->PSSetShaderResources(0, 1, &srv);
-    d3d11_context_->PSSetSamplers(0, 1, &sampler_state_);
+    d3d11_context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
     
     // 绘制全屏四边形
     d3d11_context_->Draw(4, 0);
@@ -572,59 +555,20 @@ void GUIMediaSink::renderTextureToScreen(ID3D11Texture2D* texture, ID3D11ShaderR
 void GUIMediaSink::releaseResources() {
     if (sound_buffer_) {
         sound_buffer_->Stop();
-        sound_buffer_->Release();
-        sound_buffer_ = nullptr;
     }
     
-    if (dsound_) {
-        dsound_->Release();
-        dsound_ = nullptr;
-    }
-    
-    if (sampler_state_) {
-        sampler_state_->Release();
-        sampler_state_ = nullptr;
-    }
-    
-    if (vertex_buffer_) {
-        vertex_buffer_->Release();
-        vertex_buffer_ = nullptr;
-    }
-    
-    if (input_layout_) {
-        input_layout_->Release();
-        input_layout_ = nullptr;
-    }
-    
-    if (pixel_shader_) {
-        pixel_shader_->Release();
-        pixel_shader_ = nullptr;
-    }
-    
-    if (vertex_shader_) {
-        vertex_shader_->Release();
-        vertex_shader_ = nullptr;
-    }
-    
-    if (render_target_view_) {
-        render_target_view_->Release();
-        render_target_view_ = nullptr;
-    }
-    
-    if (swap_chain_) {
-        swap_chain_->Release();
-        swap_chain_ = nullptr;
-    }
-    
-    if (d3d11_context_) {
-        d3d11_context_->Release();
-        d3d11_context_ = nullptr;
-    }
-    
-    if (d3d11_device_) {
-        d3d11_device_->Release();
-        d3d11_device_ = nullptr;
-    }
+    // ComPtr会处理所有COM对象的释放
+    d3d11_device_.Reset();
+    d3d11_context_.Reset();
+    swap_chain_.Reset();
+    render_target_view_.Reset();
+    vertex_shader_.Reset();
+    pixel_shader_.Reset();
+    input_layout_.Reset();
+    vertex_buffer_.Reset();
+    sampler_state_.Reset();
+    dsound_.Reset();
+    sound_buffer_.Reset();
 }
 
 const char* GUIMediaSink::getVertexShaderSource() {
