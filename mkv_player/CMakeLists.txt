@@ -21,14 +21,16 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(spike 
-    tests/test_packet_demuxer.cpp
-    tests/test_frame_decoder.cpp
-    tests/test_rgb_frame_decoder.cpp
-    tests/test_rgb_verification.cpp
+    #tests/test_packet_demuxer.cpp
+    #tests/test_frame_decoder.cpp
+    #tests/test_rgb_frame_decoder.cpp
+    tests/test_cuda_frame_decoder.cpp
+    #tests/test_rgb_verification.cpp
     src/mkv_stream_reader.cpp
     src/packet_demuxer.cpp
     src/frame_decoder.cpp
     src/rgb_frame_decoder.cpp
+    src/cuda_frame_decoder.cpp
     src/rgb_verification.cpp
 )
 

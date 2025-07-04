@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 :: 检查命令行参数
 set TARGET=%1
@@ -22,65 +22,73 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-:: 根据参数决定构建目标
+:: 根据参数设置构建目标和描述
+set BUILD_TARGET=
+set BUILD_DESC=
+set RUN_TESTS=0
+
 if "%TARGET%"=="test" (
-    echo Building test target...
-    cmake --build . --config Debug --target spike
-    if %ERRORLEVEL% neq 0 (
-        echo Build failed! Exiting...
-        popd
-        exit /b %ERRORLEVEL%
-    )
-    echo.
-    echo Running tests...
+    set BUILD_TARGET=spike
+    set BUILD_DESC=test target
+    set RUN_TESTS=1
+    goto :build
+)
+if "%TARGET%"=="cli" (
+    set BUILD_TARGET=cli_player
+    set BUILD_DESC=CLI player
+    set RUN_TESTS=0
+    goto :build
+)
+if "%TARGET%"=="gui" (
+    set BUILD_TARGET=gui_player
+    set BUILD_DESC=GUI player
+    set RUN_TESTS=0
+    goto :build
+)
+if "%TARGET%"=="all" (
+    set BUILD_TARGET=
+    set BUILD_DESC=all targets
+    set RUN_TESTS=1
+    goto :build
+)
+
+echo Unknown target: %TARGET%
+echo.
+echo Usage: build.bat [target]
+echo Available targets:
+echo   test  - Build and run tests (default)
+echo   cli   - Build CLI player only
+echo   gui   - Build GUI player only
+echo   all   - Build all targets
+popd
+exit /b 1
+
+:build
+:: 执行构建
+echo Building !BUILD_DESC!...
+if "!BUILD_TARGET!"=="" (
+    cmake --build . --config Debug
+) else (
+    cmake --build . --config Debug --target !BUILD_TARGET!
+)
+
+if %ERRORLEVEL% neq 0 (
+    echo Build failed! Exiting...
     popd
+    exit /b %ERRORLEVEL%
+)
+
+popd
+echo.
+
+:: 根据目标执行后续操作
+if "!RUN_TESTS!"=="1" (
+    echo Running tests...
     build\Debug\spike.exe
 ) else if "%TARGET%"=="cli" (
-    echo Building CLI player...
-    cmake --build . --config Debug --target cli_player
-    if %ERRORLEVEL% neq 0 (
-        echo Build failed! Exiting...
-        popd
-        exit /b %ERRORLEVEL%
-    )
-    popd
-    echo.
     echo CLI player built successfully!
     echo Run: build\Debug\cli_player.exe
 ) else if "%TARGET%"=="gui" (
-    echo Building GUI player...
-    cmake --build . --config Debug --target gui_player
-    if %ERRORLEVEL% neq 0 (
-        echo Build failed! Exiting...
-        popd
-        exit /b %ERRORLEVEL%
-    )
-    popd
-    echo.
     echo GUI player built successfully!
     echo Run: build\Debug\gui_player.exe
-) else if "%TARGET%"=="all" (
-    echo Building all targets...
-    cmake --build . --config Debug
-    if %ERRORLEVEL% neq 0 (
-        echo Build failed! Exiting...
-        popd
-        exit /b %ERRORLEVEL%
-    )
-    popd
-    echo.
-    echo All targets built successfully!
-    echo Running tests...
-    build\Debug\spike.exe
-) else (
-    echo Unknown target: %TARGET%
-    echo.
-    echo Usage: build.bat [target]
-    echo Available targets:
-    echo   test  - Build and run tests (default)
-    echo   cli   - Build CLI player only
-    echo   gui   - Build GUI player only
-    echo   all   - Build all targets
-    popd
-    exit /b 1
 )
