@@ -64,3 +64,77 @@ copy_cuda_dlls(spike)
 include(cmake/FindTensorRT.cmake)
 target_link_tensorrt(spike)
 copy_tensorrt_dlls(spike)
+
+# CLI Player executable
+add_executable(cli_player
+    src/test_cli_player.cpp
+    src/media_player.cpp
+    src/cli_media_sink.cpp
+    src/mkv_stream_reader.cpp
+    src/packet_demuxer.cpp
+    src/frame_decoder.cpp
+    src/rgb_frame_decoder.cpp
+    src/rgb_verification.cpp
+)
+
+# Apply Windows/MSVC compile options to CLI player
+target_compile_options(cli_player PRIVATE
+    /W4 /WX- /permissive- /std:c++latest
+)
+
+# Link libraries to CLI player
+target_link_libraries(cli_player PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+)
+
+# Link FFmpeg to CLI player
+target_link_ffmpeg(cli_player)
+copy_ffmpeg_dlls(cli_player)
+
+# Link CUDA to CLI player
+target_link_cuda(cli_player)
+copy_cuda_dlls(cli_player)
+
+# Link TensorRT to CLI player
+target_link_tensorrt(cli_player)
+copy_tensorrt_dlls(cli_player)
+
+# GUI Player executable
+add_executable(gui_player
+    src/test_gui_player.cpp
+    src/media_player.cpp
+    src/gui_media_sink.cpp
+    src/mkv_stream_reader.cpp
+    src/packet_demuxer.cpp
+    src/frame_decoder.cpp
+    src/rgb_frame_decoder.cpp
+    src/rgb_verification.cpp
+)
+
+# Apply Windows/MSVC compile options to GUI player
+target_compile_options(gui_player PRIVATE
+    /W4 /WX- /permissive- /std:c++latest
+)
+
+# Link libraries to GUI player (including DirectSound)
+target_link_libraries(gui_player PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+    dsound.lib
+    dxguid.lib
+)
+
+# Link FFmpeg to GUI player
+target_link_ffmpeg(gui_player)
+copy_ffmpeg_dlls(gui_player)
+
+# Link CUDA to GUI player
+target_link_cuda(gui_player)
+copy_cuda_dlls(gui_player)
+
+# Link TensorRT to GUI player
+target_link_tensorrt(gui_player)
+copy_tensorrt_dlls(gui_player)

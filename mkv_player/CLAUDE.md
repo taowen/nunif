@@ -39,8 +39,8 @@ cmd.exe /c "build\\Debug\\spike.exe [frame_decoder]"
 # 运行packet_demuxer相关测试  
 cmd.exe /c "build\\Debug\\spike.exe [packet_demuxer]"
 
-# 运行audio_video_decoder相关测试
-cmd.exe /c "build\\Debug\\spike.exe [audio_video_decoder]"
+# 运行RGB相关测试
+cmd.exe /c "build\\Debug\\spike.exe [rgb_verification]"
 ```
 
 ### 运行测试并显示成功的断言
@@ -57,6 +57,28 @@ cmd.exe /c "build\\Debug\\spike.exe --list-tests"
 ```bash
 cmd.exe /c "build\\Debug\\spike.exe --help"
 ```
+
+## Player Applications
+
+### CLI播放器 (命令行视频播放器)
+```bash
+cmd.exe /c "build\\Debug\\cli_player.exe"
+```
+功能：
+- 将视频帧保存为BMP文件
+- 可配置保存间隔和数量
+- 播放速度控制
+- 用于无头环境测试
+
+### GUI播放器 (图形界面视频播放器)
+```bash
+cmd.exe /c "build\\Debug\\gui_player.exe"
+```
+功能：
+- DirectX11实时视频渲染
+- DirectSound音频播放
+- 键盘控制：SPACE(暂停/恢复), ESC(退出)
+- 实时音视频同步播放
 
 ## 项目依赖
 - DirectX11 (d3d11.lib, dxgi.lib, d3dcompiler.lib)
