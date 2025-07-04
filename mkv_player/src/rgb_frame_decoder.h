@@ -79,7 +79,30 @@ private:
     int video_height_;
     bool is_initialized_;
     
+    // 纹理池 - 3帧循环复用
+    struct TextureSlot {
+        ID3D11Texture2D* texture = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        int width = 0;
+        int height = 0;
+        bool is_created = false;
+    };
+    static const int TEXTURE_POOL_SIZE = 3;
+    TextureSlot texture_pool_[TEXTURE_POOL_SIZE];
+    int current_slot_index_;
+    
+    // Video Processor复用
+    ID3D11VideoDevice* video_device_;
+    ID3D11VideoContext* video_context_;
+    ID3D11VideoProcessorEnumerator* video_enum_;
+    ID3D11VideoProcessor* video_processor_;
+    bool video_processor_initialized_;
+    
     // 内部方法
-    bool convertNV12ToRGB(AVFrame* nv12_frame, RGBFrame& rgb_frame);
+    bool convertNV12ToRGB(AVFrame* nv12_frame, TextureSlot* slot);
+    bool ensureVideoProcessor();
+    bool createTextureSlot(TextureSlot* slot, int width, int height);
+    void releaseTextureSlot(TextureSlot* slot);
+    void releaseVideoProcessor();
     void releaseResources();
 };

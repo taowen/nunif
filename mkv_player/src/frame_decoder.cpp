@@ -10,7 +10,15 @@ FrameDecoder::FrameDecoder()
     , video_codec_(nullptr)
     , audio_codec_(nullptr)
     , audio_resampler_(nullptr)
-    , is_initialized_(false) {
+    , is_initialized_(false)
+    , current_audio_frame_index_(0)
+    , current_video_frame_index_(0) {
+    
+    // 初始化AVFrame池
+    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
+        audio_frame_pool_[i] = nullptr;
+        video_frame_pool_[i] = nullptr;
+    }
 }
 
 FrameDecoder::~FrameDecoder() {
@@ -78,6 +86,9 @@ bool FrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
+    // 9. 初始化AVFrame池
+    initializeFramePools();
+    
     is_initialized_ = true;
     return true;
 }
@@ -89,24 +100,20 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         return false;
     }
     
-    // 分配音频帧
+    // 从池中获取音频帧
+    decoded_frames.audio_frame.frame = getNextAudioFrame();
     if (!decoded_frames.audio_frame.frame) {
-        decoded_frames.audio_frame.frame = av_frame_alloc();
-        if (!decoded_frames.audio_frame.frame) {
-            decoded_frames.audio_frame.is_valid = false;
-            decoded_frames.video_frame.is_valid = false;
-            return false;
-        }
+        decoded_frames.audio_frame.is_valid = false;
+        decoded_frames.video_frame.is_valid = false;
+        return false;
     }
     
-    // 分配视频帧
+    // 从池中获取视频帧
+    decoded_frames.video_frame.frame = getNextVideoFrame();
     if (!decoded_frames.video_frame.frame) {
-        decoded_frames.video_frame.frame = av_frame_alloc();
-        if (!decoded_frames.video_frame.frame) {
-            decoded_frames.audio_frame.is_valid = false;
-            decoded_frames.video_frame.is_valid = false;
-            return false;
-        }
+        decoded_frames.audio_frame.is_valid = false;
+        decoded_frames.video_frame.is_valid = false;
+        return false;
     }
     
     // 重置有效标志
@@ -430,6 +437,77 @@ void FrameDecoder::releaseResources() {
         d3d11_device_ = nullptr;
     }
     
+    // 释放AVFrame池
+    releaseFramePools();
+    
     video_codec_ = nullptr;
     audio_codec_ = nullptr;
+}
+
+void FrameDecoder::initializeFramePools() {
+    // 初始化音频帧池
+    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
+        audio_frame_pool_[i] = av_frame_alloc();
+    }
+    
+    // 初始化视频帧池
+    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
+        video_frame_pool_[i] = av_frame_alloc();
+    }
+    
+    current_audio_frame_index_ = 0;
+    current_video_frame_index_ = 0;
+}
+
+AVFrame* FrameDecoder::getNextAudioFrame() {
+    if (!audio_frame_pool_[current_audio_frame_index_]) {
+        return nullptr;
+    }
+    
+    AVFrame* frame = audio_frame_pool_[current_audio_frame_index_];
+    
+    // 清理之前的数据
+    av_frame_unref(frame);
+    
+    // 移动到下一个槽位
+    current_audio_frame_index_ = (current_audio_frame_index_ + 1) % AVFRAME_POOL_SIZE;
+    
+    return frame;
+}
+
+AVFrame* FrameDecoder::getNextVideoFrame() {
+    if (!video_frame_pool_[current_video_frame_index_]) {
+        return nullptr;
+    }
+    
+    AVFrame* frame = video_frame_pool_[current_video_frame_index_];
+    
+    // 清理之前的数据
+    av_frame_unref(frame);
+    
+    // 移动到下一个槽位
+    current_video_frame_index_ = (current_video_frame_index_ + 1) % AVFRAME_POOL_SIZE;
+    
+    return frame;
+}
+
+void FrameDecoder::releaseFramePools() {
+    // 释放音频帧池
+    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
+        if (audio_frame_pool_[i]) {
+            av_frame_free(&audio_frame_pool_[i]);
+            audio_frame_pool_[i] = nullptr;
+        }
+    }
+    
+    // 释放视频帧池
+    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
+        if (video_frame_pool_[i]) {
+            av_frame_free(&video_frame_pool_[i]);
+            video_frame_pool_[i] = nullptr;
+        }
+    }
+    
+    current_audio_frame_index_ = 0;
+    current_video_frame_index_ = 0;
 }

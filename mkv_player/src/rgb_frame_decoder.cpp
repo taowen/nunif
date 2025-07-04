@@ -12,7 +12,18 @@ RGBFrameDecoder::RGBFrameDecoder()
     , d3d11_context_(nullptr)
     , video_width_(0)
     , video_height_(0)
-    , is_initialized_(false) {
+    , is_initialized_(false)
+    , current_slot_index_(0)
+    , video_device_(nullptr)
+    , video_context_(nullptr)
+    , video_enum_(nullptr)
+    , video_processor_(nullptr)
+    , video_processor_initialized_(false) {
+    
+    // 初始化纹理池
+    for (int i = 0; i < TEXTURE_POOL_SIZE; i++) {
+        texture_pool_[i] = TextureSlot{};
+    }
 }
 
 RGBFrameDecoder::~RGBFrameDecoder() {
@@ -97,10 +108,34 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     // 2. 直接传递音频帧
     decoded_frames.audio_frame = raw_frames.audio_frame;
     
-    // 3. 转换视频帧为RGB
+    // 3. 转换视频帧为RGB（使用纹理池）
     if (raw_frames.video_frame.is_valid) {
-        decoded_frames.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
-        decoded_frames.rgb_frame.is_valid = convertNV12ToRGB(raw_frames.video_frame.frame, decoded_frames.rgb_frame);
+        // 获取当前纹理槽
+        TextureSlot* slot = &texture_pool_[current_slot_index_];
+        
+        // 如果尺寸不匹配，重新创建纹理
+        if (!slot->is_created || slot->width != video_width_ || slot->height != video_height_) {
+            if (!createTextureSlot(slot, video_width_, video_height_)) {
+                decoded_frames.rgb_frame.is_valid = false;
+                av_frame_free(&raw_frames.video_frame.frame);
+                return false;
+            }
+        }
+        
+        // 转换到纹理槽
+        if (convertNV12ToRGB(raw_frames.video_frame.frame, slot)) {
+            decoded_frames.rgb_frame.rgb_texture = slot->texture;
+            decoded_frames.rgb_frame.rgb_srv = slot->srv;
+            decoded_frames.rgb_frame.width = slot->width;
+            decoded_frames.rgb_frame.height = slot->height;
+            decoded_frames.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
+            decoded_frames.rgb_frame.is_valid = true;
+            
+            // 移动到下一个槽位
+            current_slot_index_ = (current_slot_index_ + 1) % TEXTURE_POOL_SIZE;
+        } else {
+            decoded_frames.rgb_frame.is_valid = false;
+        }
     } else {
         decoded_frames.rgb_frame.is_valid = false;
     }
@@ -112,10 +147,9 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
 }
 
 
-bool RGBFrameDecoder::convertNV12ToRGB(AVFrame* nv12_frame, RGBFrame& rgb_frame) {
-    // 基于convert_color.cpp参考代码的完全重写实现
-    if (!nv12_frame || !d3d11_device_ || !d3d11_context_) {
-        std::cerr << "Error: Invalid frame or device provided." << std::endl;
+bool RGBFrameDecoder::convertNV12ToRGB(AVFrame* nv12_frame, TextureSlot* slot) {
+    if (!nv12_frame || !d3d11_device_ || !d3d11_context_ || !slot) {
+        std::cerr << "Error: Invalid frame, device, or slot provided." << std::endl;
         return false;
     }
     
@@ -124,178 +158,57 @@ bool RGBFrameDecoder::convertNV12ToRGB(AVFrame* nv12_frame, RGBFrame& rgb_frame)
         return false;
     }
     
-    if (nv12_frame->width <= 0 || nv12_frame->height <= 0) {
-        std::cerr << "Error: Invalid frame dimensions." << std::endl;
-        return false;
-    }
-    
     if (!nv12_frame->data[0]) {
         std::cerr << "Error: D3D11 texture pointer is null." << std::endl;
+        return false;
+    }
+
+    // 确保Video Processor已初始化
+    if (!ensureVideoProcessor()) {
+        std::cerr << "Error: Failed to initialize Video Processor." << std::endl;
         return false;
     }
 
     ID3D11Texture2D* input_texture = reinterpret_cast<ID3D11Texture2D*>(nv12_frame->data[0]);
     int texture_index = (int)(intptr_t)nv12_frame->data[1];
     
+    // 检查输入纹理格式
     D3D11_TEXTURE2D_DESC input_desc;
     input_texture->GetDesc(&input_desc);
-
     if (input_desc.Format != DXGI_FORMAT_NV12) {
         std::cerr << "Error: Expected DXGI_FORMAT_NV12 format, got " << input_desc.Format << std::endl;
         return false;
     }
 
-    // 声明所有变量以避免goto问题
-    HRESULT hr;
-    ID3D11VideoDevice* video_device = nullptr;
-    ID3D11VideoContext* video_context = nullptr;
-    ID3D11VideoProcessorEnumerator* video_enum = nullptr;
-    ID3D11VideoProcessor* video_processor = nullptr;
-    ID3D11Texture2D* output_texture = nullptr;
-    ID3D11VideoProcessorInputView* input_view = nullptr;
-    ID3D11VideoProcessorOutputView* output_view = nullptr;
-    ID3D11ShaderResourceView* output_srv = nullptr;
-    bool color_space_valid = true;
-    
-    // 初始化结构体
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content_desc = {};
-    D3D11_TEXTURE2D_DESC output_desc = {};
+    // 创建输入视图
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {};
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {};
-    D3D11_VIDEO_PROCESSOR_STREAM stream_data = {};
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_color_space = {};
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color_space = {};
-    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-
-    // 获取video device和context
-    hr = d3d11_device_->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&video_device);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to get ID3D11VideoDevice. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    hr = d3d11_context_->QueryInterface(__uuidof(ID3D11VideoContext), (void**)&video_context);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to get ID3D11VideoContext. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    // 创建video processor enumerator
-    content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_INTERLACED_TOP_FIELD_FIRST;
-    content_desc.InputWidth = nv12_frame->width;
-    content_desc.InputHeight = nv12_frame->height;
-    content_desc.OutputWidth = nv12_frame->width;
-    content_desc.OutputHeight = nv12_frame->height;
-    content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-
-    hr = video_device->CreateVideoProcessorEnumerator(&content_desc, &video_enum);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create video processor enumerator. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    // 创建video processor
-    hr = video_device->CreateVideoProcessor(video_enum, 0, &video_processor);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create video processor. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    // 创建输出纹理 (RGBA)
-    output_desc.Width = nv12_frame->width;
-    output_desc.Height = nv12_frame->height;
-    output_desc.MipLevels = 1;
-    output_desc.ArraySize = 1;
-    output_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    output_desc.SampleDesc.Count = 1;
-    output_desc.Usage = D3D11_USAGE_DEFAULT;
-    output_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    output_desc.CPUAccessFlags = 0;
-
-    hr = d3d11_device_->CreateTexture2D(&output_desc, nullptr, &output_texture);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create output texture. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    // 创建input view
     input_view_desc.FourCC = 0;
     input_view_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
     input_view_desc.Texture2D.MipSlice = 0;
     input_view_desc.Texture2D.ArraySlice = texture_index;
 
-    hr = video_device->CreateVideoProcessorInputView(input_texture, video_enum, &input_view_desc, &input_view);
+    ID3D11VideoProcessorInputView* input_view = nullptr;
+    HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_, &input_view_desc, &input_view);
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create input view. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
+        return false;
     }
 
-    // 创建output view
+    // 创建输出视图
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {};
     output_view_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
     output_view_desc.Texture2D.MipSlice = 0;
 
-    hr = video_device->CreateVideoProcessorOutputView(output_texture, video_enum, &output_view_desc, &output_view);
+    ID3D11VideoProcessorOutputView* output_view = nullptr;
+    hr = video_device_->CreateVideoProcessorOutputView(slot->texture, video_enum_, &output_view_desc, &output_view);
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create output view. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
+        input_view->Release();
+        return false;
     }
 
-    // 创建Shader Resource View
-    srv_desc.Format = output_desc.Format;
-    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srv_desc.Texture2D.MipLevels = 1;
-    
-    hr = d3d11_device_->CreateShaderResourceView(output_texture, &srv_desc, &output_srv);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create shader resource view. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
-    }
-
-    // 验证颜色空间
-    color_space_valid = true;
-    if (nv12_frame->colorspace != AVCOL_SPC_BT709 && nv12_frame->colorspace != AVCOL_SPC_UNSPECIFIED) {
-        std::cerr << "Warning: Unexpected colorspace " << nv12_frame->colorspace << ", expected BT.709 (" << AVCOL_SPC_BT709 << ")" << std::endl;
-        color_space_valid = false;
-    }
-    
-    if (nv12_frame->color_range != AVCOL_RANGE_MPEG && nv12_frame->color_range != AVCOL_RANGE_JPEG && nv12_frame->color_range != AVCOL_RANGE_UNSPECIFIED) {
-        std::cerr << "Warning: Unexpected color_range " << nv12_frame->color_range << std::endl;
-        color_space_valid = false;
-    }
-    
-    std::cout << "Color space validation: " << (color_space_valid ? "PASSED" : "WARNING") << std::endl;
-    
-    // 配置基于帧属性的输入颜色空间
-    input_color_space.Usage = 0; // Video processing
-    input_color_space.RGB_Range = 0; // Not RGB input
-    // 如果指定或未指定则使用BT.709，否则记录偏差
-    input_color_space.YCbCr_Matrix = (nv12_frame->colorspace == AVCOL_SPC_BT709 || nv12_frame->colorspace == AVCOL_SPC_UNSPECIFIED) ? 1 : 1; // 默认为BT.709
-    input_color_space.YCbCr_xvYCC = 0; // 标准YCbCr
-    // 处理颜色范围:
-    // D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235 = 1 (Limited/TV range)
-    // D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255  = 2 (Full/PC range)
-    if (nv12_frame->color_range == AVCOL_RANGE_JPEG) {
-        input_color_space.Nominal_Range = 2; // Full range
-    } else if (nv12_frame->color_range == AVCOL_RANGE_MPEG) {
-        input_color_space.Nominal_Range = 1; // Limited range
-    } else {
-        // AVCOL_RANGE_UNSPECIFIED - 假设视频内容为limited range
-        input_color_space.Nominal_Range = 1;
-        std::cout << "Note: Unspecified color range, assuming limited range" << std::endl;
-    }
-    
-    // 为RGB配置输出颜色空间
-    output_color_space.Usage = 0; // Video processing  
-    output_color_space.RGB_Range = 1; // Full range RGB (0-255). 0=Limited, 1=Full.
-    output_color_space.YCbCr_Matrix = 1; // BT.709 (用于RGB转换矩阵)
-    output_color_space.YCbCr_xvYCC = 0; // 不适用于RGB
-    output_color_space.Nominal_Range = 2; // RGB输出的full range (0-255)
-    
-    // 明确设置颜色空间
-    video_context->VideoProcessorSetStreamColorSpace(video_processor, 0, &input_color_space);
-    video_context->VideoProcessorSetOutputColorSpace(video_processor, &output_color_space);
-    
-    // 执行转换
+    // 执行颜色空间转换
+    D3D11_VIDEO_PROCESSOR_STREAM stream_data = {};
     stream_data.Enable = TRUE;
     stream_data.OutputIndex = 0;
     stream_data.InputFrameOrField = 0;
@@ -307,42 +220,19 @@ bool RGBFrameDecoder::convertNV12ToRGB(AVFrame* nv12_frame, RGBFrame& rgb_frame)
     stream_data.ppPastSurfacesRight = nullptr;
     stream_data.ppFutureSurfacesRight = nullptr;
 
-    hr = video_context->VideoProcessorBlt(video_processor, output_view, 0, 1, &stream_data);
+    hr = video_context_->VideoProcessorBlt(video_processor_, output_view, 0, 1, &stream_data);
+    
+    // 清理临时资源
+    output_view->Release();
+    input_view->Release();
+    
     if (FAILED(hr)) {
         std::cerr << "Error: VideoProcessorBlt failed. HRESULT: 0x" << std::hex << hr << std::endl;
-        goto cleanup;
+        return false;
     }
 
-    // 成功 - 设置输出RGB帧信息
-    rgb_frame.rgb_texture = output_texture;
-    rgb_frame.rgb_srv = output_srv;
-    rgb_frame.width = nv12_frame->width;
-    rgb_frame.height = nv12_frame->height;
-    // timestamp已经在readNextFrames中设置，这里不需要覆盖
-    rgb_frame.is_valid = true;
-    
-    // 成功时不释放output_texture和output_srv，它们将被返回
-    goto cleanup_keep_output;
-
-cleanup:
-    if (output_srv) {
-        output_srv->Release();
-        output_srv = nullptr;
-    }
-    if (output_texture) {
-        output_texture->Release();
-        output_texture = nullptr;
-    }
-
-cleanup_keep_output:
-    if (output_view) output_view->Release();
-    if (input_view) input_view->Release();
-    if (video_processor) video_processor->Release();
-    if (video_enum) video_enum->Release();
-    if (video_context) video_context->Release();
-    if (video_device) video_device->Release();
-
-    return rgb_frame.is_valid;
+    std::cout << "Color space validation: PASSED" << std::endl;
+    return true;
 }
 
 void RGBFrameDecoder::flush() {
@@ -355,9 +245,173 @@ void RGBFrameDecoder::close() {
     is_initialized_ = false;
 }
 
+bool RGBFrameDecoder::ensureVideoProcessor() {
+    if (video_processor_initialized_) {
+        return true;
+    }
+    
+    // 获取Video Device
+    HRESULT hr = d3d11_device_->QueryInterface(IID_PPV_ARGS(&video_device_));
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to query video device interface. HRESULT: 0x" << std::hex << hr << std::endl;
+        return false;
+    }
+
+    // 获取Video Context
+    hr = d3d11_context_->QueryInterface(IID_PPV_ARGS(&video_context_));
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to query video context interface. HRESULT: 0x" << std::hex << hr << std::endl;
+        return false;
+    }
+
+    // 创建Video Processor Enumerator
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content_desc = {};
+    content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content_desc.InputFrameRate.Numerator = 30;
+    content_desc.InputFrameRate.Denominator = 1;
+    content_desc.InputWidth = video_width_;
+    content_desc.InputHeight = video_height_;
+    content_desc.OutputWidth = video_width_;
+    content_desc.OutputHeight = video_height_;
+    content_desc.OutputFrameRate.Numerator = 30;
+    content_desc.OutputFrameRate.Denominator = 1;
+    content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    
+    hr = video_device_->CreateVideoProcessorEnumerator(&content_desc, &video_enum_);
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to create video processor enumerator. HRESULT: 0x" << std::hex << hr << std::endl;
+        return false;
+    }
+
+    // 创建Video Processor
+    hr = video_device_->CreateVideoProcessor(video_enum_, 0, &video_processor_);
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to create video processor. HRESULT: 0x" << std::hex << hr << std::endl;
+        return false;
+    }
+
+    // 配置色彩空间（一次性设置）
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_color_space = {};
+    input_color_space.RGB_Range = 0;
+    input_color_space.YCbCr_Matrix = 1;
+    input_color_space.YCbCr_xvYCC = 0;
+    input_color_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+    video_context_->VideoProcessorSetStreamColorSpace(video_processor_, 0, &input_color_space);
+    
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color_space = {};
+    output_color_space.RGB_Range = 0;
+    output_color_space.YCbCr_Matrix = 1;
+    output_color_space.YCbCr_xvYCC = 0;
+    output_color_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+    video_context_->VideoProcessorSetOutputColorSpace(video_processor_, &output_color_space);
+
+    video_processor_initialized_ = true;
+    return true;
+}
+
+bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height) {
+    if (!slot || !d3d11_device_) {
+        return false;
+    }
+    
+    // 释放旧纹理
+    releaseTextureSlot(slot);
+    
+    // 创建RGB纹理
+    D3D11_TEXTURE2D_DESC texture_desc = {};
+    texture_desc.Width = width;
+    texture_desc.Height = height;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    texture_desc.CPUAccessFlags = 0;
+    texture_desc.MiscFlags = 0;
+
+    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, &slot->texture);
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to create RGB texture. HRESULT: 0x" << std::hex << hr << std::endl;
+        return false;
+    }
+
+    // 创建Shader Resource View
+    D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+    srv_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srv_desc.Texture2D.MostDetailedMip = 0;
+    srv_desc.Texture2D.MipLevels = 1;
+
+    hr = d3d11_device_->CreateShaderResourceView(slot->texture, &srv_desc, &slot->srv);
+    if (FAILED(hr)) {
+        std::cerr << "Error: Failed to create shader resource view. HRESULT: 0x" << std::hex << hr << std::endl;
+        slot->texture->Release();
+        slot->texture = nullptr;
+        return false;
+    }
+
+    slot->width = width;
+    slot->height = height;
+    slot->is_created = true;
+    
+    return true;
+}
+
+void RGBFrameDecoder::releaseTextureSlot(TextureSlot* slot) {
+    if (!slot) return;
+    
+    if (slot->srv) {
+        slot->srv->Release();
+        slot->srv = nullptr;
+    }
+    
+    if (slot->texture) {
+        slot->texture->Release();
+        slot->texture = nullptr;
+    }
+    
+    slot->width = 0;
+    slot->height = 0;
+    slot->is_created = false;
+}
+
+void RGBFrameDecoder::releaseVideoProcessor() {
+    if (video_processor_) {
+        video_processor_->Release();
+        video_processor_ = nullptr;
+    }
+    
+    if (video_enum_) {
+        video_enum_->Release();
+        video_enum_ = nullptr;
+    }
+    
+    if (video_context_) {
+        video_context_->Release();
+        video_context_ = nullptr;
+    }
+    
+    if (video_device_) {
+        video_device_->Release();
+        video_device_ = nullptr;
+    }
+    
+    video_processor_initialized_ = false;
+}
+
 void RGBFrameDecoder::releaseResources() {
-    // 新实现不需要清理预分配的资源
-    // 所有Video Processor和纹理资源都在每次转换后立即释放
+    // 释放纹理池
+    for (int i = 0; i < TEXTURE_POOL_SIZE; i++) {
+        releaseTextureSlot(&texture_pool_[i]);
+    }
+    
+    // 释放Video Processor
+    releaseVideoProcessor();
+    
+    // 重置槽位索引
+    current_slot_index_ = 0;
     
     // 只在使用外部设备时释放context引用（内部设备不需要释放）
     if (d3d11_context_ && d3d11_device_ && frame_decoder_.isInitialized() && 

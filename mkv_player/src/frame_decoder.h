@@ -76,6 +76,13 @@ private:
     // 状态
     bool is_initialized_;
     
+    // AVFrame池 - 复用避免频繁分配
+    static const int AVFRAME_POOL_SIZE = 3;
+    AVFrame* audio_frame_pool_[AVFRAME_POOL_SIZE];
+    AVFrame* video_frame_pool_[AVFRAME_POOL_SIZE];
+    int current_audio_frame_index_;
+    int current_video_frame_index_;
+    
     // 内部方法
     bool createD3D11Device();
     bool createHardwareContext();
@@ -84,6 +91,12 @@ private:
     bool configureVideoDecoder(AVCodecParameters* codec_params);
     bool configureAudioDecoder(AVCodecParameters* codec_params);
     bool initializeAudioResampler();
+    
+    // AVFrame池管理
+    void initializeFramePools();
+    AVFrame* getNextAudioFrame();
+    AVFrame* getNextVideoFrame();
+    void releaseFramePools();
     
     void releaseResources();
 };

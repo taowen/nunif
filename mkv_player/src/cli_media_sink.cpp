@@ -175,6 +175,17 @@ void CLIMediaSink::close() {
         audio_file_.close();
     }
     
+    // 释放缓存的D3D11设备
+    if (d3d11_context_) {
+        d3d11_context_->Release();
+        d3d11_context_ = nullptr;
+    }
+    
+    if (d3d11_device_) {
+        d3d11_device_->Release();
+        d3d11_device_ = nullptr;
+    }
+    
     std::cout << "\\n=== CLI Media Sink Summary ===" << std::endl;
     std::cout << "Total frames processed: " << frame_count_ << std::endl;
     std::cout << "Frames saved: " << saved_frame_count_ << std::endl;
@@ -188,25 +199,23 @@ bool CLIMediaSink::saveFrameAsBMP(ID3D11Texture2D* texture, const std::string& f
         return false;
     }
     
-    // 获取纹理的设备上下文
-    ID3D11Device* device = nullptr;
-    texture->GetDevice(&device);
-    if (!device) {
-        return false;
+    // 如果没有缓存设备，从纹理获取（只在第一次）
+    if (!d3d11_device_ || !d3d11_context_) {
+        texture->GetDevice(&d3d11_device_);
+        if (!d3d11_device_) {
+            return false;
+        }
+        
+        d3d11_device_->GetImmediateContext(&d3d11_context_);
+        if (!d3d11_context_) {
+            d3d11_device_->Release();
+            d3d11_device_ = nullptr;
+            return false;
+        }
     }
     
-    ID3D11DeviceContext* context = nullptr;
-    device->GetImmediateContext(&context);
-    if (!context) {
-        device->Release();
-        return false;
-    }
-    
-    // 使用RGBVerification的保存功能
-    bool success = RGBVerification::saveTextureAsBMP(device, context, texture, filename);
-    
-    context->Release();
-    device->Release();
+    // 使用缓存的设备保存纹理
+    bool success = RGBVerification::saveTextureAsBMP(d3d11_device_, d3d11_context_, texture, filename);
     
     return success;
 }
