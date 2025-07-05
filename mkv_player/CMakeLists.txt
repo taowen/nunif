@@ -147,3 +147,25 @@ copy_cuda_dlls(gui_player)
 # Link TensorRT to GUI player
 target_link_tensorrt(gui_player)
 copy_tensorrt_dlls(gui_player)
+
+# DX11 Demo executable
+add_executable(dx11_demo
+    src/dx11_demo.cpp
+)
+
+# Apply Windows/MSVC compile options to DX11 demo
+target_compile_options(dx11_demo PRIVATE
+    /W4 /WX- /permissive- /std:c++latest
+)
+
+# Link DirectX libraries to DX11 demo
+target_link_libraries(dx11_demo PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+)
+
+# Set Windows subsystem for DX11 demo
+set_target_properties(dx11_demo PROPERTIES
+    LINK_FLAGS "/SUBSYSTEM:WINDOWS"
+)
