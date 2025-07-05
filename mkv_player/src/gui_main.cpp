@@ -79,14 +79,13 @@ int main(int argc, char* argv[]) {
         std::cout << "  SPACE - Pause/Resume" << std::endl;
         std::cout << "  ESC   - Exit" << std::endl;
         
-        // 主渲染循环（运行在主线程）
+        // 主渲染循环（运行在主线程）- 使用最佳实践
         while (gui_sink_ptr->processMessages()) {
-            // 渲染帧
-            gui_sink_ptr->renderFrame();
-            gui_sink_ptr->present();
-            
-            // 稍微休眠以避免100%CPU使用
-            Sleep(1);
+            // 使用主动渲染循环，包含智能帧率控制
+            if (!gui_sink_ptr->renderLoop()) {
+                std::cerr << "Render loop failed" << std::endl;
+                break;
+            }
         }
         
         // 停止播放

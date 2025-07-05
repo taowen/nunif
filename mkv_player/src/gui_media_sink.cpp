@@ -82,9 +82,6 @@ bool GUIMediaSink::initialize(int video_width, int video_height,
     audio_sample_rate_ = audio_sample_rate;
     audio_channels_ = audio_channels;
     
-    std::cout << "GUIMediaSink initializing..." << std::endl;
-    std::cout << "Video: " << video_width_ << "x" << video_height_ << std::endl;
-    std::cout << "Audio: " << audio_sample_rate_ << "Hz, " << audio_channels_ << " channels" << std::endl;
     
     // 创建窗口（如果失败也继续，只是无法显示）
     if (!createWindow("Video Player - " + std::to_string(video_width_) + "x" + std::to_string(video_height_))) {
@@ -118,13 +115,12 @@ bool GUIMediaSink::initialize(int video_width, int video_height,
             return false;
         }
     } else {
-        std::cout << "Running in headless mode (no window/rendering)" << std::endl;
+        std::cerr << "No window handle, skipping DirectX11 initialization" << std::endl;
     }
     
     // 记录开始时间
     start_time_ = std::chrono::steady_clock::now();
     
-    std::cout << "GUIMediaSink initialized successfully" << std::endl;
     return true;
 }
 
@@ -139,7 +135,6 @@ void GUIMediaSink::onVideoFrame(ID3D11Texture2D* rgb_texture,
     // 创建帧对象并推送到队列
     VideoFrame frame(rgb_texture, rgb_srv, timestamp, width, height);
     if (!frame_queue_->push(frame, 10)) { // 10ms 超时
-        std::cout << "Frame queue full, dropping frame at " << timestamp << "s" << std::endl;
     }
 }
 
@@ -164,14 +159,6 @@ bool GUIMediaSink::shouldSkipFrame(double timestamp) const {
     double current_time = getCurrentTime();
     double time_diff = timestamp - current_time;
     
-    static int debug_count = 0;
-    if (debug_count < 5) {  // 打印前5次
-        std::cout << "Frame sync check #" << debug_count << ": timestamp=" << timestamp 
-                  << "s, current_time=" << current_time 
-                  << "s, diff=" << time_diff << "s" << std::endl;
-        debug_count++;
-    }
-    
     // 如果帧太老（超过500ms），跳过
     if (time_diff < -0.5) {
         return true;
@@ -189,7 +176,6 @@ void GUIMediaSink::pause() {
     if (!is_paused_) {
         is_paused_ = true;
         pause_time_ = std::chrono::steady_clock::now();
-        std::cout << "Playback paused" << std::endl;
     }
 }
 
@@ -198,7 +184,6 @@ void GUIMediaSink::resume() {
         is_paused_ = false;
         auto now = std::chrono::steady_clock::now();
         paused_duration_ += std::chrono::duration<double>(now - pause_time_).count();
-        std::cout << "Playback resumed" << std::endl;
     }
 }
 
@@ -208,19 +193,14 @@ bool GUIMediaSink::isPaused() const {
 
 void GUIMediaSink::close() {
     cleanup();
-    std::cout << "GUIMediaSink closed" << std::endl;
 }
 
 bool GUIMediaSink::createWindow(const std::string& title) {
     window_title_ = title;
     
     if (!createWindowClass()) {
-        DWORD error = GetLastError();
-        if (error != ERROR_CLASS_ALREADY_EXISTS) {
-            std::cerr << "Failed to register window class, error: " << std::hex << error << std::endl;
-            return false;
-        }
-        // 窗口类已存在，继续使用
+        std::cerr << "Failed to create window class" << std::endl;
+        return false;
     }
     
     // 限制窗口大小（4K视频太大了）
@@ -260,13 +240,11 @@ bool GUIMediaSink::createWindow(const std::string& title) {
         return false;
     }
     
-    std::cout << "Window created successfully: " << display_width << "x" << display_height << std::endl;
     return true;
 }
 
 void GUIMediaSink::showWindow() {
     if (window_handle_) {
-        std::cout << "Showing window, handle: " << window_handle_ << std::endl;
         ShowWindow(window_handle_, SW_SHOWDEFAULT);
         UpdateWindow(window_handle_);
         
@@ -275,43 +253,21 @@ void GUIMediaSink::showWindow() {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 // 忽略残留的WM_QUIT消息
-                std::cout << "Ignoring residual WM_QUIT message" << std::endl;
                 continue;
             }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-    } else {
-        std::cout << "showWindow called but no window handle!" << std::endl;
     }
 }
 
 bool GUIMediaSink::processMessages() {
-    static int call_count = 0;
-    call_count++;
-    if (call_count <= 3) {
-        std::cout << "processMessages called #" << call_count << std::endl;
-    }
-    
-    // 处理帧队列（消费解码线程产生的帧）
-    processFrameQueue();
-    
     // 检查测试模式自动关闭
     if (test_mode_) {
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - test_start_time_).count();
         
-        // 每100ms打印一次调试信息
-        static auto last_debug_time = std::chrono::steady_clock::now();
-        auto now_debug = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_time).count() > 100) {
-            std::cout << "Test mode: elapsed=" << elapsed_ms 
-                      << "ms, target=" << auto_close_ms_ << "ms" << std::endl;
-            last_debug_time = now_debug;
-        }
-        
         if (elapsed_ms >= auto_close_ms_) {
-            std::cout << "Test mode: Auto-closing window after " << elapsed_ms << "ms" << std::endl;
             // 发送WM_CLOSE消息来正确关闭窗口
             if (window_handle_) {
                 PostMessage(window_handle_, WM_CLOSE, 0, 0);
@@ -328,12 +284,7 @@ bool GUIMediaSink::processMessages() {
         
         if (msg.message == WM_QUIT) {
             should_close_ = true;
-            std::cout << "Received WM_QUIT message, closing window" << std::endl;
         }
-    }
-    
-    if (should_close_) {
-        std::cout << "processMessages returning false, should_close_=" << should_close_ << std::endl;
     }
     
     return !should_close_;
@@ -348,6 +299,40 @@ void GUIMediaSink::present() {
     }
 }
 
+// 主动渲染循环 - 最佳实践
+bool GUIMediaSink::renderLoop() {
+    if (!window_handle_) {
+        return false;
+    }
+    if (!d3d11_context_) {
+        return false;
+    }
+    
+    static auto last_render_time = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_render_time).count();
+    
+    // 目标帧率: 60fps = 16.67ms per frame
+    const int target_frame_time_ms = 16;
+    
+    // 处理帧队列（消费解码线程产生的帧）
+    processFrameQueue();
+    
+    // 主动渲染 - 不依赖WM_PAINT
+    if (elapsed_ms >= target_frame_time_ms) {
+        renderFrame();
+        present();
+        last_render_time = now;
+    }
+    
+    // 限制CPU使用率
+    if (elapsed_ms < target_frame_time_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    
+    return true;
+}
+
 bool GUIMediaSink::createWindowClass() {
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
@@ -359,12 +344,16 @@ bool GUIMediaSink::createWindowClass() {
     ATOM result = RegisterClassW(&wc);
     if (result == 0) {
         DWORD error = GetLastError();
-        std::cerr << "Failed to register window class, error: " << std::hex << error << " (decimal: " << std::dec << error << ")" << std::endl;
-    } else {
-        std::cout << "Window class registered successfully" << std::endl;
+        if (error == ERROR_CLASS_ALREADY_EXISTS) {
+            // 窗口类已存在，这是正常的
+            return true;
+        } else {
+            std::cerr << "Failed to register window class, error: " << std::hex << error << " (decimal: " << std::dec << error << ")" << std::endl;
+            return false;
+        }
     }
     
-    return result != 0;
+    return true;
 }
 
 bool GUIMediaSink::initializeDirectX11() {
@@ -400,7 +389,7 @@ bool GUIMediaSink::initializeDirectX11() {
         return false;
     }
     
-    std::cout << "DirectX11 device created successfully" << std::endl;
+    
     return true;
 }
 
@@ -609,8 +598,6 @@ void GUIMediaSink::updateVideoTexture(ID3D11Texture2D* source_texture) {
         D3D11_TEXTURE2D_DESC desc;
         source_texture->GetDesc(&desc);
         
-        std::cout << "Creating video texture: " << desc.Width << "x" << desc.Height 
-                  << " Format: " << desc.Format << std::endl;
         
         // 创建可绑定到着色器的纹理
         desc.Usage = D3D11_USAGE_DEFAULT;
@@ -636,12 +623,10 @@ void GUIMediaSink::updateVideoTexture(ID3D11Texture2D* source_texture) {
             return;
         }
         
-        std::cout << "Video texture and SRV created successfully" << std::endl;
     }
     
     // 复制纹理数据
     d3d11_context_->CopyResource(video_texture_.Get(), source_texture);
-    std::cout << "Video texture updated" << std::endl;
 }
 
 void GUIMediaSink::renderFrame() {
@@ -649,49 +634,12 @@ void GUIMediaSink::renderFrame() {
         return;
     }
     
-    // 生成动态颜色（3种颜色循环变化）
-    static auto start_time = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration<double>(now - start_time).count();
-    
-    // 每2秒循环一次，生成RGB颜色变化
-    double cycle = fmod(elapsed * 0.5, 3.0);  // 0-3的循环
-    float r, g, b;
-    
-    if (cycle < 1.0) {
-        // 红色到绿色
-        r = 1.0f - static_cast<float>(cycle);
-        g = static_cast<float>(cycle);
-        b = 0.0f;
-    } else if (cycle < 2.0) {
-        // 绿色到蓝色
-        r = 0.0f;
-        g = 1.0f - static_cast<float>(cycle - 1.0);
-        b = static_cast<float>(cycle - 1.0);
-    } else {
-        // 蓝色到红色
-        r = static_cast<float>(cycle - 2.0);
-        g = 0.0f;
-        b = 1.0f - static_cast<float>(cycle - 2.0);
-    }
-    
-    float clear_color[4] = { r, g, b, 1.0f };
+    // 清除背景 - 使用黑色背景而不是动态颜色
+    float clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     d3d11_context_->ClearRenderTargetView(render_target_view_.Get(), clear_color);
     
-    static bool debug_once = true;
-    if (debug_once) {
-        std::cout << "Rendering animated color background (no video needed)" << std::endl;
-        debug_once = false;
-    }
-    
-    // 如果有视频纹理，渲染它（叠加在彩色背景上）
+    // 如果有视频纹理，渲染它
     if (video_srv_) {
-        static bool debug_video_once = true;
-        if (debug_video_once) {
-            std::cout << "Also rendering video frame with SRV" << std::endl;
-            debug_video_once = false;
-        }
-        
         // 设置着色器
         d3d11_context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
         d3d11_context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
@@ -773,9 +721,13 @@ LRESULT GUIMediaSink::handleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             return 0;
             
         case WM_PAINT:
-            renderFrame();
-            present();
-            return 0;
+            {
+                PAINTSTRUCT ps;
+                BeginPaint(window_handle_, &ps);
+                // 在WM_PAINT中不执行实际渲染，只处理Windows绘制消息
+                EndPaint(window_handle_, &ps);
+                return 0;
+            }
     }
     
     return DefWindowProc(window_handle_, uMsg, wParam, lParam);
@@ -787,14 +739,12 @@ void GUIMediaSink::setTestMode(bool enabled, int auto_close_ms) {
     if (enabled) {
         // 重置测试开始时间为当前时间
         test_start_time_ = std::chrono::steady_clock::now();
-        std::cout << "Test mode enabled: auto-close after " << auto_close_ms << "ms" << std::endl;
     }
 }
 
 void GUIMediaSink::setVideoDimensions(int width, int height) {
     video_width_ = width;
     video_height_ = height;
-    std::cout << "Set video dimensions: " << width << "x" << height << std::endl;
 }
 
 // 多线程播放控制
@@ -814,7 +764,6 @@ bool GUIMediaSink::startPlayback(MediaPlayer* player, const std::string& filepat
     // 启动解码线程
     decoder_thread_ = std::make_unique<std::thread>(&GUIMediaSink::decoderThreadLoop, this);
     
-    std::cout << "Started playback thread for: " << filepath << std::endl;
     return true;
 }
 
@@ -835,7 +784,6 @@ void GUIMediaSink::stopPlayback() {
     media_player_ = nullptr;
     current_filepath_.clear();
     
-    std::cout << "Stopped playback thread" << std::endl;
 }
 
 bool GUIMediaSink::isPlaybackRunning() const {
@@ -844,7 +792,6 @@ bool GUIMediaSink::isPlaybackRunning() const {
 
 // 解码线程循环
 void GUIMediaSink::decoderThreadLoop() {
-    std::cout << "Decoder thread started" << std::endl;
     
     if (!media_player_) {
         std::cerr << "decoderThreadLoop: No MediaPlayer available" << std::endl;
@@ -857,12 +804,10 @@ void GUIMediaSink::decoderThreadLoop() {
         return;
     }
     
-    std::cout << "Decoder thread: File opened successfully" << std::endl;
     
     // 解码循环
     while (!should_stop_decoder_) {
         if (!media_player_->playOneFrame()) {
-            std::cout << "Decoder thread: End of file reached" << std::endl;
             break;
         }
         
@@ -875,7 +820,6 @@ void GUIMediaSink::decoderThreadLoop() {
     // 停止队列
     frame_queue_->stop();
     
-    std::cout << "Decoder thread finished" << std::endl;
 }
 
 // 处理帧队列（在主线程调用）
@@ -891,12 +835,6 @@ void GUIMediaSink::processFrameQueue() {
             // 更新时间戳
             last_video_timestamp_ = frame.timestamp;
             has_new_frame_ = true;
-            
-            static int frame_count = 0;
-            if (++frame_count % 30 == 0) {
-                std::cout << "Processed " << frame_count << " frames, timestamp: " 
-                          << frame.timestamp << "s" << std::endl;
-            }
         }
     }
 }

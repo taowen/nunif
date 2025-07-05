@@ -53,6 +53,7 @@ public:
     bool processMessages(); // 返回false表示应该退出
     void present();
     void renderFrame();  // 公开渲染方法用于测试
+    bool renderLoop();   // 主动渲染循环 - 最佳实践
     
     // 多线程播放控制
     bool startPlayback(MediaPlayer* player, const std::string& filepath);
