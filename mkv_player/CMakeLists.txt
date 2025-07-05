@@ -110,7 +110,6 @@ copy_tensorrt_dlls(cli_player)
 
 # GUI Player executable
 add_executable(gui_player
-    src/test_gui_player.cpp
     src/gui_media_sink.cpp
     src/media_player.cpp
     src/mkv_stream_reader.cpp
