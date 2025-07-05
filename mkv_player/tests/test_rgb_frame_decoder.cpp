@@ -127,16 +127,16 @@ TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requir
             
             // 验证音频帧
             if (decoded_frames.audio_frame.is_valid) {
-                REQUIRE(decoded_frames.audio_frame.frame != nullptr);
-                REQUIRE(decoded_frames.audio_frame.frame->nb_samples > 0);
-                REQUIRE(decoded_frames.audio_frame.frame->sample_rate > 0);
+                REQUIRE(decoded_frames.audio_frame.getAudioFrame() != nullptr);
+                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->nb_samples > 0);
+                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->sample_rate > 0);
                 REQUIRE(decoded_frames.audio_frame.timestamp >= -1.0);
-                REQUIRE(decoded_frames.audio_frame.frame->data[0] != nullptr);
+                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->data[0] != nullptr);
                 
-                std::cout << "Audio frame: samples=" << decoded_frames.audio_frame.frame->nb_samples 
+                std::cout << "Audio frame: samples=" << decoded_frames.audio_frame.getAudioFrame()->nb_samples 
                          << ", ts=" << decoded_frames.audio_frame.timestamp << std::endl;
                 
-                av_frame_unref(decoded_frames.audio_frame.frame);
+                av_frame_unref(decoded_frames.audio_frame.getAudioFrame());
             }
             
             // 验证RGB帧

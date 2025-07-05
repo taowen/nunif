@@ -73,39 +73,39 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
             
             // 验证音频帧
             REQUIRE(decoded_frames.audio_frame.is_valid);
-            REQUIRE(decoded_frames.audio_frame.frame != nullptr);
-            REQUIRE(decoded_frames.audio_frame.frame->nb_samples > 0);
-            REQUIRE(decoded_frames.audio_frame.frame->sample_rate > 0);
+            REQUIRE(decoded_frames.audio_frame.getAudioFrame() != nullptr);
+            REQUIRE(decoded_frames.audio_frame.getAudioFrame()->nb_samples > 0);
+            REQUIRE(decoded_frames.audio_frame.getAudioFrame()->sample_rate > 0);
             REQUIRE(decoded_frames.audio_frame.timestamp >= -1.0); // 允许小的负偏移
-            REQUIRE(decoded_frames.audio_frame.frame->data[0] != nullptr);
+            REQUIRE(decoded_frames.audio_frame.getAudioFrame()->data[0] != nullptr);
             
-            std::cout << "Audio frame: samples=" << decoded_frames.audio_frame.frame->nb_samples 
-                     << ", ts=" << decoded_frames.audio_frame.timestamp << std::endl;
+            // std::cout << "Audio frame: samples=" << decoded_frames.audio_frame.getAudioFrame()->nb_samples 
+            //          << ", ts=" << decoded_frames.audio_frame.timestamp << std::endl;
             
             // 验证视频帧（同步后应该总是有效）
             if (decoded_frames.video_frame.is_valid) {
-                REQUIRE(decoded_frames.video_frame.frame != nullptr);
-                REQUIRE(decoded_frames.video_frame.frame->width > 0);
-                REQUIRE(decoded_frames.video_frame.frame->height > 0);
+                REQUIRE(decoded_frames.video_frame.get() != nullptr);
+                REQUIRE(decoded_frames.video_frame.get()->width > 0);
+                REQUIRE(decoded_frames.video_frame.get()->height > 0);
                 REQUIRE(decoded_frames.video_frame.timestamp >= -1.0); // 允许小的负偏移
                 
                 // 验证是硬件帧
-                REQUIRE(decoded_frames.video_frame.frame->format == AV_PIX_FMT_D3D11);
-                REQUIRE(decoded_frames.video_frame.frame->data[0] != nullptr);
+                REQUIRE(decoded_frames.video_frame.get()->format == AV_PIX_FMT_D3D11);
+                REQUIRE(decoded_frames.video_frame.get()->data[0] != nullptr);
                 
-                std::cout << "Video frame: " << decoded_frames.video_frame.frame->width 
-                         << "x" << decoded_frames.video_frame.frame->height 
-                         << ", ts=" << decoded_frames.video_frame.timestamp << std::endl;
+                // std::cout << "Video frame: " << decoded_frames.video_frame.get()->width 
+                //          << "x" << decoded_frames.video_frame.get()->height 
+                //          << ", ts=" << decoded_frames.video_frame.timestamp << std::endl;
                 
                 // 验证音视频同步（时间戳应该接近）
                 double av_diff = std::abs(decoded_frames.audio_frame.timestamp - decoded_frames.video_frame.timestamp);
                 REQUIRE(av_diff < 0.1); // 100ms容差
                 
-                av_frame_unref(decoded_frames.video_frame.frame);
+                av_frame_unref(decoded_frames.video_frame.get());
             }
             
             // 释放音频帧
-            av_frame_unref(decoded_frames.audio_frame.frame);
+            av_frame_unref(decoded_frames.audio_frame.getAudioFrame());
         }
         
         // 验证解码了预期数量的帧

@@ -21,11 +21,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 add_executable(spike 
-    #tests/test_packet_demuxer.cpp
-    #tests/test_frame_decoder.cpp
-    #tests/test_rgb_frame_decoder.cpp
+    tests/test_packet_demuxer.cpp
+    tests/test_frame_decoder.cpp
+    tests/test_rgb_frame_decoder.cpp
     tests/test_cuda_frame_decoder.cpp
-    #tests/test_rgb_verification.cpp
+    tests/test_rgb_verification.cpp
     src/mkv_stream_reader.cpp
     src/packet_demuxer.cpp
     src/frame_decoder.cpp
@@ -105,9 +105,8 @@ copy_tensorrt_dlls(cli_player)
 
 # GUI Player executable
 add_executable(gui_player
-    src/test_gui_player.cpp
-    src/media_player.cpp
     src/gui_media_sink.cpp
+    src/media_player.cpp
     src/mkv_stream_reader.cpp
     src/packet_demuxer.cpp
     src/frame_decoder.cpp

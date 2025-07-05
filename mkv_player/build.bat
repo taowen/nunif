@@ -45,6 +45,12 @@ if "%TARGET%"=="gui" (
     set RUN_TESTS=0
     goto :build
 )
+if "%TARGET%"=="red" (
+    set BUILD_TARGET=simple_red_window
+    set BUILD_DESC=Simple Red Window
+    set RUN_TESTS=0
+    goto :build
+)
 if "%TARGET%"=="all" (
     set BUILD_TARGET=
     set BUILD_DESC=all targets
@@ -59,6 +65,7 @@ echo Available targets:
 echo   test  - Build and run tests (default)
 echo   cli   - Build CLI player only
 echo   gui   - Build GUI player only
+echo   red   - Build Simple Red Window demo
 echo   all   - Build all targets
 popd
 exit /b 1
@@ -91,4 +98,7 @@ if "!RUN_TESTS!"=="1" (
 ) else if "%TARGET%"=="gui" (
     echo GUI player built successfully!
     echo Run: build\Debug\gui_player.exe
+) else if "%TARGET%"=="red" (
+    echo Simple Red Window built successfully!
+    echo Run: build\Debug\simple_red_window.exe
 )
