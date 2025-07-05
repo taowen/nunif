@@ -61,7 +61,7 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
     
     // 2. 获取视频尺寸信息 - 从demuxer获取而不是解码帧
     auto* demuxer = frame_decoder_.getDemuxer();
-    auto* video_params = demuxer->getVideoCodecParameters();
+    auto* video_params = demuxer->getReader().getVideoCodecParameters();
     
     if (!video_params) {
         std::cerr << "Failed to get video codec parameters" << std::endl;

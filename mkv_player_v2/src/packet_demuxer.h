@@ -25,12 +25,9 @@ public:
     // 读取下一组同步的音视频包
     bool readNextSyncedPackets(SyncedPackets& packets);
     
-    // 获取流信息
-    MKVStreamReader::StreamInfo getStreamInfo() const { return reader_.getStreamInfo(); }
-    
-    // 获取编解码器参数
-    AVCodecParameters* getVideoCodecParameters() { return reader_.getVideoCodecParameters(); }
-    AVCodecParameters* getAudioCodecParameters() { return reader_.getAudioCodecParameters(); }
+    // 获取底层的 MKVStreamReader 引用
+    const MKVStreamReader& getReader() const { return reader_; }
+    MKVStreamReader& getReader() { return reader_; }
     
     // 状态查询
     bool isInitialized() const { return is_initialized_; }

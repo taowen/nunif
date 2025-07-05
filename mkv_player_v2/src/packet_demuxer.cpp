@@ -163,7 +163,7 @@ double PacketDemuxer::getPacketTimestamp(AVPacket* packet, bool is_audio) const 
         return 0.0;
     }
     
-    auto stream_info = getStreamInfo();
+    auto stream_info = reader_.getStreamInfo();
     AVRational time_base = is_audio ? stream_info.audio_time_base : stream_info.video_time_base;
     
     return packet->pts * av_q2d(time_base);

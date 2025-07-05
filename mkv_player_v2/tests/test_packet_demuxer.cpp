@@ -32,13 +32,13 @@ TEST_CASE("PacketDemuxer with valid MKV file", "[packet_demuxer][requires_test_f
         REQUIRE(demuxer.isInitialized());
         
         // 获取流信息
-        auto stream_info = demuxer.getStreamInfo();
+        auto stream_info = demuxer.getReader().getStreamInfo();
         REQUIRE(stream_info.video_stream_index >= 0);
         REQUIRE(stream_info.audio_stream_index >= 0);
         
         // 获取编解码器参数
-        REQUIRE(demuxer.getVideoCodecParameters() != nullptr);
-        REQUIRE(demuxer.getAudioCodecParameters() != nullptr);
+        REQUIRE(demuxer.getReader().getVideoCodecParameters() != nullptr);
+        REQUIRE(demuxer.getReader().getAudioCodecParameters() != nullptr);
         
         demuxer.close();
     }
@@ -110,7 +110,7 @@ TEST_CASE("PacketDemuxer synchronized packet reading", "[packet_demuxer][require
                 sync_checks++;
                 
                 // 获取实际的音视频时间戳
-                auto stream_info = demuxer.getStreamInfo();
+                auto stream_info = demuxer.getReader().getStreamInfo();
                 double audio_ts = synced_packets.audio_packet->pts * av_q2d(stream_info.audio_time_base);
                 double video_ts = synced_packets.video_packet->pts * av_q2d(stream_info.video_time_base);
                 
@@ -193,8 +193,8 @@ TEST_CASE("PacketDemuxer error handling", "[packet_demuxer]") {
         
         // 未初始化时的操作应该安全失败
         REQUIRE_FALSE(demuxer.readNextSyncedPackets(packets));
-        REQUIRE(demuxer.getVideoCodecParameters() == nullptr);
-        REQUIRE(demuxer.getAudioCodecParameters() == nullptr);
+        REQUIRE(demuxer.getReader().getVideoCodecParameters() == nullptr);
+        REQUIRE(demuxer.getReader().getAudioCodecParameters() == nullptr);
     }
     
     SECTION("Multiple close calls") {

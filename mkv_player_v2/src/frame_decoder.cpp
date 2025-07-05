@@ -36,8 +36,8 @@ bool FrameDecoder::open(const std::string& filepath) {
     }
     
     // 2. 获取codec parameters
-    AVCodecParameters* video_codec_params = demuxer_.getVideoCodecParameters();
-    AVCodecParameters* audio_codec_params = demuxer_.getAudioCodecParameters();
+    AVCodecParameters* video_codec_params = demuxer_.getReader().getVideoCodecParameters();
+    AVCodecParameters* audio_codec_params = demuxer_.getReader().getAudioCodecParameters();
     if (!video_codec_params || !audio_codec_params) {
         std::cerr << "Failed to get codec parameters" << std::endl;
         demuxer_.close();
