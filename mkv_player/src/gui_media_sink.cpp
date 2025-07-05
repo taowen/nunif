@@ -1,4 +1,5 @@
 #include "gui_media_sink.h"
+#include "media_player.h"
 #include <iostream>
 #include <d3dcompiler.h>
 #include <vector>
@@ -63,10 +64,14 @@ GUIMediaSink::GUIMediaSink()
     , has_new_frame_(false)
     , test_mode_(false)
     , auto_close_ms_(1000) 
-    , test_start_time_(std::chrono::steady_clock::now()) {
+    , test_start_time_(std::chrono::steady_clock::now())
+    , frame_queue_(std::make_unique<FrameQueue>())
+    , should_stop_decoder_(false)
+    , media_player_(nullptr) {
 }
 
 GUIMediaSink::~GUIMediaSink() {
+    stopPlayback();
     close();
 }
 
@@ -126,23 +131,16 @@ bool GUIMediaSink::initialize(int video_width, int video_height,
 void GUIMediaSink::onVideoFrame(ID3D11Texture2D* rgb_texture, 
                                ID3D11ShaderResourceView* rgb_srv,
                                double timestamp, int width, int height) {
-    if (!rgb_texture || !d3d11_context_) {
-        std::cerr << "onVideoFrame: Invalid parameters" << std::endl;
+    if (!rgb_texture) {
+        std::cerr << "onVideoFrame: Invalid texture" << std::endl;
         return;
     }
     
-    std::cout << "Received video frame: " << width << "x" << height 
-              << " at " << timestamp << "s" << std::endl;
-    
-    // 更新视频纹理
-    updateVideoTexture(rgb_texture);
-    
-    // 更新时间戳
-    last_video_timestamp_ = timestamp;
-    has_new_frame_ = true;
-    
-    // 不立即渲染，只标记有新帧
-    // 渲染将在主循环中统一处理
+    // 创建帧对象并推送到队列
+    VideoFrame frame(rgb_texture, rgb_srv, timestamp, width, height);
+    if (!frame_queue_->push(frame, 10)) { // 10ms 超时
+        std::cout << "Frame queue full, dropping frame at " << timestamp << "s" << std::endl;
+    }
 }
 
 void GUIMediaSink::onAudioFrame(const int16_t* samples, int sample_count,
@@ -294,6 +292,9 @@ bool GUIMediaSink::processMessages() {
     if (call_count <= 3) {
         std::cout << "processMessages called #" << call_count << std::endl;
     }
+    
+    // 处理帧队列（消费解码线程产生的帧）
+    processFrameQueue();
     
     // 检查测试模式自动关闭
     if (test_mode_) {
@@ -787,5 +788,115 @@ void GUIMediaSink::setTestMode(bool enabled, int auto_close_ms) {
         // 重置测试开始时间为当前时间
         test_start_time_ = std::chrono::steady_clock::now();
         std::cout << "Test mode enabled: auto-close after " << auto_close_ms << "ms" << std::endl;
+    }
+}
+
+void GUIMediaSink::setVideoDimensions(int width, int height) {
+    video_width_ = width;
+    video_height_ = height;
+    std::cout << "Set video dimensions: " << width << "x" << height << std::endl;
+}
+
+// 多线程播放控制
+bool GUIMediaSink::startPlayback(MediaPlayer* player, const std::string& filepath) {
+    if (!player) {
+        std::cerr << "startPlayback: Invalid MediaPlayer" << std::endl;
+        return false;
+    }
+    
+    // 停止现有播放
+    stopPlayback();
+    
+    media_player_ = player;
+    current_filepath_ = filepath;
+    should_stop_decoder_ = false;
+    
+    // 启动解码线程
+    decoder_thread_ = std::make_unique<std::thread>(&GUIMediaSink::decoderThreadLoop, this);
+    
+    std::cout << "Started playback thread for: " << filepath << std::endl;
+    return true;
+}
+
+void GUIMediaSink::stopPlayback() {
+    // 停止解码线程
+    should_stop_decoder_ = true;
+    
+    if (decoder_thread_ && decoder_thread_->joinable()) {
+        decoder_thread_->join();
+        decoder_thread_.reset();
+    }
+    
+    // 清空帧队列
+    if (frame_queue_) {
+        frame_queue_->clear();
+    }
+    
+    media_player_ = nullptr;
+    current_filepath_.clear();
+    
+    std::cout << "Stopped playback thread" << std::endl;
+}
+
+bool GUIMediaSink::isPlaybackRunning() const {
+    return decoder_thread_ && decoder_thread_->joinable() && !should_stop_decoder_;
+}
+
+// 解码线程循环
+void GUIMediaSink::decoderThreadLoop() {
+    std::cout << "Decoder thread started" << std::endl;
+    
+    if (!media_player_) {
+        std::cerr << "decoderThreadLoop: No MediaPlayer available" << std::endl;
+        return;
+    }
+    
+    // 打开文件
+    if (!media_player_->openFile(current_filepath_)) {
+        std::cerr << "decoderThreadLoop: Failed to open file: " << current_filepath_ << std::endl;
+        return;
+    }
+    
+    std::cout << "Decoder thread: File opened successfully" << std::endl;
+    
+    // 解码循环
+    while (!should_stop_decoder_) {
+        if (!media_player_->playOneFrame()) {
+            std::cout << "Decoder thread: End of file reached" << std::endl;
+            break;
+        }
+        
+        // 检查队列是否过满，如果是则稍微等待
+        if (frame_queue_->size() > FrameQueue::MAX_QUEUE_SIZE * 0.8) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    
+    // 停止队列
+    frame_queue_->stop();
+    
+    std::cout << "Decoder thread finished" << std::endl;
+}
+
+// 处理帧队列（在主线程调用）
+void GUIMediaSink::processFrameQueue() {
+    VideoFrame frame;
+    
+    // 消费所有可用帧（但不阻塞）
+    while (frame_queue_->pop(frame, 1)) { // 1ms 超时，不阻塞
+        if (frame.is_valid && frame.texture) {
+            // 更新视频纹理
+            updateVideoTexture(frame.texture);
+            
+            // 更新时间戳
+            last_video_timestamp_ = frame.timestamp;
+            has_new_frame_ = true;
+            
+            static int frame_count = 0;
+            if (++frame_count % 30 == 0) {
+                std::cout << "Processed " << frame_count << " frames, timestamp: " 
+                          << frame.timestamp << "s" << std::endl;
+            }
+        }
     }
 }

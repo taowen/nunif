@@ -37,6 +37,7 @@ add_executable(spike
     src/media_player.cpp
     src/cli_media_sink.cpp
     src/gui_media_sink.cpp
+    src/frame_queue.cpp
 )
 
 # Link Catch2 to the executable
@@ -110,6 +111,7 @@ copy_tensorrt_dlls(cli_player)
 
 # GUI Player executable
 add_executable(gui_player
+    src/gui_main.cpp
     src/gui_media_sink.cpp
     src/media_player.cpp
     src/mkv_stream_reader.cpp
@@ -117,6 +119,7 @@ add_executable(gui_player
     src/frame_decoder.cpp
     src/rgb_frame_decoder.cpp
     src/rgb_verification.cpp
+    src/frame_queue.cpp
 )
 
 # Apply Windows/MSVC compile options to GUI player

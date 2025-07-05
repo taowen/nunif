@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media_sink.h"
+#include "frame_queue.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -8,6 +9,8 @@
 #include <memory>
 #include <string>
 #include <chrono>
+#include <thread>
+#include <atomic>
 
 using Microsoft::WRL::ComPtr;
 
@@ -15,6 +18,9 @@ using Microsoft::WRL::ComPtr;
  * DirectX11 GUI媒体播放器
  * 实现IMediaSink接口，提供实时视频播放和音频播放
  */
+// 前向声明
+class MediaPlayer;
+
 class GUIMediaSink : public IMediaSink {
 public:
     GUIMediaSink();
@@ -41,11 +47,17 @@ public:
     void close() override;
 
     // GUI特有方法
+    void setVideoDimensions(int width, int height); // 设置视频尺寸
     bool createWindow(const std::string& title = "Video Player");
     void showWindow();
     bool processMessages(); // 返回false表示应该退出
     void present();
     void renderFrame();  // 公开渲染方法用于测试
+    
+    // 多线程播放控制
+    bool startPlayback(MediaPlayer* player, const std::string& filepath);
+    void stopPlayback();
+    bool isPlaybackRunning() const;
     
     // 测试模式相关
     void setTestMode(bool enabled, int auto_close_ms = 1000);
@@ -95,6 +107,13 @@ private:
     double last_video_timestamp_;
     bool has_new_frame_;
     
+    // 多线程相关
+    std::unique_ptr<FrameQueue> frame_queue_;
+    std::unique_ptr<std::thread> decoder_thread_;
+    std::atomic<bool> should_stop_decoder_;
+    MediaPlayer* media_player_; // 不拥有所有权
+    std::string current_filepath_;
+    
     // 私有方法
     bool createWindowClass();
     bool initializeDirectX11();
@@ -103,6 +122,12 @@ private:
     bool createGeometry();
     void updateVideoTexture(ID3D11Texture2D* source_texture);
     void cleanup();
+    
+    // 多线程解码循环
+    void decoderThreadLoop();
+    
+    // 渲染线程消费帧
+    void processFrameQueue();
     
     // 窗口消息处理
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
