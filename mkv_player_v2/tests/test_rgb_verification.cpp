@@ -65,7 +65,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             ID3D11DeviceContext* rgb_context = decoder.getFrameDecoder()->getD3D11Context();
             
             bool read_success = RGBVerification::readTextureData(
-                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture, 
+                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture.Get(), 
                 pixel_data, width, height
             );
             
@@ -99,7 +99,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
             bool save_success = RGBVerification::saveTextureAsBMP(
-                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture, filename
+                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture.Get(), filename
             );
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;
@@ -134,7 +134,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
                 int width, height;
                 
                 if (RGBVerification::readTextureData(
-                    device, context, decoded_frames.rgb_frame.rgb_texture, 
+                    device, context, decoded_frames.rgb_frame.rgb_texture.Get(), 
                     pixel_data, width, height)) {
                     
                     auto stats = RGBVerification::calculateImageStats(pixel_data, width, height);
@@ -143,7 +143,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
                     // 保存每一帧
                     std::string filename = "rgb_frame_" + std::to_string(frames_processed + 1) + ".bmp";
                     RGBVerification::saveTextureAsBMP(
-                        device, context, decoded_frames.rgb_frame.rgb_texture, filename
+                        device, context, decoded_frames.rgb_frame.rgb_texture.Get(), filename
                     );
                     
                     std::cout << "Frame " << (frames_processed + 1) << ": RGB means = (" 
