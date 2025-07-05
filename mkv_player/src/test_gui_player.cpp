@@ -42,29 +42,35 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // 显示窗口
+    gui_sink_ptr->showWindow();
+    
     // 主播放循环
     int frames_played = 0;
     auto start_time = std::chrono::high_resolution_clock::now();
     while (true) {
         // 处理窗口消息
-        if (!gui_sink_ptr->processWindowMessages()) {
+        if (!gui_sink_ptr->processMessages()) {
             std::cout << "\\nUser requested exit." << std::endl;
             break;
         }
         
-        // 播放一帧
-        if (!player.playOneFrame()) {
-            std::cout << "\\nEnd of file reached." << std::endl;
-            break;
-        }
+        // 持续渲染（测试DirectX11渲染管道）
+        gui_sink_ptr->renderFrame();
+        gui_sink_ptr->present();
         
-        frames_played++;
-        auto current_time = std::chrono::high_resolution_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
-        std::cout << "\\rFrames played: " << frames_played << " | Elapsed time: " << elapsed_ms << "ms" << std::flush;
+        // 播放一帧（如果可能）
+        if (player.playOneFrame()) {
+            frames_played++;
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
+            if (frames_played % 100 == 0) {  // 减少打印频率
+                std::cout << "\\rFrames played: " << frames_played << " | Elapsed time: " << elapsed_ms << "ms" << std::flush;
+            }
+        }
 
         // 短暂休眠以避免过度占用CPU
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));  // ~60fps
     }
     
     std::cout << "\\nGUI playback completed." << std::endl;

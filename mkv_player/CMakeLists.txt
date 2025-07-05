@@ -26,12 +26,15 @@ add_executable(spike
     tests/test_rgb_frame_decoder.cpp
     tests/test_cuda_frame_decoder.cpp
     tests/test_rgb_verification.cpp
+    tests/test_cli_integrated.cpp
     src/mkv_stream_reader.cpp
     src/packet_demuxer.cpp
     src/frame_decoder.cpp
     src/rgb_frame_decoder.cpp
     src/cuda_frame_decoder.cpp
     src/rgb_verification.cpp
+    src/media_player.cpp
+    src/cli_media_sink.cpp
 )
 
 # Link Catch2 to the executable
@@ -69,7 +72,7 @@ copy_tensorrt_dlls(spike)
 
 # CLI Player executable
 add_executable(cli_player
-    src/test_cli_player.cpp
+    src/cli_main.cpp
     src/media_player.cpp
     src/cli_media_sink.cpp
     src/mkv_stream_reader.cpp
@@ -105,6 +108,7 @@ copy_tensorrt_dlls(cli_player)
 
 # GUI Player executable
 add_executable(gui_player
+    src/test_gui_player.cpp
     src/gui_media_sink.cpp
     src/media_player.cpp
     src/mkv_stream_reader.cpp
