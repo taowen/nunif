@@ -1,7 +1,7 @@
-#include "frame_decoder.h"
+#include "hw_frame_decoder.h"
 #include <iostream>
 
-FrameDecoder::FrameDecoder() 
+HwFrameDecoder::HwFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
     , video_codec_context_(nullptr)
@@ -21,11 +21,11 @@ FrameDecoder::FrameDecoder()
     }
 }
 
-FrameDecoder::~FrameDecoder() {
+HwFrameDecoder::~HwFrameDecoder() {
     close();
 }
 
-bool FrameDecoder::open(const std::string& filepath) {
+bool HwFrameDecoder::open(const std::string& filepath) {
     // 清理已有资源
     close();
     
@@ -93,7 +93,7 @@ bool FrameDecoder::open(const std::string& filepath) {
     return true;
 }
 
-bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
+bool HwFrameDecoder::readNextFrames(HwFramePair& decoded_frames) {
     if (!is_initialized_) {
         decoded_frames.audio_frame.is_valid = false;
         decoded_frames.video_frame.is_valid = false;
@@ -160,7 +160,7 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     return decoded_frames.audio_frame.is_valid || decoded_frames.video_frame.is_valid;
 }
 
-bool FrameDecoder::decodeVideoPacket(AVPacket* packet, AVFrame* frame) {
+bool HwFrameDecoder::decodeVideoPacket(AVPacket* packet, AVFrame* frame) {
     if (!video_codec_context_ || !packet || !frame) {
         return false;
     }
@@ -191,7 +191,7 @@ bool FrameDecoder::decodeVideoPacket(AVPacket* packet, AVFrame* frame) {
     }
 }
 
-bool FrameDecoder::decodeAudioPacket(AVPacket* packet, AVFrame* frame) {
+bool HwFrameDecoder::decodeAudioPacket(AVPacket* packet, AVFrame* frame) {
     if (!audio_codec_context_ || !packet || !frame) {
         return false;
     }
@@ -216,21 +216,21 @@ bool FrameDecoder::decodeAudioPacket(AVPacket* packet, AVFrame* frame) {
     }
 }
 
-const char* FrameDecoder::getVideoCodecName() const {
+const char* HwFrameDecoder::getVideoCodecName() const {
     if (video_codec_) {
         return video_codec_->name;
     }
     return nullptr;
 }
 
-const char* FrameDecoder::getAudioCodecName() const {
+const char* HwFrameDecoder::getAudioCodecName() const {
     if (audio_codec_) {
         return audio_codec_->name;
     }
     return nullptr;
 }
 
-AVFrame* FrameDecoder::getFrameFromPool(int index, bool is_audio) const {
+AVFrame* HwFrameDecoder::getFrameFromPool(int index, bool is_audio) const {
     if (index < 0 || index >= AVFRAME_POOL_SIZE) {
         return nullptr;
     }
@@ -238,7 +238,7 @@ AVFrame* FrameDecoder::getFrameFromPool(int index, bool is_audio) const {
 }
 
 
-void FrameDecoder::flush() {
+void HwFrameDecoder::flush() {
     if (is_initialized_) {
         if (video_codec_context_) {
             avcodec_send_packet(video_codec_context_, nullptr);
@@ -249,13 +249,13 @@ void FrameDecoder::flush() {
     }
 }
 
-void FrameDecoder::close() {
+void HwFrameDecoder::close() {
     demuxer_.close();
     releaseResources();
     is_initialized_ = false;
 }
 
-bool FrameDecoder::createD3D11Device() {
+bool HwFrameDecoder::createD3D11Device() {
     HRESULT hr = D3D11CreateDevice(
         nullptr,                    // 默认适配器
         D3D_DRIVER_TYPE_HARDWARE,   // 硬件驱动
@@ -277,7 +277,7 @@ bool FrameDecoder::createD3D11Device() {
     return true;
 }
 
-bool FrameDecoder::createHardwareContext() {
+bool HwFrameDecoder::createHardwareContext() {
     // 让FFmpeg自动创建D3D11VA硬件设备上下文
     int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
     if (ret < 0) {
@@ -315,7 +315,7 @@ bool FrameDecoder::createHardwareContext() {
     return true;
 }
 
-bool FrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
+bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
     // 查找支持D3D11VA的通用解码器
     video_codec_ = avcodec_find_decoder(codec_id);
     if (!video_codec_) {
@@ -341,7 +341,7 @@ bool FrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
     return false;
 }
 
-bool FrameDecoder::findAudioDecoder(AVCodecID codec_id) {
+bool HwFrameDecoder::findAudioDecoder(AVCodecID codec_id) {
     audio_codec_ = avcodec_find_decoder(codec_id);
     if (!audio_codec_) {
         std::cerr << "No audio decoder found for codec ID: " << codec_id << std::endl;
@@ -352,7 +352,7 @@ bool FrameDecoder::findAudioDecoder(AVCodecID codec_id) {
     return true;
 }
 
-bool FrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
+bool HwFrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
     // 分配视频解码器上下文
     video_codec_context_ = avcodec_alloc_context3(video_codec_);
     if (!video_codec_context_) {
@@ -391,7 +391,7 @@ bool FrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
     return true;
 }
 
-bool FrameDecoder::configureAudioDecoder(AVCodecParameters* codec_params) {
+bool HwFrameDecoder::configureAudioDecoder(AVCodecParameters* codec_params) {
     // 分配音频解码器上下文
     audio_codec_context_ = avcodec_alloc_context3(audio_codec_);
     if (!audio_codec_context_) {
@@ -416,13 +416,13 @@ bool FrameDecoder::configureAudioDecoder(AVCodecParameters* codec_params) {
     return true;
 }
 
-bool FrameDecoder::initializeAudioResampler() {
+bool HwFrameDecoder::initializeAudioResampler() {
     // 初始化音频重采样器（如果需要）
     // 这里暂时返回true，实际实现可能需要根据输出格式配置重采样
     return true;
 }
 
-void FrameDecoder::releaseResources() {
+void HwFrameDecoder::releaseResources() {
     if (video_codec_context_) {
         avcodec_free_context(&video_codec_context_);
         video_codec_context_ = nullptr;
@@ -460,7 +460,7 @@ void FrameDecoder::releaseResources() {
     audio_codec_ = nullptr;
 }
 
-void FrameDecoder::initializeFramePools() {
+void HwFrameDecoder::initializeFramePools() {
     // 初始化音频帧池
     for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
         audio_frame_pool_[i] = av_frame_alloc();
@@ -476,7 +476,7 @@ void FrameDecoder::initializeFramePools() {
 }
 
 
-void FrameDecoder::releaseFramePools() {
+void HwFrameDecoder::releaseFramePools() {
     // 释放音频帧池
     for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
         if (audio_frame_pool_[i]) {

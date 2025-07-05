@@ -34,9 +34,9 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
     // 清理已有资源
     close();
     
-    // 1. 首先初始化内部FrameDecoder
+    // 1. 首先初始化内部HwFrameDecoder
     if (!frame_decoder_.open(filepath)) {
-        std::cerr << "Failed to open file with FrameDecoder" << std::endl;
+        std::cerr << "Failed to open file with HwFrameDecoder" << std::endl;
         return false;
     }
     
@@ -47,12 +47,12 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
         d3d11_device_->GetImmediateContext(&d3d11_context_);
         std::cout << "Using external D3D11 device for RGB conversion" << std::endl;
     } else {
-        // 使用FrameDecoder内部设备
+        // 使用HwFrameDecoder内部设备
         d3d11_device_ = frame_decoder_.getD3D11Device();
         d3d11_context_ = frame_decoder_.getD3D11Context();
         
         if (!d3d11_device_ || !d3d11_context_) {
-            std::cerr << "Failed to get D3D11 device from FrameDecoder" << std::endl;
+            std::cerr << "Failed to get D3D11 device from HwFrameDecoder" << std::endl;
             frame_decoder_.close();
             return false;
         }
@@ -92,8 +92,8 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         return false;
     }
     
-    // 1. 从内部FrameDecoder获取原始帧的描述信息（非指针）
-    FrameDecoder::DecodedFrames raw_frames;
+    // 1. 从内部HwFrameDecoder获取原始帧的描述信息（非指针）
+    HwFrameDecoder::HwFramePair raw_frames;
     if (!frame_decoder_.readNextFrames(raw_frames)) {
         decoded_frames.audio_frame.is_valid = false;
         decoded_frames.rgb_frame.is_valid = false;
@@ -140,7 +140,7 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
 }
 
 
-bool RGBFrameDecoder::convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_frame_desc, TextureSlot* slot) {
+bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame_desc, TextureSlot* slot) {
     AVFrame* nv12_frame = nv12_frame_desc.get();
     if (!nv12_frame || !d3d11_device_ || !d3d11_context_ || !slot) {
         std::cerr << "Error: Invalid frame, device, or slot provided." << std::endl;

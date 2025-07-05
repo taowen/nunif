@@ -1,5 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
-#include "../src/frame_decoder.h"
+#include "../src/hw_frame_decoder.h"
 #include <filesystem>
 #include <iostream>
 
@@ -7,7 +7,7 @@
 const std::string TEST_MKV_FILE = "test_data/sample_hw.mkv";
 
 TEST_CASE("FrameDecoder basic functionality", "[frame_decoder]") {
-    FrameDecoder decoder;
+    HwFrameDecoder decoder;
     
     SECTION("Initial state") {
         REQUIRE_FALSE(decoder.isInitialized());
@@ -26,7 +26,7 @@ TEST_CASE("FrameDecoder with valid MKV file", "[frame_decoder][requires_test_fil
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    FrameDecoder decoder;
+    HwFrameDecoder decoder;
     
     SECTION("Open valid MKV file") {
         bool open_result = decoder.open(TEST_MKV_FILE);
@@ -57,7 +57,7 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    FrameDecoder decoder;
+    HwFrameDecoder decoder;
     
     if (!decoder.open(TEST_MKV_FILE)) {
         SKIP("Hardware decoder initialization failed - may not be supported on this system");
@@ -65,7 +65,7 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
     
     SECTION("Decode synchronized audio and video frames") {
         int frames_decoded = 0;
-        FrameDecoder::DecodedFrames decoded_frames;
+        HwFrameDecoder::HwFramePair decoded_frames;
         
         // 解码前20对音视频帧
         while (decoder.readNextFrames(decoded_frames) && frames_decoded < 20) {
@@ -121,7 +121,7 @@ TEST_CASE("FrameDecoder packet-level decoding", "[frame_decoder][requires_test_f
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    FrameDecoder decoder;
+    HwFrameDecoder decoder;
     
     if (!decoder.open(TEST_MKV_FILE)) {
         SKIP("Hardware decoder initialization failed");
@@ -180,10 +180,10 @@ TEST_CASE("FrameDecoder packet-level decoding", "[frame_decoder][requires_test_f
 }
 
 TEST_CASE("FrameDecoder error handling", "[frame_decoder]") {
-    FrameDecoder decoder;
+    HwFrameDecoder decoder;
     
     SECTION("Operations on uninitialized decoder") {
-        FrameDecoder::DecodedFrames frames;
+        HwFrameDecoder::HwFramePair frames;
         
         // 未初始化时的操作应该安全失败
         REQUIRE_FALSE(decoder.readNextFrames(frames));

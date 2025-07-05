@@ -2,7 +2,7 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
-#include "frame_decoder.h"
+#include "hw_frame_decoder.h"
 #include <memory>
 #include <wrl/client.h>
 extern "C" {
@@ -50,7 +50,7 @@ public:
     };
     
     struct DecodedFrames {
-        FrameDecoder::DecodedFrame audio_frame;
+        HwFrameDecoder::HwFrame audio_frame;
         RGBFrame rgb_frame;
     };
 
@@ -73,8 +73,8 @@ public:
     int getVideoWidth() const { return video_width_; }
     int getVideoHeight() const { return video_height_; }
     
-    // 获取内部FrameDecoder的访问（用于测试）
-    FrameDecoder* getFrameDecoder() { return &frame_decoder_; }
+    // 获取内部HwFrameDecoder的访问（用于测试）
+    HwFrameDecoder* getFrameDecoder() { return &frame_decoder_; }
     
     // 获取D3D11设备（用于设备共享）
     ID3D11Device* getD3D11Device() const { return d3d11_device_; }
@@ -85,8 +85,8 @@ public:
     void close();
 
 private:
-    // 内部FrameDecoder实例
-    FrameDecoder frame_decoder_;
+    // 内部HwFrameDecoder实例
+    HwFrameDecoder frame_decoder_;
     
     // D3D11设备（不拥有，只使用）
     ID3D11Device* d3d11_device_;
@@ -125,7 +125,7 @@ private:
     bool video_processor_initialized_;
     
     // 内部方法
-    bool convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_frame, TextureSlot* slot);
+    bool convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame, TextureSlot* slot);
     bool ensureVideoProcessor();
     bool createTextureSlot(TextureSlot* slot, int width, int height);
     void releaseTextureSlot(TextureSlot* slot);

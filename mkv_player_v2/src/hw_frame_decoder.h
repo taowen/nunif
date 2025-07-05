@@ -12,10 +12,10 @@ extern "C" {
     #include <libswresample/swresample.h>
 }
 
-class FrameDecoder {
+class HwFrameDecoder {
 public:
-    struct DecodedFrame {
-        FrameDecoder* owner = nullptr; // 指向拥有此帧的解码器
+    struct HwFrame {
+        HwFrameDecoder* owner = nullptr; // 指向拥有此帧的解码器
         int pool_index = -1;           // 在池中的索引
         double timestamp = 0.0;
         bool is_valid = false;
@@ -36,19 +36,19 @@ public:
         }
     };
     
-    struct DecodedFrames {
-        DecodedFrame audio_frame;
-        DecodedFrame video_frame;
+    struct HwFramePair {
+        HwFrame audio_frame;
+        HwFrame video_frame;
     };
 
-    FrameDecoder();
-    ~FrameDecoder();
+    HwFrameDecoder();
+    ~HwFrameDecoder();
 
     // 初始化解码器 - 打开MKV文件并设置解码器
     bool open(const std::string& filepath);
     
     // Pull-style解码接口 - 返回同步的音视频帧
-    bool readNextFrames(DecodedFrames& decoded_frames);
+    bool readNextFrames(HwFramePair& decoded_frames);
     
     // 直接解码接口（用于测试和特殊用途）
     bool decodeVideoPacket(AVPacket* packet, AVFrame* frame);
