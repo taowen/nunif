@@ -121,8 +121,8 @@ bool FrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     decoded_frames.video_frame.is_valid = false;
     
     // 从demuxer获取同步的包
-    PacketDemuxer::SyncedPackets synced_packets;
-    if (!demuxer_.readNextSyncedPackets(synced_packets)) {
+    PacketDemuxer::PacketPair synced_packets;
+    if (!demuxer_.readNextPacketPair(synced_packets)) {
         return false;
     }
     

@@ -56,12 +56,12 @@ TEST_CASE("PacketDemuxer synchronized packet reading", "[packet_demuxer][require
     }
     
     SECTION("Read synchronized packets") {
-        PacketDemuxer::SyncedPackets synced_packets;
+        PacketDemuxer::PacketPair synced_packets;
         int packets_read = 0;
         double last_timestamp = -1.0;
         
         // 读取前50组同步包
-        while (demuxer.readNextSyncedPackets(synced_packets) && packets_read < 50) {
+        while (demuxer.readNextPacketPair(synced_packets) && packets_read < 50) {
             packets_read++;
             
             // 验证时间戳递增
@@ -101,11 +101,11 @@ TEST_CASE("PacketDemuxer synchronized packet reading", "[packet_demuxer][require
     }
     
     SECTION("Audio-video synchronization") {
-        PacketDemuxer::SyncedPackets synced_packets;
+        PacketDemuxer::PacketPair synced_packets;
         int sync_checks = 0;
         
         // 读取包并检查同步
-        while (demuxer.readNextSyncedPackets(synced_packets) && sync_checks < 20) {
+        while (demuxer.readNextPacketPair(synced_packets) && sync_checks < 20) {
             if (synced_packets.audio_packet && synced_packets.video_packet) {
                 sync_checks++;
                 
@@ -156,11 +156,11 @@ TEST_CASE("PacketDemuxer EOF handling", "[packet_demuxer][requires_test_file]") 
     }
     
     SECTION("Read until EOF") {
-        PacketDemuxer::SyncedPackets synced_packets;
+        PacketDemuxer::PacketPair synced_packets;
         int total_packets = 0;
         
         // 读取所有包直到EOF
-        while (demuxer.readNextSyncedPackets(synced_packets)) {
+        while (demuxer.readNextPacketPair(synced_packets)) {
             total_packets++;
             
             // 释放包
@@ -178,7 +178,7 @@ TEST_CASE("PacketDemuxer EOF handling", "[packet_demuxer][requires_test_file]") 
         std::cout << "Total packets read until EOF: " << total_packets << std::endl;
         
         // EOF后继续读取应该返回false
-        REQUIRE_FALSE(demuxer.readNextSyncedPackets(synced_packets));
+        REQUIRE_FALSE(demuxer.readNextPacketPair(synced_packets));
         REQUIRE(demuxer.isEOF());
     }
     
@@ -189,10 +189,10 @@ TEST_CASE("PacketDemuxer error handling", "[packet_demuxer]") {
     PacketDemuxer demuxer;
     
     SECTION("Operations on uninitialized demuxer") {
-        PacketDemuxer::SyncedPackets packets;
+        PacketDemuxer::PacketPair packets;
         
         // 未初始化时的操作应该安全失败
-        REQUIRE_FALSE(demuxer.readNextSyncedPackets(packets));
+        REQUIRE_FALSE(demuxer.readNextPacketPair(packets));
         REQUIRE(demuxer.getReader().getVideoCodecParameters() == nullptr);
         REQUIRE(demuxer.getReader().getAudioCodecParameters() == nullptr);
     }

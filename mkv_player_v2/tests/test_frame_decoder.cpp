@@ -132,14 +132,14 @@ TEST_CASE("FrameDecoder packet-level decoding", "[frame_decoder][requires_test_f
         auto* demuxer = decoder.getDemuxer();
         REQUIRE(demuxer != nullptr);
         
-        PacketDemuxer::SyncedPackets packets;
+        PacketDemuxer::PacketPair packets;
         AVFrame* video_frame = av_frame_alloc();
         AVFrame* audio_frame = av_frame_alloc();
         
         int decoded_count = 0;
         
         // 直接测试包解码
-        while (demuxer->readNextSyncedPackets(packets) && decoded_count < 10) {
+        while (demuxer->readNextPacketPair(packets) && decoded_count < 10) {
             bool video_decoded = false;
             bool audio_decoded = false;
             

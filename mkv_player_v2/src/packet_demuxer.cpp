@@ -36,7 +36,7 @@ bool PacketDemuxer::open(const std::string& filepath) {
     return true;
 }
 
-bool PacketDemuxer::readNextSyncedPackets(SyncedPackets& packets) {
+bool PacketDemuxer::readNextPacketPair(PacketPair& packets) {
     if (!is_initialized_) {
         return false;
     }

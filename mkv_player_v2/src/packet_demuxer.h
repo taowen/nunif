@@ -10,7 +10,7 @@ extern "C" {
 
 class PacketDemuxer {
 public:
-    struct SyncedPackets {
+    struct PacketPair {
         AVPacket* audio_packet = nullptr;  // 可能为nullptr
         AVPacket* video_packet = nullptr;  // 可能为nullptr  
         double timestamp = 0.0;            // 同步时间戳（基于音频）
@@ -23,7 +23,7 @@ public:
     bool open(const std::string& filepath);
     
     // 读取下一组同步的音视频包
-    bool readNextSyncedPackets(SyncedPackets& packets);
+    bool readNextPacketPair(PacketPair& packets);
     
     // 获取底层的 MKVStreamReader 引用
     const MKVStreamReader& getReader() const { return reader_; }
