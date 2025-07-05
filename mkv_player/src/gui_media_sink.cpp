@@ -60,7 +60,10 @@ GUIMediaSink::GUIMediaSink()
     , is_paused_(false)
     , paused_duration_(0.0)
     , last_video_timestamp_(0.0)
-    , has_new_frame_(false) {
+    , has_new_frame_(false)
+    , test_mode_(false)
+    , auto_close_ms_(1000) 
+    , test_start_time_(std::chrono::steady_clock::now()) {
 }
 
 GUIMediaSink::~GUIMediaSink() {
@@ -138,9 +141,8 @@ void GUIMediaSink::onVideoFrame(ID3D11Texture2D* rgb_texture,
     last_video_timestamp_ = timestamp;
     has_new_frame_ = true;
     
-    // 立即渲染新帧
-    renderFrame();
-    present();
+    // 不立即渲染，只标记有新帧
+    // 渲染将在主循环中统一处理
 }
 
 void GUIMediaSink::onAudioFrame(const int16_t* samples, int sample_count,
@@ -220,6 +222,7 @@ bool GUIMediaSink::createWindow(const std::string& title) {
             std::cerr << "Failed to register window class, error: " << std::hex << error << std::endl;
             return false;
         }
+        // 窗口类已存在，继续使用
     }
     
     // 限制窗口大小（4K视频太大了）
@@ -265,12 +268,58 @@ bool GUIMediaSink::createWindow(const std::string& title) {
 
 void GUIMediaSink::showWindow() {
     if (window_handle_) {
+        std::cout << "Showing window, handle: " << window_handle_ << std::endl;
         ShowWindow(window_handle_, SW_SHOWDEFAULT);
         UpdateWindow(window_handle_);
+        
+        // 清理消息队列中的残留消息
+        MSG msg;
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                // 忽略残留的WM_QUIT消息
+                std::cout << "Ignoring residual WM_QUIT message" << std::endl;
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    } else {
+        std::cout << "showWindow called but no window handle!" << std::endl;
     }
 }
 
 bool GUIMediaSink::processMessages() {
+    static int call_count = 0;
+    call_count++;
+    if (call_count <= 3) {
+        std::cout << "processMessages called #" << call_count << std::endl;
+    }
+    
+    // 检查测试模式自动关闭
+    if (test_mode_) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - test_start_time_).count();
+        
+        // 每100ms打印一次调试信息
+        static auto last_debug_time = std::chrono::steady_clock::now();
+        auto now_debug = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now_debug - last_debug_time).count() > 100) {
+            std::cout << "Test mode: elapsed=" << elapsed_ms 
+                      << "ms, target=" << auto_close_ms_ << "ms" << std::endl;
+            last_debug_time = now_debug;
+        }
+        
+        if (elapsed_ms >= auto_close_ms_) {
+            std::cout << "Test mode: Auto-closing window after " << elapsed_ms << "ms" << std::endl;
+            // 发送WM_CLOSE消息来正确关闭窗口
+            if (window_handle_) {
+                PostMessage(window_handle_, WM_CLOSE, 0, 0);
+            }
+            should_close_ = true;
+            return false;
+        }
+    }
+    
     MSG msg = {};
     while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&msg);
@@ -278,7 +327,12 @@ bool GUIMediaSink::processMessages() {
         
         if (msg.message == WM_QUIT) {
             should_close_ = true;
+            std::cout << "Received WM_QUIT message, closing window" << std::endl;
         }
+    }
+    
+    if (should_close_) {
+        std::cout << "processMessages returning false, should_close_=" << should_close_ << std::endl;
     }
     
     return !should_close_;
@@ -694,6 +748,10 @@ LRESULT CALLBACK GUIMediaSink::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, L
 
 LRESULT GUIMediaSink::handleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+        case WM_CLOSE:
+            DestroyWindow(window_handle_);
+            return 0;
+            
         case WM_DESTROY:
             PostQuitMessage(0);
             should_close_ = true;
@@ -720,4 +778,14 @@ LRESULT GUIMediaSink::handleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
     }
     
     return DefWindowProc(window_handle_, uMsg, wParam, lParam);
+}
+
+void GUIMediaSink::setTestMode(bool enabled, int auto_close_ms) {
+    test_mode_ = enabled;
+    auto_close_ms_ = auto_close_ms;
+    if (enabled) {
+        // 重置测试开始时间为当前时间
+        test_start_time_ = std::chrono::steady_clock::now();
+        std::cout << "Test mode enabled: auto-close after " << auto_close_ms << "ms" << std::endl;
+    }
 }

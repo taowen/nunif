@@ -46,6 +46,10 @@ public:
     bool processMessages(); // 返回false表示应该退出
     void present();
     void renderFrame();  // 公开渲染方法用于测试
+    
+    // 测试模式相关
+    void setTestMode(bool enabled, int auto_close_ms = 1000);
+    bool isTestMode() const { return test_mode_; }
 
 protected:
     // 媒体信息 (protected for testing)
@@ -59,6 +63,11 @@ protected:
     std::chrono::steady_clock::time_point start_time_;
     std::chrono::steady_clock::time_point pause_time_;
     double paused_duration_;
+    
+    // 测试模式 (protected for testing)
+    bool test_mode_;
+    int auto_close_ms_;
+    std::chrono::steady_clock::time_point test_start_time_;
     
 private:
     // 窗口相关

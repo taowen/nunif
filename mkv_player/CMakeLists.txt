@@ -27,6 +27,7 @@ add_executable(spike
     tests/test_cuda_frame_decoder.cpp
     tests/test_rgb_verification.cpp
     tests/test_cli_integrated.cpp
+    tests/test_gui_integration.cpp
     src/mkv_stream_reader.cpp
     src/packet_demuxer.cpp
     src/frame_decoder.cpp
@@ -35,6 +36,7 @@ add_executable(spike
     src/rgb_verification.cpp
     src/media_player.cpp
     src/cli_media_sink.cpp
+    src/gui_media_sink.cpp
 )
 
 # Link Catch2 to the executable

@@ -45,9 +45,11 @@ int main(int argc, char* argv[]) {
     // 显示窗口
     gui_sink_ptr->showWindow();
     
-    // 主播放循环
+    // 主播放循环（单线程简化版）
     int frames_played = 0;
     auto start_time = std::chrono::high_resolution_clock::now();
+    auto last_frame_time = start_time;
+    
     while (true) {
         // 处理窗口消息
         if (!gui_sink_ptr->processMessages()) {
@@ -55,22 +57,28 @@ int main(int argc, char* argv[]) {
             break;
         }
         
-        // 持续渲染（测试DirectX11渲染管道）
-        gui_sink_ptr->renderFrame();
-        gui_sink_ptr->present();
-        
-        // 播放一帧（如果可能）
-        if (player.playOneFrame()) {
+        // 尝试解码一帧（不会阻塞太久）
+        bool has_new_frame = player.playOneFrame();
+        if (has_new_frame) {
             frames_played++;
-            auto current_time = std::chrono::high_resolution_clock::now();
-            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
-            if (frames_played % 100 == 0) {  // 减少打印频率
+            if (frames_played % 100 == 0) {
+                auto current_time = std::chrono::high_resolution_clock::now();
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count();
                 std::cout << "\\rFrames played: " << frames_played << " | Elapsed time: " << elapsed_ms << "ms" << std::flush;
             }
         }
-
-        // 短暂休眠以避免过度占用CPU
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));  // ~60fps
+        
+        // 统一渲染：视频帧在onVideoFrame中已经更新纹理，这里只需要显示
+        gui_sink_ptr->renderFrame();
+        gui_sink_ptr->present();
+        
+        // 控制帧率（简单固定60fps）
+        auto now = std::chrono::high_resolution_clock::now();
+        auto frame_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_time);
+        if (frame_duration.count() < 16) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16 - frame_duration.count()));
+        }
+        last_frame_time = std::chrono::high_resolution_clock::now();
     }
     
     std::cout << "\\nGUI playback completed." << std::endl;
