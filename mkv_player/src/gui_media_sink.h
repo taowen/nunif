@@ -1,7 +1,7 @@
 #pragma once
 
 #include "media_sink.h"
-#include "frame_queue.h"
+#include "simple_frame_sync.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -29,6 +29,11 @@ public:
     // IMediaSink接口实现
     bool initialize(int video_width, int video_height, 
                    int audio_sample_rate, int audio_channels) override;
+    
+    // 使用外部D3D11设备初始化
+    bool initializeWithDevice(int video_width, int video_height, 
+                             int audio_sample_rate, int audio_channels,
+                             ID3D11Device* external_device, ID3D11DeviceContext* external_context);
     
     void onVideoFrame(ID3D11Texture2D* rgb_texture, 
                      ID3D11ShaderResourceView* rgb_srv,
@@ -60,6 +65,14 @@ public:
     // 测试模式相关
     void setTestMode(bool enabled, int auto_close_ms = 1000);
     bool isTestMode() const { return test_mode_; }
+    
+    // 设备共享
+    ID3D11Device* getD3D11Device() const { return d3d11_device_.Get(); }
+    ID3D11DeviceContext* getD3D11Context() const { return d3d11_context_.Get(); }
+    
+    // 设备恢复
+    bool isDeviceRemoved() const;
+    bool recreateDevice();
 
 protected:
     // 媒体信息 (protected for testing)
@@ -106,7 +119,7 @@ private:
     bool has_new_frame_;
     
     // 多线程相关
-    std::unique_ptr<FrameQueue> frame_queue_;
+    std::unique_ptr<SimpleFrameSync> frame_sync_;
     std::unique_ptr<std::thread> decoder_thread_;
     std::atomic<bool> should_stop_decoder_;
     MediaPlayer* media_player_; // 不拥有所有权
@@ -114,7 +127,7 @@ private:
     
     // 私有方法
     bool createWindowClass();
-    bool initializeDirectX11();
+    bool createSwapChainWithDevice(); // 使用FFmpeg设备创建交换链
     bool createRenderTargets();
     bool createShaders();
     bool createGeometry();
@@ -125,7 +138,7 @@ private:
     void decoderThreadLoop();
     
     // 渲染线程消费帧
-    void processFrameQueue();
+    void processFrameSync();
     
     // 窗口消息处理
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

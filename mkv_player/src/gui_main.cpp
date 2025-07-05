@@ -3,6 +3,8 @@
 #include "rgb_frame_decoder.h"
 #include <iostream>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <windows.h>
 
 int main(int argc, char* argv[]) {
@@ -20,52 +22,73 @@ int main(int argc, char* argv[]) {
     }
     
     try {
-        // 创建临时解码器获取视频信息
-        RGBFrameDecoder temp_decoder;
-        if (!temp_decoder.open(filepath)) {
+        // 第一步：创建解码器建立FFmpeg的D3D11设备
+        auto main_decoder = std::make_unique<RGBFrameDecoder>();
+        if (!main_decoder->open(filepath)) {
             std::cerr << "Failed to open file: " << filepath << std::endl;
             return -1;
         }
         
         // 获取视频信息
-        int video_width = temp_decoder.getVideoWidth();
-        int video_height = temp_decoder.getVideoHeight();
-        temp_decoder.close();
+        int video_width = main_decoder->getVideoWidth();
+        int video_height = main_decoder->getVideoHeight();
         
-        std::cout << "Video dimensions: " << video_width << "x" << video_height << std::endl;
-        
+        // 验证视频信息有效性
         if (video_width <= 0 || video_height <= 0) {
-            std::cerr << "Invalid video dimensions: " << video_width << "x" << video_height << std::endl;
+            std::cerr << "Invalid video dimensions from decoder: " << video_width << "x" << video_height << std::endl;
+            main_decoder->close();
             return -1;
         }
         
-        // 创建媒体播放器和GUI sink
-        MediaPlayer player;
+        std::cout << "Video dimensions: " << video_width << "x" << video_height << std::endl;
+        
+        // 第二步：获取FFmpeg创建的D3D11设备
+        ID3D11Device* ffmpeg_device = main_decoder->getD3D11Device();
+        ID3D11DeviceContext* ffmpeg_context = main_decoder->getD3D11Context();
+        
+        if (!ffmpeg_device || !ffmpeg_context) {
+            std::cerr << "Failed to get FFmpeg D3D11 device" << std::endl;
+            main_decoder->close();
+            return -1;
+        }
+        
+        std::cout << "FFmpeg D3D11 device established successfully" << std::endl;
+        
+        // 第三步：创建GUI sink并使用FFmpeg的设备
         auto gui_sink = std::make_unique<GUIMediaSink>();
         
         // 设置测试模式（可选）
         // gui_sink->setTestMode(true, 5000); // 5秒后自动关闭
         
-        // 初始化播放器
-        if (!player.initialize(std::move(gui_sink))) {
-            std::cerr << "Failed to initialize media player" << std::endl;
+        // 初始化GUI sink（使用FFmpeg的设备）
+        if (!gui_sink->initializeWithDevice(video_width, video_height, 44100, 2, ffmpeg_device, ffmpeg_context)) {
+            std::cerr << "Failed to initialize GUI sink with FFmpeg device" << std::endl;
+            main_decoder->close();
             return -1;
         }
         
         // 获取GUI sink的引用
-        auto* gui_sink_ptr = static_cast<GUIMediaSink*>(player.getMediaSink());
+        auto* gui_sink_ptr = gui_sink.get();
         
-        // 设置视频尺寸
-        gui_sink_ptr->setVideoDimensions(video_width, video_height);
-        
-        // 创建窗口
-        if (!gui_sink_ptr->createWindow("Multi-threaded Video Player")) {
-            std::cerr << "Failed to create window" << std::endl;
+        // 第四步：创建MediaPlayer并传递现有的解码器
+        MediaPlayer player;
+        if (!player.initializeWithDecoder(std::move(gui_sink), std::move(main_decoder))) {
+            std::cerr << "Failed to initialize media player" << std::endl;
             return -1;
         }
         
         // 显示窗口
         gui_sink_ptr->showWindow();
+        
+        // 等待窗口和DirectX11资源完全初始化
+        std::cout << "Waiting for window to be ready..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // 确保所有消息都已处理
+        if (!gui_sink_ptr->processMessages()) {
+            std::cerr << "Window closed during initialization" << std::endl;
+            return -1;
+        }
         
         // 启动多线程播放
         std::cout << "Starting multi-threaded playback..." << std::endl;

@@ -65,7 +65,7 @@ GUIMediaSink::GUIMediaSink()
     , test_mode_(false)
     , auto_close_ms_(1000) 
     , test_start_time_(std::chrono::steady_clock::now())
-    , frame_queue_(std::make_unique<FrameQueue>())
+    , frame_sync_(std::make_unique<SimpleFrameSync>())
     , should_stop_decoder_(false)
     , media_player_(nullptr) {
 }
@@ -77,45 +77,56 @@ GUIMediaSink::~GUIMediaSink() {
 
 bool GUIMediaSink::initialize(int video_width, int video_height, 
                              int audio_sample_rate, int audio_channels) {
+    std::cerr << "Error: GUIMediaSink now requires FFmpeg D3D11 device. Use initializeWithDevice() instead." << std::endl;
+    return false;
+}
+
+bool GUIMediaSink::initializeWithDevice(int video_width, int video_height, 
+                                       int audio_sample_rate, int audio_channels,
+                                       ID3D11Device* external_device, ID3D11DeviceContext* external_context) {
     video_width_ = video_width;
     video_height_ = video_height;
     audio_sample_rate_ = audio_sample_rate;
     audio_channels_ = audio_channels;
     
-    
-    // 创建窗口（如果失败也继续，只是无法显示）
+    // 创建窗口
     if (!createWindow("Video Player - " + std::to_string(video_width_) + "x" + std::to_string(video_height_))) {
-        std::cerr << "Failed to create window, continuing without display" << std::endl;
-        // 不返回false，继续初始化DirectX11用于解码
+        std::cerr << "Failed to create window" << std::endl;
+        return false;
     }
     
-    // 只有有窗口时才初始化DirectX11渲染
-    if (window_handle_) {
-        // 初始化DirectX11
-        if (!initializeDirectX11()) {
-            std::cerr << "Failed to initialize DirectX11" << std::endl;
-            return false;
-        }
-        
-        // 创建渲染目标
-        if (!createRenderTargets()) {
-            std::cerr << "Failed to create render targets" << std::endl;
-            return false;
-        }
-        
-        // 创建着色器
-        if (!createShaders()) {
-            std::cerr << "Failed to create shaders" << std::endl;
-            return false;
-        }
-        
-        // 创建几何体
-        if (!createGeometry()) {
-            std::cerr << "Failed to create geometry" << std::endl;
-            return false;
-        }
-    } else {
-        std::cerr << "No window handle, skipping DirectX11 initialization" << std::endl;
+    // 使用提供的FFmpeg D3D11设备
+    if (!external_device || !external_context) {
+        std::cerr << "Error: FFmpeg D3D11 device is required" << std::endl;
+        return false;
+    }
+    
+    std::cout << "Using provided FFmpeg D3D11 device for GUI" << std::endl;
+    d3d11_device_ = external_device;
+    d3d11_context_ = external_context;
+    
+    // 创建交换链（使用FFmpeg设备）
+    if (!createSwapChainWithDevice()) {
+        std::cerr << "Failed to create swap chain with external device" << std::endl;
+        return false;
+    }
+    
+    // 创建渲染目标
+    if (!createRenderTargets()) {
+        std::cerr << "Failed to create render targets" << std::endl;
+        return false;
+    }
+    
+    // 创建着色器
+    if (!createShaders()) {
+        std::cerr << "Failed to create shaders" << std::endl;
+        return false;
+    }
+    
+    // 创建几何体
+    if (!createGeometry()) {
+        std::cerr << "Failed to create geometry" << std::endl;
+        return false;
     }
     
     // 记录开始时间
@@ -132,9 +143,13 @@ void GUIMediaSink::onVideoFrame(ID3D11Texture2D* rgb_texture,
         return;
     }
     
-    // 创建帧对象并推送到队列
-    VideoFrame frame(rgb_texture, rgb_srv, timestamp, width, height);
-    if (!frame_queue_->push(frame, 10)) { // 10ms 超时
+    // 使用智能指针包装，避免裸指针管理
+    ComPtr<ID3D11Texture2D> texture_ptr(rgb_texture);
+    ComPtr<ID3D11ShaderResourceView> srv_ptr(rgb_srv);
+    
+    // 提交帧到同步器，背压控制自动生效
+    if (!frame_sync_->submitFrame(texture_ptr, srv_ptr, timestamp, width, height, 2)) {
+        // 渲染线程处理太慢，这是正常的背压响应
     }
 }
 
@@ -168,10 +183,11 @@ void GUIMediaSink::close() {
 }
 
 bool GUIMediaSink::createWindow(const std::string& title) {
+    std::cout << "[DEBUG] createWindow started: " << title << std::endl;
     window_title_ = title;
     
     if (!createWindowClass()) {
-        std::cerr << "Failed to create window class" << std::endl;
+        std::cerr << "[ERROR] Failed to create window class" << std::endl;
         return false;
     }
     
@@ -186,6 +202,8 @@ bool GUIMediaSink::createWindow(const std::string& title) {
     int window_width = window_rect.right - window_rect.left;
     int window_height = window_rect.bottom - window_rect.top;
     
+    std::cout << "[DEBUG] Creating window with size: " << window_width << "x" << window_height << std::endl;
+    
     // 创建窗口（先不传this指针）
     window_handle_ = CreateWindowExW(
         0,
@@ -199,16 +217,22 @@ bool GUIMediaSink::createWindow(const std::string& title) {
         nullptr
     );
     
-    // 如果窗口创建成功，设置用户数据
-    if (window_handle_) {
-        SetWindowLongPtr(window_handle_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-    }
-    
     if (!window_handle_) {
         DWORD error = GetLastError();
-        std::cerr << "Failed to create window, error: " << std::hex << error << " (decimal: " << std::dec << error << ")" << std::endl;
-        std::cerr << "Window class: GUIMediaSink" << std::endl;
-        std::cerr << "Window size: " << window_width << "x" << window_height << std::endl;
+        std::cerr << "[ERROR] Failed to create window, error: " << std::hex << error << " (decimal: " << std::dec << error << ")" << std::endl;
+        std::cerr << "[ERROR] Window class: GUIMediaSink" << std::endl;
+        std::cerr << "[ERROR] Window size: " << window_width << "x" << window_height << std::endl;
+        return false;
+    }
+    
+    std::cout << "[DEBUG] Window created successfully, handle: " << window_handle_ << std::endl;
+    
+    // 如果窗口创建成功，设置用户数据
+    SetWindowLongPtr(window_handle_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    
+    // 验证窗口状态
+    if (!IsWindow(window_handle_)) {
+        std::cerr << "[ERROR] Created window handle is invalid" << std::endl;
         return false;
     }
     
@@ -263,10 +287,25 @@ bool GUIMediaSink::processMessages() {
 }
 
 void GUIMediaSink::present() {
-    if (swap_chain_) {
-        HRESULT hr = swap_chain_->Present(1, 0);
-        if (FAILED(hr)) {
-            std::cerr << "Present failed: " << std::hex << hr << std::endl;
+    if (!swap_chain_) {
+        std::cerr << "[ERROR] present() failed: No swap chain" << std::endl;
+        return;
+    }
+    
+    // 检查设备是否已丢失
+    if (d3d11_device_) {
+        HRESULT device_hr = d3d11_device_->GetDeviceRemovedReason();
+        if (device_hr != S_OK) {
+            std::cerr << "[ERROR] D3D11 device removed: " << std::hex << device_hr << std::endl;
+            return;
+        }
+    }
+    
+    HRESULT hr = swap_chain_->Present(1, 0);
+    if (FAILED(hr)) {
+        std::cerr << "[ERROR] Present failed: " << std::hex << hr << std::endl;
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+            std::cerr << "[ERROR] Device removed/reset during present" << std::endl;
         }
     }
 }
@@ -274,9 +313,25 @@ void GUIMediaSink::present() {
 // 主动渲染循环 - 最佳实践
 bool GUIMediaSink::renderLoop() {
     if (!window_handle_) {
+        std::cerr << "[ERROR] renderLoop failed: No window handle" << std::endl;
         return false;
     }
     if (!d3d11_context_) {
+        std::cerr << "[ERROR] renderLoop failed: No D3D11 context" << std::endl;
+        return false;
+    }
+    if (!render_target_view_) {
+        std::cerr << "[ERROR] renderLoop failed: No render target view" << std::endl;
+        return false;
+    }
+    
+    // 额外的运行时检查
+    if (!d3d11_device_) {
+        std::cerr << "[ERROR] renderLoop failed: No D3D11 device" << std::endl;
+        return false;
+    }
+    if (!swap_chain_) {
+        std::cerr << "[ERROR] renderLoop failed: No swap chain" << std::endl;
         return false;
     }
     
@@ -288,13 +343,24 @@ bool GUIMediaSink::renderLoop() {
     const int target_frame_time_ms = 16;
     
     // 处理帧队列（消费解码线程产生的帧）
-    processFrameQueue();
+    try {
+        processFrameSync();
+    } catch (const std::exception& e) {
+        std::cerr << "processFrameSync failed: " << e.what() << std::endl;
+        return false;
+    }
     
-    // 主动渲染 - 不依赖WM_PAINT
-    if (elapsed_ms >= target_frame_time_ms) {
-        renderFrame();
-        present();
-        last_render_time = now;
+    // 只在有新帧或达到目标帧率时才渲染
+    if ((has_new_frame_ && elapsed_ms >= 8) || elapsed_ms >= target_frame_time_ms) {
+        try {
+            renderFrame();
+            present();
+            last_render_time = now;
+            has_new_frame_ = false; // 重置新帧标志
+        } catch (const std::exception& e) {
+            std::cerr << "renderFrame/present failed: " << e.what() << std::endl;
+            return false;
+        }
     }
     
     // 限制CPU使用率
@@ -328,63 +394,47 @@ bool GUIMediaSink::createWindowClass() {
     return true;
 }
 
-bool GUIMediaSink::initializeDirectX11() {
-    // 创建设备和设备上下文
-    D3D_FEATURE_LEVEL feature_levels[] = {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_1,
-        D3D_FEATURE_LEVEL_10_0
-    };
-    
-    UINT create_device_flags = 0;
-#ifdef _DEBUG
-    create_device_flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-    
-    D3D_FEATURE_LEVEL feature_level;
-    HRESULT hr = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        create_device_flags,
-        feature_levels,
-        ARRAYSIZE(feature_levels),
-        D3D11_SDK_VERSION,
-        &d3d11_device_,
-        &feature_level,
-        &d3d11_context_
-    );
-    
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create D3D11 device: " << std::hex << hr << std::endl;
+
+bool GUIMediaSink::createSwapChainWithDevice() {
+    if (!d3d11_device_ || !window_handle_) {
+        std::cerr << "[ERROR] Invalid device or window handle" << std::endl;
         return false;
     }
     
-    
-    return true;
-}
-
-bool GUIMediaSink::createRenderTargets() {
     // 获取窗口客户区尺寸
     RECT client_rect;
-    GetClientRect(window_handle_, &client_rect);
+    if (!GetClientRect(window_handle_, &client_rect)) {
+        DWORD error = GetLastError();
+        std::cerr << "[ERROR] GetClientRect failed: " << error << std::endl;
+        return false;
+    }
+    
     UINT width = client_rect.right - client_rect.left;
     UINT height = client_rect.bottom - client_rect.top;
     
-    // 创建交换链
+    // 获取DXGI设备和工厂
     ComPtr<IDXGIDevice> dxgi_device;
-    HRESULT hr = d3d11_device_.As(&dxgi_device);
-    if (FAILED(hr)) return false;
+    HRESULT hr = d3d11_device_->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+    if (FAILED(hr)) {
+        std::cerr << "[ERROR] Failed to get DXGI device: " << std::hex << hr << std::endl;
+        return false;
+    }
     
     ComPtr<IDXGIAdapter> dxgi_adapter;
     hr = dxgi_device->GetAdapter(&dxgi_adapter);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[ERROR] Failed to get DXGI adapter: " << std::hex << hr << std::endl;
+        return false;
+    }
     
     ComPtr<IDXGIFactory> dxgi_factory;
     hr = dxgi_adapter->GetParent(IID_PPV_ARGS(&dxgi_factory));
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        std::cerr << "[ERROR] Failed to get DXGI factory: " << std::hex << hr << std::endl;
+        return false;
+    }
     
+    // 创建交换链描述符
     DXGI_SWAP_CHAIN_DESC swap_chain_desc = {};
     swap_chain_desc.BufferCount = 1;
     swap_chain_desc.BufferDesc.Width = width;
@@ -397,18 +447,35 @@ bool GUIMediaSink::createRenderTargets() {
     swap_chain_desc.SampleDesc.Count = 1;
     swap_chain_desc.SampleDesc.Quality = 0;
     swap_chain_desc.Windowed = TRUE;
+    swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     
+    // 使用外部设备创建交换链
     hr = dxgi_factory->CreateSwapChain(d3d11_device_.Get(), &swap_chain_desc, &swap_chain_);
     if (FAILED(hr)) {
-        std::cerr << "Failed to create swap chain: " << std::hex << hr << std::endl;
+        std::cerr << "[ERROR] Failed to create swap chain with external device: " << std::hex << hr << std::endl;
+        return false;
+    }
+    
+    std::cout << "[DEBUG] Swap chain created successfully with external device" << std::endl;
+    return true;
+}
+
+bool GUIMediaSink::createRenderTargets() {
+    // 获取窗口客户区尺寸
+    RECT client_rect;
+    GetClientRect(window_handle_, &client_rect);
+    UINT width = client_rect.right - client_rect.left;
+    UINT height = client_rect.bottom - client_rect.top;
+    
+    // 从交换链获取后缓冲区（交换链已经在initializeDirectX11中创建）
+    ComPtr<ID3D11Texture2D> back_buffer;
+    HRESULT hr = swap_chain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer));
+    if (FAILED(hr)) {
+        std::cerr << "Failed to get back buffer: " << std::hex << hr << std::endl;
         return false;
     }
     
     // 创建渲染目标视图
-    ComPtr<ID3D11Texture2D> back_buffer;
-    hr = swap_chain_->GetBuffer(0, IID_PPV_ARGS(&back_buffer));
-    if (FAILED(hr)) return false;
-    
     hr = d3d11_device_->CreateRenderTargetView(back_buffer.Get(), nullptr, &render_target_view_);
     if (FAILED(hr)) {
         std::cerr << "Failed to create render target view: " << std::hex << hr << std::endl;
@@ -561,7 +628,7 @@ bool GUIMediaSink::createGeometry() {
 
 void GUIMediaSink::updateVideoTexture(ID3D11Texture2D* source_texture) {
     if (!source_texture || !d3d11_context_) {
-        std::cerr << "updateVideoTexture: Invalid parameters" << std::endl;
+        std::cerr << "updateVideoTexture: Invalid parameters (source_texture=" << source_texture << ", context=" << d3d11_context_.Get() << ")" << std::endl;
         return;
     }
     
@@ -611,7 +678,7 @@ void GUIMediaSink::renderFrame() {
     d3d11_context_->ClearRenderTargetView(render_target_view_.Get(), clear_color);
     
     // 如果有视频纹理，渲染它
-    if (video_srv_) {
+    if (video_srv_ && video_texture_) {
         // 设置着色器
         d3d11_context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
         d3d11_context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
@@ -626,9 +693,13 @@ void GUIMediaSink::renderFrame() {
         d3d11_context_->IASetIndexBuffer(index_buffer_.Get(), DXGI_FORMAT_R32_UINT, 0);
         d3d11_context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         
-        // 设置纹理和采样器
-        d3d11_context_->PSSetShaderResources(0, 1, video_srv_.GetAddressOf());
-        d3d11_context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
+        // 设置纹理和采样器 - 添加空指针检查
+        if (video_srv_ && sampler_state_) {
+            d3d11_context_->PSSetShaderResources(0, 1, video_srv_.GetAddressOf());
+            d3d11_context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
+        } else {
+            std::cerr << "Warning: video_srv_ or sampler_state_ is null" << std::endl;
+        }
         
         // 绘制
         d3d11_context_->DrawIndexed(6, 0, 0);
@@ -719,6 +790,21 @@ void GUIMediaSink::setVideoDimensions(int width, int height) {
     video_height_ = height;
 }
 
+bool GUIMediaSink::isDeviceRemoved() const {
+    if (!d3d11_device_) {
+        return true;
+    }
+    
+    HRESULT hr = d3d11_device_->GetDeviceRemovedReason();
+    return hr != S_OK;
+}
+
+bool GUIMediaSink::recreateDevice() {
+    std::cout << "[INFO] Device recreation not supported in FFmpeg shared device mode" << std::endl;
+    std::cout << "[INFO] The application should restart to recover from device removal" << std::endl;
+    return false;
+}
+
 // 多线程播放控制
 bool GUIMediaSink::startPlayback(MediaPlayer* player, const std::string& filepath) {
     if (!player) {
@@ -748,9 +834,9 @@ void GUIMediaSink::stopPlayback() {
         decoder_thread_.reset();
     }
     
-    // 清空帧队列
-    if (frame_queue_) {
-        frame_queue_->clear();
+    // 停止帧同步器
+    if (frame_sync_) {
+        frame_sync_->stop();
     }
     
     media_player_ = nullptr;
@@ -770,11 +856,7 @@ void GUIMediaSink::decoderThreadLoop() {
         return;
     }
     
-    // 打开文件
-    if (!media_player_->openFile(current_filepath_)) {
-        std::cerr << "decoderThreadLoop: Failed to open file: " << current_filepath_ << std::endl;
-        return;
-    }
+    // 文件已经在initializeWithDecoder中打开了，无需重新打开
     
     
     // 解码循环
@@ -783,28 +865,23 @@ void GUIMediaSink::decoderThreadLoop() {
             break;
         }
         
-        // 检查队列是否过满，如果是则稍微等待
-        if (frame_queue_->size() > FrameQueue::MAX_QUEUE_SIZE * 0.8) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
+        // 新方案：SimpleFrameSync自动处理背压
+        // 不需要手动检查队列大小，submitFrame会自动阻塞
     }
     
-    // 停止队列
-    frame_queue_->stop();
+    // 停止同步器
+    frame_sync_->stop();
     
 }
 
-// 处理帧队列（在主线程调用）
-void GUIMediaSink::processFrameQueue() {
-    VideoFrame frame;
+// 处理帧同步（在主线程调用）
+void GUIMediaSink::processFrameSync() {
+    SimpleVideoFrame frame;
     
-    // 消费所有可用帧（但不阻塞）
-    while (frame_queue_->pop(frame, 1)) { // 1ms 超时，不阻塞
+    // 非阻塞获取最新帧
+    if (frame_sync_->consumeFrame(frame, 0)) {
         if (frame.is_valid && frame.texture) {
-            // 更新视频纹理
-            updateVideoTexture(frame.texture);
-            
-            // 更新时间戳
+            updateVideoTexture(frame.texture.Get());
             last_video_timestamp_ = frame.timestamp;
             has_new_frame_ = true;
         }

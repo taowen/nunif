@@ -6,17 +6,20 @@
 #include <memory>
 #include <chrono>
 #include <d3d11.h>
+#include <wrl/client.h>
+
+using Microsoft::WRL::ComPtr;
 
 // 视频帧数据结构
 struct VideoFrame {
-    ID3D11Texture2D* texture;
-    ID3D11ShaderResourceView* srv;
+    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11ShaderResourceView> srv;
     double timestamp;
     int width;
     int height;
     bool is_valid;
     
-    VideoFrame() : texture(nullptr), srv(nullptr), timestamp(0.0), 
+    VideoFrame() : timestamp(0.0), 
                   width(0), height(0), is_valid(false) {}
     
     VideoFrame(ID3D11Texture2D* tex, ID3D11ShaderResourceView* shader_view, 

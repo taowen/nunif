@@ -21,6 +21,14 @@ public:
      * @return 是否成功初始化
      */
     bool initialize(std::unique_ptr<IMediaSink> sink);
+    
+    /**
+     * 使用现有解码器初始化播放器
+     * @param sink 媒体输出sink
+     * @param decoder 已经初始化的解码器（转移所有权）
+     * @return 是否成功初始化
+     */
+    bool initializeWithDecoder(std::unique_ptr<IMediaSink> sink, std::unique_ptr<RGBFrameDecoder> decoder);
 
     /**
      * 打开媒体文件
@@ -91,7 +99,6 @@ private:
     std::chrono::high_resolution_clock::time_point playback_start_time_;
     
     // 内部方法
-    bool initializeSink();
     bool processNextFrame();
     void updateStatistics(const RGBFrameDecoder::DecodedFrames& frames);
     void printPlaybackSummary();

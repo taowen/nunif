@@ -1,4 +1,5 @@
 #include "media_player.h"
+#include "gui_media_sink.h"
 #include <iostream>
 #include <iomanip>
 #include <thread>
@@ -33,28 +34,41 @@ bool MediaPlayer::initialize(std::unique_ptr<IMediaSink> sink) {
     return true;
 }
 
+bool MediaPlayer::initializeWithDecoder(std::unique_ptr<IMediaSink> sink, std::unique_ptr<RGBFrameDecoder> decoder) {
+    if (!sink || !decoder) {
+        std::cerr << "Error: No media sink or decoder provided" << std::endl;
+        return false;
+    }
+    
+    sink_ = std::move(sink);
+    decoder_ = std::move(decoder);
+    is_initialized_ = true;
+    is_file_open_ = true; // 解码器已经打开文件
+    
+    std::cout << "MediaPlayer initialized successfully with existing decoder" << std::endl;
+    return true;
+}
+
 bool MediaPlayer::openFile(const std::string& filepath) {
     if (!is_initialized_) {
         std::cerr << "Error: MediaPlayer not initialized" << std::endl;
         return false;
     }
     
-    // 打开解码器
+    if (is_file_open_) {
+        std::cerr << "Error: File is already open. Use initializeWithDecoder() for pre-opened files." << std::endl;
+        return false;
+    }
+    
+    // 打开解码器（内部设备模式，用于CLI）
     if (!decoder_->open(filepath)) {
         std::cerr << "Error: Failed to open file with decoder: " << filepath << std::endl;
         return false;
     }
     
-    // 初始化sink
-    if (!initializeSink()) {
-        std::cerr << "Error: Failed to initialize media sink" << std::endl;
-        decoder_->close();
-        return false;
-    }
-    
     is_file_open_ = true;
     
-    std::cout << "\\n=== Media File Opened ===" << std::endl;
+    std::cout << "\n=== Media File Opened ===" << std::endl;
     std::cout << "File: " << filepath << std::endl;
     std::cout << "Video: " << getVideoWidth() << "x" << getVideoHeight() 
               << " (" << getVideoCodecName() << ")" << std::endl;
@@ -73,7 +87,7 @@ int MediaPlayer::playFrames(int frame_count) {
     int frames_played = 0;
     int target_frames = frame_count;
     
-    std::cout << "\\nStarting playback";
+    std::cout << "\nStarting playback";
     if (target_frames > 0) {
         std::cout << " (" << target_frames << " frames)";
     }
@@ -86,7 +100,7 @@ int MediaPlayer::playFrames(int frame_count) {
         }
         
         if (!processNextFrame()) {
-            std::cout << "\\nEnd of file reached." << std::endl;
+            std::cout << "\nEnd of file reached." << std::endl;
             break;
         }
         
@@ -94,11 +108,11 @@ int MediaPlayer::playFrames(int frame_count) {
         
         // 每100帧打印一次进度
         if (frames_played % 100 == 0) {
-            std::cout << "\\nProcessed " << frames_played << " frame groups..." << std::endl;
+            std::cout << "\nProcessed " << frames_played << " frame groups..." << std::endl;
         }
     }
     
-    std::cout << "\\nPlayback completed." << std::endl;
+    std::cout << "\nPlayback completed." << std::endl;
     printPlaybackSummary();
     
     return frames_played;
@@ -170,23 +184,7 @@ void MediaPlayer::close() {
     is_file_open_ = false;
     is_initialized_ = false;
     
-    std::cout << "\\nMediaPlayer closed." << std::endl;
-}
-
-bool MediaPlayer::initializeSink() {
-    if (!sink_ || !decoder_) {
-        return false;
-    }
-    
-    // 获取媒体信息
-    int video_width = decoder_->getVideoWidth();
-    int video_height = decoder_->getVideoHeight();
-    
-    // 音频信息暂时使用固定值（实际应该从解码器获取）
-    int audio_sample_rate = 48000;
-    int audio_channels = 2;
-    
-    return sink_->initialize(video_width, video_height, audio_sample_rate, audio_channels);
+    std::cout << "\nMediaPlayer closed." << std::endl;
 }
 
 bool MediaPlayer::processNextFrame() {
@@ -201,8 +199,8 @@ bool MediaPlayer::processNextFrame() {
     // 处理视频帧
     if (frames.rgb_frame.is_valid) {
         sink_->onVideoFrame(
-            frames.rgb_frame.rgb_texture,
-            frames.rgb_frame.rgb_srv,
+            frames.rgb_frame.rgb_texture.Get(),
+            frames.rgb_frame.rgb_srv.Get(),
             frames.rgb_frame.timestamp,
             frames.rgb_frame.width,
             frames.rgb_frame.height
@@ -233,7 +231,7 @@ void MediaPlayer::updateStatistics(const RGBFrameDecoder::DecodedFrames& frames)
 }
 
 void MediaPlayer::printPlaybackSummary() {
-    std::cout << "\\n=== Playback Summary ===" << std::endl;
+    std::cout << "\n=== Playback Summary ===" << std::endl;
     std::cout << "Total frame groups processed: " << total_frames_played_ << std::endl;
     std::cout << "Video frames played: " << video_frames_played_ << std::endl;
     std::cout << "Audio frames played: " << audio_frames_played_ << std::endl;

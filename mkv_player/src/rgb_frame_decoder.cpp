@@ -182,7 +182,7 @@ bool RGBFrameDecoder::convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_fr
     input_view_desc.Texture2D.ArraySlice = texture_index;
 
     ID3D11VideoProcessorInputView* input_view = nullptr;
-    HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_, &input_view_desc, &input_view);
+    HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_.Get(), &input_view_desc, &input_view);
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create input view. HRESULT: 0x" << std::hex << hr << std::endl;
         return false;
@@ -194,7 +194,7 @@ bool RGBFrameDecoder::convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_fr
     output_view_desc.Texture2D.MipSlice = 0;
 
     ID3D11VideoProcessorOutputView* output_view = nullptr;
-    hr = video_device_->CreateVideoProcessorOutputView(slot->texture, video_enum_, &output_view_desc, &output_view);
+    hr = video_device_->CreateVideoProcessorOutputView(slot->texture.Get(), video_enum_.Get(), &output_view_desc, &output_view);
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create output view. HRESULT: 0x" << std::hex << hr << std::endl;
         input_view->Release();
@@ -214,7 +214,7 @@ bool RGBFrameDecoder::convertNV12ToRGB(const FrameDecoder::DecodedFrame& nv12_fr
     stream_data.ppPastSurfacesRight = nullptr;
     stream_data.ppFutureSurfacesRight = nullptr;
 
-    hr = video_context_->VideoProcessorBlt(video_processor_, output_view, 0, 1, &stream_data);
+    hr = video_context_->VideoProcessorBlt(video_processor_.Get(), output_view, 0, 1, &stream_data);
     
     // 清理临时资源
     output_view->Release();
@@ -271,14 +271,14 @@ bool RGBFrameDecoder::ensureVideoProcessor() {
     content_desc.OutputFrameRate.Denominator = 1;
     content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
     
-    hr = video_device_->CreateVideoProcessorEnumerator(&content_desc, &video_enum_);
+    hr = video_device_->CreateVideoProcessorEnumerator(&content_desc, video_enum_.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create video processor enumerator. HRESULT: 0x" << std::hex << hr << std::endl;
         return false;
     }
 
     // 创建Video Processor
-    hr = video_device_->CreateVideoProcessor(video_enum_, 0, &video_processor_);
+    hr = video_device_->CreateVideoProcessor(video_enum_.Get(), 0, video_processor_.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create video processor. HRESULT: 0x" << std::hex << hr << std::endl;
         return false;
@@ -290,14 +290,14 @@ bool RGBFrameDecoder::ensureVideoProcessor() {
     input_color_space.YCbCr_Matrix = 1;
     input_color_space.YCbCr_xvYCC = 0;
     input_color_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
-    video_context_->VideoProcessorSetStreamColorSpace(video_processor_, 0, &input_color_space);
+    video_context_->VideoProcessorSetStreamColorSpace(video_processor_.Get(), 0, &input_color_space);
     
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color_space = {};
     output_color_space.RGB_Range = 0;
     output_color_space.YCbCr_Matrix = 1;
     output_color_space.YCbCr_xvYCC = 0;
     output_color_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
-    video_context_->VideoProcessorSetOutputColorSpace(video_processor_, &output_color_space);
+    video_context_->VideoProcessorSetOutputColorSpace(video_processor_.Get(), &output_color_space);
 
     video_processor_initialized_ = true;
     return true;
@@ -325,7 +325,7 @@ bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height
     texture_desc.CPUAccessFlags = 0;
     texture_desc.MiscFlags = 0;
 
-    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, &slot->texture);
+    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, slot->texture.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create RGB texture. HRESULT: 0x" << std::hex << hr << std::endl;
         return false;
@@ -338,11 +338,10 @@ bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height
     srv_desc.Texture2D.MostDetailedMip = 0;
     srv_desc.Texture2D.MipLevels = 1;
 
-    hr = d3d11_device_->CreateShaderResourceView(slot->texture, &srv_desc, &slot->srv);
+    hr = d3d11_device_->CreateShaderResourceView(slot->texture.Get(), &srv_desc, slot->srv.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create shader resource view. HRESULT: 0x" << std::hex << hr << std::endl;
-        slot->texture->Release();
-        slot->texture = nullptr;
+        slot->texture.Reset();
         return false;
     }
 
@@ -356,42 +355,18 @@ bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height
 void RGBFrameDecoder::releaseTextureSlot(TextureSlot* slot) {
     if (!slot) return;
     
-    if (slot->srv) {
-        slot->srv->Release();
-        slot->srv = nullptr;
-    }
-    
-    if (slot->texture) {
-        slot->texture->Release();
-        slot->texture = nullptr;
-    }
-    
+    slot->srv.Reset();
+    slot->texture.Reset();
     slot->width = 0;
     slot->height = 0;
     slot->is_created = false;
 }
 
 void RGBFrameDecoder::releaseVideoProcessor() {
-    if (video_processor_) {
-        video_processor_->Release();
-        video_processor_ = nullptr;
-    }
-    
-    if (video_enum_) {
-        video_enum_->Release();
-        video_enum_ = nullptr;
-    }
-    
-    if (video_context_) {
-        video_context_->Release();
-        video_context_ = nullptr;
-    }
-    
-    if (video_device_) {
-        video_device_->Release();
-        video_device_ = nullptr;
-    }
-    
+    video_processor_.Reset();
+    video_enum_.Reset();
+    video_context_.Reset();
+    video_device_.Reset();
     video_processor_initialized_ = false;
 }
 
