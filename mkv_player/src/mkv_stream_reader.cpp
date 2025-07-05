@@ -127,15 +127,6 @@ bool MKVStreamReader::isEOF() const {
     return is_eof_;
 }
 
-double MKVStreamReader::getCurrentTime() const {
-    if (!is_open_) {
-        return 0.0;
-    }
-    
-    // 这是一个简化实现，实际应该跟踪当前读取位置
-    return 0.0;
-}
-
 AVCodecParameters* MKVStreamReader::getVideoCodecParameters() const {
     if (!is_open_ || stream_info_.video_stream_index < 0) {
         return nullptr;

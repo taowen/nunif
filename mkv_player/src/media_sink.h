@@ -46,19 +46,6 @@ public:
                              double timestamp, int sample_rate, int channels) = 0;
 
     /**
-     * 获取当前播放时间（用于同步）
-     * @return 当前播放时间戳（秒）
-     */
-    virtual double getCurrentTime() const = 0;
-
-    /**
-     * 检查是否应该跳过当前帧（用于同步控制）
-     * @param timestamp 帧时间戳
-     * @return true表示应该跳过此帧
-     */
-    virtual bool shouldSkipFrame(double timestamp) const = 0;
-
-    /**
      * 暂停/恢复播放
      */
     virtual void pause() = 0;

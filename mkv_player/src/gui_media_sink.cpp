@@ -144,34 +144,6 @@ void GUIMediaSink::onAudioFrame(const int16_t* samples, int sample_count,
     // 这里暂时跳过音频处理
 }
 
-double GUIMediaSink::getCurrentTime() const {
-    if (is_paused_) {
-        return paused_duration_;
-    }
-    
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration<double>(now - start_time_).count();
-    return elapsed - paused_duration_;
-}
-
-bool GUIMediaSink::shouldSkipFrame(double timestamp) const {
-    // 更宽松的帧同步逻辑
-    double current_time = getCurrentTime();
-    double time_diff = timestamp - current_time;
-    
-    // 如果帧太老（超过500ms），跳过
-    if (time_diff < -0.5) {
-        return true;
-    }
-    
-    // 如果帧太新（超过1秒），也跳过（等等再显示）
-    if (time_diff > 1.0) {
-        return true;
-    }
-    
-    return false;  // 大部分帧都不跳过
-}
-
 void GUIMediaSink::pause() {
     if (!is_paused_) {
         is_paused_ = true;

@@ -37,9 +37,6 @@ public:
     void onAudioFrame(const int16_t* samples, int sample_count,
                      double timestamp, int sample_rate, int channels) override;
     
-    double getCurrentTime() const override;
-    bool shouldSkipFrame(double timestamp) const override;
-    
     void pause() override;
     void resume() override;
     bool isPaused() const override;

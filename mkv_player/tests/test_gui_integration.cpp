@@ -83,17 +83,6 @@ TEST_CASE("GUI Media Sink Basic Functionality", "[gui_integration]") {
         SKIP("DirectX11 not available in test environment");
     }
     
-    SECTION("GUI Media Sink Initialization") {
-        auto gui_sink = std::make_unique<GUIMediaSink>();
-        
-        // 测试初始化
-        REQUIRE(gui_sink->initialize(1920, 1080, 44100, 2));
-        
-        // 验证状态
-        REQUIRE_FALSE(gui_sink->isPaused());
-        REQUIRE(gui_sink->getCurrentTime() >= 0.0);
-    }
-    
     SECTION("GUI Media Sink Window Creation") {
         auto gui_sink = std::make_unique<GUIMediaSink>();
         
@@ -232,23 +221,6 @@ TEST_CASE("GUI Rendering Pipeline Verification", "[gui_rendering]") {
         std::cout << "====================\n" << std::endl;
         
         REQUIRE(render_count > 0);
-    }
-    
-    SECTION("Headless Mode Test") {
-        // 测试无头模式（不创建窗口）
-        auto gui_sink = std::make_unique<GUIMediaSink>();
-        
-        // 初始化但不创建窗口
-        REQUIRE(gui_sink->initialize(1920, 1080, 44100, 2));
-        
-        // 调用renderFrame不应该崩溃
-        gui_sink->renderFrame();
-        
-        // 验证基本功能
-        REQUIRE_FALSE(gui_sink->isPaused());
-        REQUIRE(gui_sink->getCurrentTime() >= 0.0);
-        
-        INFO("Headless mode works correctly");
     }
 }
 

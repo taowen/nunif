@@ -129,29 +129,6 @@ void CLIMediaSink::onAudioFrame(const int16_t* samples, int sample_count,
     }
 }
 
-double CLIMediaSink::getCurrentTime() const {
-    if (is_paused_) {
-        return current_time_;
-    }
-    
-    auto now = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time_);
-    return (elapsed.count() / 1000.0) * playback_speed_;
-}
-
-bool CLIMediaSink::shouldSkipFrame(double timestamp) const {
-    if (is_paused_) {
-        return true;
-    }
-    
-    // CLI模式下通常不跳帧，除非时间差异太大
-    double current = getCurrentTime();
-    double diff = timestamp - current;
-    
-    // 如果帧时间戳比当前时间落后超过100ms，跳过
-    return diff < -0.1;
-}
-
 void CLIMediaSink::pause() {
     is_paused_ = true;
     std::cout << "\\n[PAUSED at " << std::fixed << std::setprecision(3) 

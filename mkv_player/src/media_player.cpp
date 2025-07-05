@@ -200,18 +200,15 @@ bool MediaPlayer::processNextFrame() {
     
     // 处理视频帧
     if (frames.rgb_frame.is_valid) {
-        // 检查是否应该跳过这一帧（同步控制）
-        if (!sink_->shouldSkipFrame(frames.rgb_frame.timestamp)) {
-            sink_->onVideoFrame(
-                frames.rgb_frame.rgb_texture,
-                frames.rgb_frame.rgb_srv,
-                frames.rgb_frame.timestamp,
-                frames.rgb_frame.width,
-                frames.rgb_frame.height
-            );
-            video_frames_played_++;
-            last_video_timestamp_ = frames.rgb_frame.timestamp;
-        }
+        sink_->onVideoFrame(
+            frames.rgb_frame.rgb_texture,
+            frames.rgb_frame.rgb_srv,
+            frames.rgb_frame.timestamp,
+            frames.rgb_frame.width,
+            frames.rgb_frame.height
+        );
+        video_frames_played_++;
+        last_video_timestamp_ = frames.rgb_frame.timestamp;
     }
     
     // 处理音频帧
