@@ -413,10 +413,10 @@ bool HwFrameDecoder::tryDecodeFirstVideoFrame(AVFrame* frame) {
         return false;
     }
     
-    // 重置到开始位置并刷新解码器
-    demuxer_.getReader().seekToTime(0.0);
-    if (video_codec_context_) {
-        avcodec_flush_buffers(video_codec_context_);
+    // 创建独立的临时 demuxer，避免污染主 demuxer 状态
+    PacketDemuxer temp_demuxer;
+    if (!temp_demuxer.open(filepath_)) {
+        return false;
     }
     
     // 清理输出帧
@@ -424,27 +424,23 @@ bool HwFrameDecoder::tryDecodeFirstVideoFrame(AVFrame* frame) {
     
     // 尝试读取视频包直到成功解码出一帧
     PacketDemuxer::PacketPair packet_pair;
-    while (demuxer_.readNextPacketPair(packet_pair)) {
+    bool success = false;
+    
+    while (temp_demuxer.readNextPacketPair(packet_pair)) {
         if (packet_pair.is_valid && packet_pair.video_packet) {
             // 解码视频包
             if (decodeVideoPacket(packet_pair.video_packet, frame)) {
-                // 重置到开始位置并刷新解码器
-                demuxer_.getReader().seekToTime(0.0);
-                if (video_codec_context_) {
-                    avcodec_flush_buffers(video_codec_context_);
-                }
-                return true;
+                success = true;
+                break;
             }
             // 继续尝试下一个包
         }
     }
     
-    // 重置到开始位置并刷新解码器
-    demuxer_.getReader().seekToTime(0.0);
-    if (video_codec_context_) {
-        avcodec_flush_buffers(video_codec_context_);
-    }
-    return false;
+    // 清理临时 demuxer
+    temp_demuxer.close();
+    
+    return success;
 }
 
 bool HwFrameDecoder::tryDecodeFirstAudioFrame(AVFrame* frame) {
@@ -452,10 +448,10 @@ bool HwFrameDecoder::tryDecodeFirstAudioFrame(AVFrame* frame) {
         return false;
     }
     
-    // 重置到开始位置并刷新解码器
-    demuxer_.getReader().seekToTime(0.0);
-    if (audio_codec_context_) {
-        avcodec_flush_buffers(audio_codec_context_);
+    // 创建独立的临时 demuxer，避免污染主 demuxer 状态
+    PacketDemuxer temp_demuxer;
+    if (!temp_demuxer.open(filepath_)) {
+        return false;
     }
     
     // 清理输出帧
@@ -463,27 +459,23 @@ bool HwFrameDecoder::tryDecodeFirstAudioFrame(AVFrame* frame) {
     
     // 尝试读取音频包直到成功解码出一帧
     PacketDemuxer::PacketPair packet_pair;
-    while (demuxer_.readNextPacketPair(packet_pair)) {
+    bool success = false;
+    
+    while (temp_demuxer.readNextPacketPair(packet_pair)) {
         if (packet_pair.is_valid && packet_pair.audio_packet) {
             // 解码音频包
             if (decodeAudioPacket(packet_pair.audio_packet, frame)) {
-                // 重置到开始位置并刷新解码器
-                demuxer_.getReader().seekToTime(0.0);
-                if (audio_codec_context_) {
-                    avcodec_flush_buffers(audio_codec_context_);
-                }
-                return true;
+                success = true;
+                break;
             }
             // 继续尝试下一个包
         }
     }
     
-    // 重置到开始位置并刷新解码器
-    demuxer_.getReader().seekToTime(0.0);
-    if (audio_codec_context_) {
-        avcodec_flush_buffers(audio_codec_context_);
-    }
-    return false;
+    // 清理临时 demuxer
+    temp_demuxer.close();
+    
+    return success;
 }
 
 ID3D11Device* HwFrameDecoder::getD3D11DeviceFromFrame(AVFrame* frame) {

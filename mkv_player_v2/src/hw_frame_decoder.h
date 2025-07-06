@@ -49,7 +49,7 @@ public:
     
     // Pull-style解码接口 - 返回同步的音视频帧（双缓冲机制）
     // 重要：返回的HwFramePair由内部池化管理，使用方无需释放任何资源
-    bool readNextHwFramePair(HwFramePair& decoded_frames);
+    bool readNextHwFramePair(HwFramePair& pair);
     
     // 直接解码接口（用于测试和特殊用途）
     bool decodeVideoPacket(AVPacket* packet, AVFrame* frame);
