@@ -28,6 +28,9 @@ bool HwFrameDecoder::open(const std::string& filepath) {
     // 清理已有资源
     close();
     
+    // 保存文件路径
+    filepath_ = filepath;
+    
     // 1. 打开MKV文件
     if (!demuxer_.open(filepath)) {
         std::cerr << "Failed to open MKV file: " << filepath << std::endl;
@@ -281,6 +284,7 @@ void HwFrameDecoder::close() {
     demuxer_.close();
     releaseResources();
     is_initialized_ = false;
+    filepath_.clear();
 }
 
 bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
@@ -516,22 +520,109 @@ int HwFrameDecoder::getValidPairCount() const {
     return count;
 }
 
-ID3D11Device* HwFrameDecoder::getD3D11Device() const {
-    if (!hw_device_ctx_) return nullptr;
+bool HwFrameDecoder::tryDecodeFirstVideoFrame(AVFrame* frame) {
+    if (!is_initialized_ || !frame) {
+        return false;
+    }
     
-    AVHWDeviceContext* hw_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
-    if (hw_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    // 重置到开始位置并刷新解码器
+    demuxer_.getReader().seekToTime(0.0);
+    if (video_codec_context_) {
+        avcodec_flush_buffers(video_codec_context_);
+    }
     
-    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)hw_ctx->hwctx;
-    return d3d11_ctx->device;
+    // 清理输出帧
+    av_frame_unref(frame);
+    
+    // 尝试读取视频包直到成功解码出一帧
+    PacketDemuxer::PacketPair packet_pair;
+    while (demuxer_.readNextPacketPair(packet_pair)) {
+        if (packet_pair.is_valid && packet_pair.video_packet) {
+            // 解码视频包
+            if (decodeVideoPacket(packet_pair.video_packet, frame)) {
+                // 重置到开始位置并刷新解码器
+                demuxer_.getReader().seekToTime(0.0);
+                if (video_codec_context_) {
+                    avcodec_flush_buffers(video_codec_context_);
+                }
+                return true;
+            }
+            // 继续尝试下一个包
+        }
+    }
+    
+    // 重置到开始位置并刷新解码器
+    demuxer_.getReader().seekToTime(0.0);
+    if (video_codec_context_) {
+        avcodec_flush_buffers(video_codec_context_);
+    }
+    return false;
 }
 
-ID3D11DeviceContext* HwFrameDecoder::getD3D11Context() const {
-    if (!hw_device_ctx_) return nullptr;
+bool HwFrameDecoder::tryDecodeFirstAudioFrame(AVFrame* frame) {
+    if (!is_initialized_ || !frame) {
+        return false;
+    }
     
-    AVHWDeviceContext* hw_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
-    if (hw_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    // 重置到开始位置并刷新解码器
+    demuxer_.getReader().seekToTime(0.0);
+    if (audio_codec_context_) {
+        avcodec_flush_buffers(audio_codec_context_);
+    }
     
-    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)hw_ctx->hwctx;
-    return d3d11_ctx->device_context;
+    // 清理输出帧
+    av_frame_unref(frame);
+    
+    // 尝试读取音频包直到成功解码出一帧
+    PacketDemuxer::PacketPair packet_pair;
+    while (demuxer_.readNextPacketPair(packet_pair)) {
+        if (packet_pair.is_valid && packet_pair.audio_packet) {
+            // 解码音频包
+            if (decodeAudioPacket(packet_pair.audio_packet, frame)) {
+                // 重置到开始位置并刷新解码器
+                demuxer_.getReader().seekToTime(0.0);
+                if (audio_codec_context_) {
+                    avcodec_flush_buffers(audio_codec_context_);
+                }
+                return true;
+            }
+            // 继续尝试下一个包
+        }
+    }
+    
+    // 重置到开始位置并刷新解码器
+    demuxer_.getReader().seekToTime(0.0);
+    if (audio_codec_context_) {
+        avcodec_flush_buffers(audio_codec_context_);
+    }
+    return false;
+}
+
+ID3D11Device* HwFrameDecoder::getD3D11DeviceFromFrame(AVFrame* frame) {
+    if (!frame || frame->format != AV_PIX_FMT_D3D11) {
+        return nullptr;
+    }
+    
+    // 从硬件帧获取D3D11纹理
+    ID3D11Texture2D* texture = (ID3D11Texture2D*)frame->data[0];
+    if (!texture) {
+        return nullptr;
+    }
+    
+    // 从纹理获取设备
+    ID3D11Device* device = nullptr;
+    texture->GetDevice(&device);
+    return device;
+}
+
+ID3D11DeviceContext* HwFrameDecoder::getD3D11ContextFromFrame(AVFrame* frame) {
+    ID3D11Device* device = getD3D11DeviceFromFrame(frame);
+    if (!device) {
+        return nullptr;
+    }
+    
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    device->Release(); // 释放从GetDevice获取的引用
+    return context;
 }

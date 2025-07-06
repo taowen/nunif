@@ -82,12 +82,28 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 2. 获取FFmpeg的D3D11设备（确保设备一致性）
-    d3d11_device_ = frame_decoder_.getD3D11Device();
-    d3d11_context_ = frame_decoder_.getD3D11Context();
+    // 2. 通过解码第一帧获取FFmpeg的D3D11设备（确保设备一致性）
+    AVFrame* temp_frame = av_frame_alloc();
+    if (!temp_frame) {
+        std::cerr << "Failed to allocate temporary frame" << std::endl;
+        frame_decoder_.close();
+        return false;
+    }
+    
+    if (!frame_decoder_.tryDecodeFirstVideoFrame(temp_frame)) {
+        std::cerr << "Failed to decode first video frame" << std::endl;
+        av_frame_free(&temp_frame);
+        frame_decoder_.close();
+        return false;
+    }
+    
+    d3d11_device_ = HwFrameDecoder::getD3D11DeviceFromFrame(temp_frame);
+    d3d11_context_ = HwFrameDecoder::getD3D11ContextFromFrame(temp_frame);
+    
+    av_frame_free(&temp_frame);
     
     if (!d3d11_device_ || !d3d11_context_) {
-        std::cerr << "Failed to get D3D11 device from FFmpeg" << std::endl;
+        std::cerr << "Failed to get D3D11 device from decoded frame" << std::endl;
         frame_decoder_.close();
         return false;
     }

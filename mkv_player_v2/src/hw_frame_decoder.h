@@ -74,9 +74,13 @@ public:
     // 获取内部reader（便利方法）
     MKVStreamReader* getReader() { return &demuxer_.getReader(); }
     
-    // 获取D3D11设备（用于设备共享）
-    ID3D11Device* getD3D11Device() const;
-    ID3D11DeviceContext* getD3D11Context() const;
+    // 尝试解码第一帧（使用独立的PacketDemuxer实例，不影响主解码器的游标位置）
+    bool tryDecodeFirstVideoFrame(AVFrame* frame);
+    bool tryDecodeFirstAudioFrame(AVFrame* frame);
+    
+    // 从解码后的视频帧获取D3D11设备
+    static ID3D11Device* getD3D11DeviceFromFrame(AVFrame* frame);
+    static ID3D11DeviceContext* getD3D11ContextFromFrame(AVFrame* frame);
     
     // 获取池中的帧（供DecodedFrame使用）
     AVFrame* getFrameFromPool(int index, bool is_audio) const;
@@ -102,6 +106,7 @@ private:
     
     // 状态
     bool is_initialized_;
+    std::string filepath_;
     
     // AVFrame池 - 复用避免频繁分配
     static const int AVFRAME_POOL_SIZE = 6;  // 增加池大小支持双缓冲
