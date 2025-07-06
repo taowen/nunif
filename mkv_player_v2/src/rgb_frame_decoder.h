@@ -70,11 +70,6 @@ public:
     // 获取内部组件
     HwFrameDecoder* getFrameDecoder() { return &frame_decoder_; }
     
-    // 获取视频信息
-    int getVideoWidth() const { return video_width_; }
-    int getVideoHeight() const { return video_height_; }
-    
-    
     // 资源管理
     void close();
 
@@ -86,9 +81,7 @@ private:
     ID3D11Device* d3d11_device_;
     ID3D11DeviceContext* d3d11_context_;
     
-    // 视频信息
-    int video_width_;
-    int video_height_;
+    // 状态信息
     bool is_initialized_;
     
     // 纹理池 - 改为智能指针管理，避免生命周期问题

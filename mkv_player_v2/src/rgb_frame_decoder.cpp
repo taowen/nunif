@@ -4,8 +4,6 @@
 RGBFrameDecoder::RGBFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
-    , video_width_(0)
-    , video_height_(0)
     , is_initialized_(false)
     , current_slot_index_(0)
     , video_device_(nullptr)
@@ -62,23 +60,6 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
     
     std::cout << "Using HwFrameDecoder's D3D11 device for RGB conversion" << std::endl;
     
-    // 3. 获取视频尺寸信息
-    auto* video_params = frame_decoder_.getReader()->getVideoCodecParameters();
-    
-    if (!video_params) {
-        std::cerr << "Failed to get video codec parameters" << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
-    
-    video_width_ = video_params->width;
-    video_height_ = video_params->height;
-    
-    if (video_width_ <= 0 || video_height_ <= 0) {
-        std::cerr << "Invalid video dimensions: " << video_width_ << "x" << video_height_ << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
     
     is_initialized_ = true;
     return true;
@@ -113,10 +94,15 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         // 获取当前纹理槽
         TextureSlot* slot = &texture_pool_[current_slot_index_];
         
+        // 获取视频尺寸
+        AVFrame* video_frame = raw_frames.video_frame.get();
+        int video_width = video_frame->width;
+        int video_height = video_frame->height;
+        
         // 如果尺寸不匹配，重新创建纹理
-        if (!slot->is_created || slot->width != video_width_ || slot->height != video_height_) {
-            std::cout << "Debug: Creating texture slot: " << video_width_ << "x" << video_height_ << std::endl;
-            if (!createTextureSlot(slot, video_width_, video_height_)) {
+        if (!slot->is_created || slot->width != video_width || slot->height != video_height) {
+            std::cout << "Debug: Creating texture slot: " << video_width << "x" << video_height << std::endl;
+            if (!createTextureSlot(slot, video_width, video_height)) {
                 rgb_pair.rgb_frame.is_valid = false;
                 return false;
             }
@@ -286,10 +272,22 @@ bool RGBFrameDecoder::ensureVideoProcessor() {
     content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     content_desc.InputFrameRate.Numerator = 30;
     content_desc.InputFrameRate.Denominator = 1;
-    content_desc.InputWidth = video_width_;
-    content_desc.InputHeight = video_height_;
-    content_desc.OutputWidth = video_width_;
-    content_desc.OutputHeight = video_height_;
+    // 获取视频尺寸信息
+    AVFrame* temp_frame = av_frame_alloc();
+    if (!temp_frame || !frame_decoder_.tryDecodeFirstVideoFrame(temp_frame)) {
+        std::cerr << "Error: Failed to get video dimensions for video processor" << std::endl;
+        if (temp_frame) av_frame_free(&temp_frame);
+        return false;
+    }
+    
+    int video_width = temp_frame->width;
+    int video_height = temp_frame->height;
+    av_frame_free(&temp_frame);
+    
+    content_desc.InputWidth = video_width;
+    content_desc.InputHeight = video_height;
+    content_desc.OutputWidth = video_width;
+    content_desc.OutputHeight = video_height;
     content_desc.OutputFrameRate.Numerator = 30;
     content_desc.OutputFrameRate.Denominator = 1;
     content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;

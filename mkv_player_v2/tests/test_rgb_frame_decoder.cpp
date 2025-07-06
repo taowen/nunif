@@ -29,8 +29,6 @@ TEST_CASE("RGBFrameDecoder basic functionality", "[rgb_frame_decoder]") {
     
     SECTION("Initial state") {
         REQUIRE_FALSE(decoder.isInitialized());
-        REQUIRE(decoder.getVideoWidth() == 0);
-        REQUIRE(decoder.getVideoHeight() == 0);
     }
     
     SECTION("Open non-existent file should fail") {
@@ -56,11 +54,20 @@ TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_t
             REQUIRE(decoder.getFrameDecoder()->isHardwareAccelerated());
             REQUIRE(decoder.getFrameDecoder()->getVideoCodecName() != nullptr);
             REQUIRE(decoder.getFrameDecoder()->getAudioCodecName() != nullptr);
-            REQUIRE(decoder.getVideoWidth() > 0);
-            REQUIRE(decoder.getVideoHeight() > 0);
-            
-            std::cout << "Hardware RGB decoder initialized: " << decoder.getFrameDecoder()->getVideoCodecName() << std::endl;
-            std::cout << "Video dimensions: " << decoder.getVideoWidth() << "x" << decoder.getVideoHeight() << std::endl;
+            // 通过解码第一帧获取视频尺寸信息
+            AVFrame* temp_frame = av_frame_alloc();
+            if (temp_frame && decoder.getFrameDecoder()->tryDecodeFirstVideoFrame(temp_frame)) {
+                REQUIRE(temp_frame->width > 0);
+                REQUIRE(temp_frame->height > 0);
+                
+                std::cout << "Hardware RGB decoder initialized: " << decoder.getFrameDecoder()->getVideoCodecName() << std::endl;
+                std::cout << "Video dimensions: " << temp_frame->width << "x" << temp_frame->height << std::endl;
+                
+                av_frame_free(&temp_frame);
+            } else {
+                if (temp_frame) av_frame_free(&temp_frame);
+                FAIL("Failed to get video dimensions");
+            }
         } else {
             REQUIRE_FALSE(decoder.isInitialized());
             std::cout << "RGB decoder initialization failed - may not support Video Processor on this system" << std::endl;
