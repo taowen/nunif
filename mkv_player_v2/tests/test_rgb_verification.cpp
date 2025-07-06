@@ -32,7 +32,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     
     RGBFrameDecoder decoder;
     
-    // 使用内部设备方式初始化（避免设备兼容性问题）
+    // 使用HwFrameDecoder设备方式初始化
     if (!decoder.open(TEST_MKV_FILE)) {
         SKIP("RGB decoder initialization failed");
     }

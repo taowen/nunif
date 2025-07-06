@@ -4,7 +4,6 @@
 RGBFrameDecoder::RGBFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
-    , owns_d3d11_device_(false)
     , video_width_(0)
     , video_height_(0)
     , is_initialized_(false)
@@ -23,53 +22,6 @@ RGBFrameDecoder::RGBFrameDecoder()
 
 RGBFrameDecoder::~RGBFrameDecoder() {
     close();
-}
-
-bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_device) {
-    // 清理已有资源
-    close();
-    
-    // 1. 首先初始化内部HwFrameDecoder
-    if (!frame_decoder_.open(filepath)) {
-        std::cerr << "Failed to open file with HwFrameDecoder" << std::endl;
-        return false;
-    }
-    
-    // 2. 使用外部提供的D3D11设备
-    if (!external_device) {
-        std::cerr << "External D3D11 device is required" << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
-    
-    d3d11_device_ = external_device;
-    d3d11_device_->GetImmediateContext(&d3d11_context_);
-    owns_d3d11_device_ = false;
-    std::cout << "Using external D3D11 device for RGB conversion" << std::endl;
-    
-    // 2. 获取视频尺寸信息 - 从demuxer获取而不是解码帧
-    auto* video_params = frame_decoder_.getReader()->getVideoCodecParameters();
-    
-    if (!video_params) {
-        std::cerr << "Failed to get video codec parameters" << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
-    
-    video_width_ = video_params->width;
-    video_height_ = video_params->height;
-    
-    if (video_width_ <= 0 || video_height_ <= 0) {
-        std::cerr << "Invalid video dimensions: " << video_width_ << "x" << video_height_ << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
-    
-    // 3. 新实现不需要预先初始化Video Processor和纹理池
-    // 每次转换时会动态创建所需资源
-    
-    is_initialized_ = true;
-    return true;
 }
 
 bool RGBFrameDecoder::open(const std::string& filepath) {
@@ -108,8 +60,7 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    owns_d3d11_device_ = false; // 不拥有设备，由FFmpeg管理
-    std::cout << "Using FFmpeg's D3D11 device for RGB conversion" << std::endl;
+    std::cout << "Using HwFrameDecoder's D3D11 device for RGB conversion" << std::endl;
     
     // 3. 获取视频尺寸信息
     auto* video_params = frame_decoder_.getReader()->getVideoCodecParameters();
@@ -132,6 +83,7 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
     is_initialized_ = true;
     return true;
 }
+
 
 bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     if (!is_initialized_) {
@@ -303,22 +255,9 @@ void RGBFrameDecoder::close() {
     frame_decoder_.close();
     releaseResources();
     
-    // 释放D3D11设备（如果拥有的话）
-    if (owns_d3d11_device_) {
-        if (d3d11_context_) {
-            d3d11_context_->Release();
-            d3d11_context_ = nullptr;
-        }
-        if (d3d11_device_) {
-            d3d11_device_->Release();
-            d3d11_device_ = nullptr;
-        }
-        owns_d3d11_device_ = false;
-    } else {
-        // 外部设备，只清空指针
-        d3d11_context_ = nullptr;
-        d3d11_device_ = nullptr;
-    }
+    // 外部设备，只清空指针
+    d3d11_context_ = nullptr;
+    d3d11_device_ = nullptr;
     
     is_initialized_ = false;
 }
@@ -466,10 +405,7 @@ void RGBFrameDecoder::releaseResources() {
     // 重置槽位索引
     current_slot_index_ = 0;
     
-    // 释放外部设备的context引用
-    if (d3d11_context_) {
-        d3d11_context_->Release();
-    }
+    // 外部设备，只清空指针
     d3d11_context_ = nullptr;
     d3d11_device_ = nullptr;
 }

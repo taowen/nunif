@@ -33,25 +33,11 @@ TEST_CASE("RGBFrameDecoder basic functionality", "[rgb_frame_decoder]") {
         REQUIRE(decoder.getVideoHeight() == 0);
     }
     
-    SECTION("Open with nullptr should fail") {
-        // 现在强制要求外部设备，nullptr应该失败
-        bool result = decoder.open(TEST_MKV_FILE, nullptr);
-        REQUIRE_FALSE(result);
+    SECTION("Open non-existent file should fail") {
+        REQUIRE_FALSE(decoder.open("non_existent_file.mkv"));
         REQUIRE_FALSE(decoder.isInitialized());
     }
     
-    SECTION("Open non-existent file should fail") {
-        ID3D11Device* device = nullptr;
-        ID3D11DeviceContext* context = nullptr;
-        
-        if (CreateTestD3D11Device(&device, &context)) {
-            REQUIRE_FALSE(decoder.open("non_existent_file.mkv", device));
-            REQUIRE_FALSE(decoder.isInitialized());
-            
-            device->Release();
-            context->Release();
-        }
-    }
 }
 
 TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_test_file]") {
@@ -60,18 +46,10 @@ TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_t
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    // 创建D3D11设备
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    
-    if (!CreateTestD3D11Device(&device, &context)) {
-        SKIP("Failed to create D3D11 device - may not support video on this system");
-    }
-    
     RGBFrameDecoder decoder;
     
     SECTION("Open valid MKV file") {
-        bool open_result = decoder.open(TEST_MKV_FILE, device); // 使用外部设备
+        bool open_result = decoder.open(TEST_MKV_FILE);
         
         if (open_result) {
             REQUIRE(decoder.isInitialized());
@@ -90,9 +68,6 @@ TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_t
         
         decoder.close();
     }
-    
-    device->Release();
-    context->Release();
 }
 
 TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requires_test_file]") {
@@ -100,17 +75,9 @@ TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requir
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    // 创建D3D11设备
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    
-    if (!CreateTestD3D11Device(&device, &context)) {
-        SKIP("Failed to create D3D11 device");
-    }
-    
     RGBFrameDecoder decoder;
     
-    if (!decoder.open(TEST_MKV_FILE, device)) { // 使用外部设备
+    if (!decoder.open(TEST_MKV_FILE)) {
         SKIP("RGB decoder initialization failed - may not support Video Processor on this system");
     }
     
@@ -166,8 +133,6 @@ TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requir
     }
     
     decoder.close();
-    device->Release();
-    context->Release();
 }
 
 TEST_CASE("RGBFrameDecoder error handling", "[rgb_frame_decoder]") {
