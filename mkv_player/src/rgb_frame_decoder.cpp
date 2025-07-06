@@ -1,12 +1,6 @@
 #include "rgb_frame_decoder.h"
 #include <iostream>
 
-#ifndef MAKEFOURCC
-#define MAKEFOURCC(ch0, ch1, ch2, ch3) \
-    ((DWORD)(BYTE)(ch0) | ((DWORD)(BYTE)(ch1) << 8) | \
-     ((DWORD)(BYTE)(ch2) << 16) | ((DWORD)(BYTE)(ch3) << 24))
-#endif
-
 RGBFrameDecoder::RGBFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)

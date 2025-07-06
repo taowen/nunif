@@ -30,7 +30,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     }
     
     SECTION("RGB frame correctness verification") {
-        RGBFrameDecoder::DecodedFrames decoded_frames;
+        RGBFrameDecoder::RGBFramePair rgb_pair;
         
         // 解码直到获得有效的RGB帧（前几帧可能需要建立GOP缓冲区）
         bool found_valid_rgb = false;
@@ -39,9 +39,9 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         
         while (!found_valid_rgb && attempts < max_attempts) {
             std::cout << "Attempt " << (attempts + 1) << " to decode RGB frame..." << std::endl;
-            bool read_success = decoder.readNextFrames(decoded_frames);
+            bool read_success = decoder.readNextRGBFramePair(rgb_pair);
             
-            if (read_success && decoded_frames.rgb_frame.is_valid) {
+            if (read_success && rgb_pair.rgb_frame.is_valid) {
                 found_valid_rgb = true;
                 std::cout << "Successfully decoded RGB frame on attempt " << (attempts + 1) << std::endl;
                 break;
@@ -52,9 +52,9 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         if (found_valid_rgb) {
             
             std::cout << "\\n=== RGB Frame Verification ===" << std::endl;
-            std::cout << "Frame dimensions: " << decoded_frames.rgb_frame.width 
-                     << "x" << decoded_frames.rgb_frame.height << std::endl;
-            std::cout << "Frame timestamp: " << decoded_frames.rgb_frame.timestamp << std::endl;
+            std::cout << "Frame dimensions: " << rgb_pair.rgb_frame.width 
+                     << "x" << rgb_pair.rgb_frame.height << std::endl;
+            std::cout << "Frame timestamp: " << rgb_pair.rgb_frame.timestamp << std::endl;
             
             // 1. 读取纹理数据 - 使用RGB解码器的D3D11设备，不是测试创建的设备
             std::vector<RGBVerification::PixelData> pixel_data;
@@ -65,13 +65,13 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             ID3D11DeviceContext* rgb_context = decoder.getFrameDecoder()->getD3D11Context();
             
             bool read_success = RGBVerification::readTextureData(
-                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture.Get(), 
+                rgb_device, rgb_context, rgb_pair.rgb_frame.rgb_texture.Get(), 
                 pixel_data, width, height
             );
             
             REQUIRE(read_success);
-            REQUIRE(width == decoded_frames.rgb_frame.width);
-            REQUIRE(height == decoded_frames.rgb_frame.height);
+            REQUIRE(width == rgb_pair.rgb_frame.width);
+            REQUIRE(height == rgb_pair.rgb_frame.height);
             REQUIRE(pixel_data.size() == width * height);
             
             // 2. 验证RGB值范围
@@ -99,7 +99,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
             bool save_success = RGBVerification::saveTextureAsBMP(
-                rgb_device, rgb_context, decoded_frames.rgb_frame.rgb_texture.Get(), filename
+                rgb_device, rgb_context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
             );
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;
@@ -125,16 +125,16 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         int frames_processed = 0;
         const int max_frames = 5;
         
-        RGBFrameDecoder::DecodedFrames decoded_frames;
+        RGBFrameDecoder::RGBFramePair rgb_pair;
         
-        while (decoder.readNextFrames(decoded_frames) && frames_processed < max_frames) {
-            if (decoded_frames.rgb_frame.is_valid) {
+        while (decoder.readNextRGBFramePair(rgb_pair) && frames_processed < max_frames) {
+            if (rgb_pair.rgb_frame.is_valid) {
                 // 读取纹理数据
                 std::vector<RGBVerification::PixelData> pixel_data;
                 int width, height;
                 
                 if (RGBVerification::readTextureData(
-                    device, context, decoded_frames.rgb_frame.rgb_texture.Get(), 
+                    device, context, rgb_pair.rgb_frame.rgb_texture.Get(), 
                     pixel_data, width, height)) {
                     
                     auto stats = RGBVerification::calculateImageStats(pixel_data, width, height);
@@ -143,7 +143,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
                     // 保存每一帧
                     std::string filename = "rgb_frame_" + std::to_string(frames_processed + 1) + ".bmp";
                     RGBVerification::saveTextureAsBMP(
-                        device, context, decoded_frames.rgb_frame.rgb_texture.Get(), filename
+                        device, context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
                     );
                     
                     std::cout << "Frame " << (frames_processed + 1) << ": RGB means = (" 

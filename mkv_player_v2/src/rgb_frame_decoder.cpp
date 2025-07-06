@@ -1,12 +1,6 @@
 #include "rgb_frame_decoder.h"
 #include <iostream>
 
-#ifndef MAKEFOURCC
-#define MAKEFOURCC(ch0, ch1, ch2, ch3) \
-    ((DWORD)(BYTE)(ch0) | ((DWORD)(BYTE)(ch1) << 8) | \
-     ((DWORD)(BYTE)(ch2) << 16) | ((DWORD)(BYTE)(ch3) << 24))
-#endif
-
 RGBFrameDecoder::RGBFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
@@ -85,23 +79,25 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
     return true;
 }
 
-bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
+bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     if (!is_initialized_) {
-        decoded_frames.audio_frame.is_valid = false;
-        decoded_frames.rgb_frame.is_valid = false;
+        rgb_pair.audio_frame.is_valid = false;
+        rgb_pair.rgb_frame.is_valid = false;
+        rgb_pair.is_valid = false;
         return false;
     }
     
     // 1. 从内部HwFrameDecoder获取原始帧的描述信息（非指针）
     HwFrameDecoder::HwFramePair raw_frames;
     if (!frame_decoder_.readNextHwFramePair(raw_frames)) {
-        decoded_frames.audio_frame.is_valid = false;
-        decoded_frames.rgb_frame.is_valid = false;
+        rgb_pair.audio_frame.is_valid = false;
+        rgb_pair.rgb_frame.is_valid = false;
+        rgb_pair.is_valid = false;
         return false;
     }
     
     // 2. 直接传递音频帧描述符
-    decoded_frames.audio_frame = raw_frames.audio_frame;
+    rgb_pair.audio_frame = raw_frames.audio_frame;
     
     // 3. 转换视频帧为RGB（使用纹理池）
     if (raw_frames.video_frame.is_valid) {
@@ -111,32 +107,34 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
         // 如果尺寸不匹配，重新创建纹理
         if (!slot->is_created || slot->width != video_width_ || slot->height != video_height_) {
             if (!createTextureSlot(slot, video_width_, video_height_)) {
-                decoded_frames.rgb_frame.is_valid = false;
+                rgb_pair.rgb_frame.is_valid = false;
                 return false;
             }
         }
         
         // 转换到纹理槽
         if (convertNV12ToRGB(raw_frames.video_frame, slot)) {
-            decoded_frames.rgb_frame.rgb_texture = slot->texture;
-            decoded_frames.rgb_frame.rgb_srv = slot->srv;
-            decoded_frames.rgb_frame.width = slot->width;
-            decoded_frames.rgb_frame.height = slot->height;
-            decoded_frames.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
-            decoded_frames.rgb_frame.is_valid = true;
+            rgb_pair.rgb_frame.rgb_texture = slot->texture;
+            rgb_pair.rgb_frame.rgb_srv = slot->srv;
+            rgb_pair.rgb_frame.width = slot->width;
+            rgb_pair.rgb_frame.height = slot->height;
+            rgb_pair.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
+            rgb_pair.rgb_frame.is_valid = true;
             
             // 移动到下一个槽位
             current_slot_index_ = (current_slot_index_ + 1) % TEXTURE_POOL_SIZE;
         } else {
-            decoded_frames.rgb_frame.is_valid = false;
+            rgb_pair.rgb_frame.is_valid = false;
         }
     } else {
-        decoded_frames.rgb_frame.is_valid = false;
+        rgb_pair.rgb_frame.is_valid = false;
     }
     
     // 4. 注意：不再需要释放任何AVFrame，因为所有权从未转移
     
-    return decoded_frames.audio_frame.is_valid || decoded_frames.rgb_frame.is_valid;
+    // 设置整体有效性
+    rgb_pair.is_valid = rgb_pair.audio_frame.is_valid || rgb_pair.rgb_frame.is_valid;
+    return rgb_pair.is_valid;
 }
 
 

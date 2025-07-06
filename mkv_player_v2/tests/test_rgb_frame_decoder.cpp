@@ -119,47 +119,48 @@ TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requir
     
     SECTION("Decode RGB frames") {
         int frames_decoded = 0;
-        RGBFrameDecoder::DecodedFrames decoded_frames;
+        RGBFrameDecoder::RGBFramePair rgb_pair;
         
         // 解码前10对音视频帧
-        while (decoder.readNextFrames(decoded_frames) && frames_decoded < 10) {
+        while (decoder.readNextRGBFramePair(rgb_pair) && frames_decoded < 10) {
             frames_decoded++;
             
             // 验证音频帧
-            if (decoded_frames.audio_frame.is_valid) {
-                REQUIRE(decoded_frames.audio_frame.getAudioFrame() != nullptr);
-                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->nb_samples > 0);
-                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->sample_rate > 0);
-                REQUIRE(decoded_frames.audio_frame.timestamp >= -1.0);
-                REQUIRE(decoded_frames.audio_frame.getAudioFrame()->data[0] != nullptr);
+            if (rgb_pair.audio_frame.is_valid) {
+                REQUIRE(rgb_pair.audio_frame.getAudioFrame() != nullptr);
+                REQUIRE(rgb_pair.audio_frame.getAudioFrame()->nb_samples > 0);
+                REQUIRE(rgb_pair.audio_frame.getAudioFrame()->sample_rate > 0);
+                REQUIRE(rgb_pair.audio_frame.timestamp >= -1.0);
+                REQUIRE(rgb_pair.audio_frame.getAudioFrame()->data[0] != nullptr);
                 
-                std::cout << "Audio frame: samples=" << decoded_frames.audio_frame.getAudioFrame()->nb_samples 
-                         << ", ts=" << decoded_frames.audio_frame.timestamp << std::endl;
+                std::cout << "Audio frame: samples=" << rgb_pair.audio_frame.getAudioFrame()->nb_samples 
+                         << ", ts=" << rgb_pair.audio_frame.timestamp << std::endl;
                 
-                av_frame_unref(decoded_frames.audio_frame.getAudioFrame());
+                av_frame_unref(rgb_pair.audio_frame.getAudioFrame());
             }
             
             // 验证RGB帧
-            if (decoded_frames.rgb_frame.is_valid) {
-                REQUIRE(decoded_frames.rgb_frame.rgb_texture != nullptr);
-                REQUIRE(decoded_frames.rgb_frame.rgb_srv != nullptr);
-                REQUIRE(decoded_frames.rgb_frame.width > 0);
-                REQUIRE(decoded_frames.rgb_frame.height > 0);
-                REQUIRE(decoded_frames.rgb_frame.timestamp >= -1.0);
+            if (rgb_pair.rgb_frame.is_valid) {
+                REQUIRE(rgb_pair.rgb_frame.rgb_texture != nullptr);
+                REQUIRE(rgb_pair.rgb_frame.rgb_srv != nullptr);
+                REQUIRE(rgb_pair.rgb_frame.width > 0);
+                REQUIRE(rgb_pair.rgb_frame.height > 0);
+                REQUIRE(rgb_pair.rgb_frame.timestamp >= -1.0);
                 
-                std::cout << "RGB frame: " << decoded_frames.rgb_frame.width 
-                         << "x" << decoded_frames.rgb_frame.height 
-                         << ", ts=" << decoded_frames.rgb_frame.timestamp << std::endl;
+                std::cout << "RGB frame: " << rgb_pair.rgb_frame.width 
+                         << "x" << rgb_pair.rgb_frame.height 
+                         << ", ts=" << rgb_pair.rgb_frame.timestamp << std::endl;
                 
                 // 验证音视频同步（时间戳应该接近）
-                if (decoded_frames.audio_frame.is_valid) {
-                    double av_diff = std::abs(decoded_frames.audio_frame.timestamp - decoded_frames.rgb_frame.timestamp);
+                if (rgb_pair.audio_frame.is_valid) {
+                    double av_diff = std::abs(rgb_pair.audio_frame.timestamp - rgb_pair.rgb_frame.timestamp);
                     REQUIRE(av_diff < 0.15); // 150ms容差（比原来稍宽松，因为有额外的处理步骤）
                 }
             }
             
             // 至少要有一种帧有效
-            REQUIRE((decoded_frames.audio_frame.is_valid || decoded_frames.rgb_frame.is_valid));
+            REQUIRE((rgb_pair.audio_frame.is_valid || rgb_pair.rgb_frame.is_valid));
+            REQUIRE(rgb_pair.is_valid);
         }
         
         // 验证解码了预期数量的帧
@@ -176,12 +177,13 @@ TEST_CASE("RGBFrameDecoder error handling", "[rgb_frame_decoder]") {
     RGBFrameDecoder decoder;
     
     SECTION("Operations on uninitialized decoder") {
-        RGBFrameDecoder::DecodedFrames frames;
+        RGBFrameDecoder::RGBFramePair rgb_pair;
         
         // 未初始化时的操作应该安全失败
-        REQUIRE_FALSE(decoder.readNextFrames(frames));
-        REQUIRE_FALSE(frames.audio_frame.is_valid);
-        REQUIRE_FALSE(frames.rgb_frame.is_valid);
+        REQUIRE_FALSE(decoder.readNextRGBFramePair(rgb_pair));
+        REQUIRE_FALSE(rgb_pair.audio_frame.is_valid);
+        REQUIRE_FALSE(rgb_pair.rgb_frame.is_valid);
+        REQUIRE_FALSE(rgb_pair.is_valid);
     }
     
     SECTION("Multiple close calls") {

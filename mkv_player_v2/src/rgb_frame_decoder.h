@@ -49,9 +49,10 @@ public:
         }
     };
     
-    struct DecodedFrames {
+    struct RGBFramePair {
         HwFrameDecoder::HwFrame audio_frame;
         RGBFrame rgb_frame;
+        bool is_valid = false;
     };
 
     RGBFrameDecoder();
@@ -61,7 +62,7 @@ public:
     bool open(const std::string& filepath, ID3D11Device* external_device = nullptr);
     
     // Pull-style解码接口 - 返回RGB转换后的帧和音频帧
-    bool readNextFrames(DecodedFrames& decoded_frames);
+    bool readNextRGBFramePair(RGBFramePair& rgb_pair);
     
     // 状态查询
     bool isInitialized() const { return is_initialized_; }
