@@ -75,13 +75,13 @@ TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_t
         
         if (open_result) {
             REQUIRE(decoder.isInitialized());
-            REQUIRE(decoder.isHardwareAccelerated());
-            REQUIRE(decoder.getVideoCodecName() != nullptr);
-            REQUIRE(decoder.getAudioCodecName() != nullptr);
+            REQUIRE(decoder.getFrameDecoder()->isHardwareAccelerated());
+            REQUIRE(decoder.getFrameDecoder()->getVideoCodecName() != nullptr);
+            REQUIRE(decoder.getFrameDecoder()->getAudioCodecName() != nullptr);
             REQUIRE(decoder.getVideoWidth() > 0);
             REQUIRE(decoder.getVideoHeight() > 0);
             
-            std::cout << "Hardware RGB decoder initialized: " << decoder.getVideoCodecName() << std::endl;
+            std::cout << "Hardware RGB decoder initialized: " << decoder.getFrameDecoder()->getVideoCodecName() << std::endl;
             std::cout << "Video dimensions: " << decoder.getVideoWidth() << "x" << decoder.getVideoHeight() << std::endl;
         } else {
             REQUIRE_FALSE(decoder.isInitialized());

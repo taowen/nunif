@@ -71,6 +71,9 @@ public:
     // 获取内部demuxer（用于测试）
     PacketDemuxer* getDemuxer() { return &demuxer_; }
     
+    // 获取内部reader（便利方法）
+    MKVStreamReader* getReader() { return &demuxer_.getReader(); }
+    
     // 获取内部D3D11设备（用于RGB转换器）
     ID3D11Device* getD3D11Device() { return d3d11_device_; }
     ID3D11DeviceContext* getD3D11Context() { return d3d11_context_; }

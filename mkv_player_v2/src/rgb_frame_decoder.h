@@ -66,16 +66,13 @@ public:
     
     // 状态查询
     bool isInitialized() const { return is_initialized_; }
-    bool isHardwareAccelerated() const { return frame_decoder_.isHardwareAccelerated(); }
-    const char* getVideoCodecName() const { return frame_decoder_.getVideoCodecName(); }
-    const char* getAudioCodecName() const { return frame_decoder_.getAudioCodecName(); }
+    
+    // 获取内部组件
+    HwFrameDecoder* getFrameDecoder() { return &frame_decoder_; }
     
     // 获取视频信息
     int getVideoWidth() const { return video_width_; }
     int getVideoHeight() const { return video_height_; }
-    
-    // 获取内部HwFrameDecoder的访问（用于测试）
-    HwFrameDecoder* getFrameDecoder() { return &frame_decoder_; }
     
     // 获取D3D11设备（用于设备共享）
     ID3D11Device* getD3D11Device() const { return d3d11_device_; }
