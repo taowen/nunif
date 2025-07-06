@@ -40,22 +40,14 @@ private:
     // MKV读取器
     MKVStreamReader reader_;
     
-    // 缓冲队列
-    std::queue<AVPacket*> audio_buffer_;
-    std::queue<AVPacket*> video_buffer_;
-    
-    // 同步阈值（秒）
-    static constexpr double SYNC_THRESHOLD = 0.1;  // 100ms
-    static constexpr double MAX_BUFFER_DURATION = 1.0;  // 最多缓冲1秒
+    // 借出的PacketPair - 每次readNextPacketPair前会清理上一次的数据
+    PacketPair borrowed_pair_;
     
     // 状态
     bool is_initialized_;
     bool is_eof_;
-    double next_sync_timestamp_;
     
     // 内部方法
-    bool fillBuffers();
-    void clearBuffers();
+    void clearBorrowedPair();
     double getPacketTimestamp(AVPacket* packet, bool is_audio) const;
-    AVPacket* findBestVideoPacket(double target_timestamp);
 };
