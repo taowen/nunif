@@ -5,16 +5,18 @@ RGBFrameDecoder::RGBFrameDecoder()
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
     , is_initialized_(false)
-    , current_slot_index_(0)
+    , current_pair_index_(0)
     , video_device_(nullptr)
     , video_context_(nullptr)
     , video_enum_(nullptr)
     , video_processor_(nullptr)
     , video_processor_initialized_(false) {
     
-    // 初始化纹理池
-    for (int i = 0; i < TEXTURE_POOL_SIZE; i++) {
-        texture_pool_[i] = TextureSlot{};
+    // 初始化双缓冲RGBFramePair
+    for (int i = 0; i < 2; i++) {
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].rgb_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
     }
 }
 
@@ -60,11 +62,12 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
     
     std::cout << "Using HwFrameDecoder's D3D11 device for RGB conversion" << std::endl;
     
+    // 3. 初始化双缓冲
+    initializeBorrowedPairs();
     
     is_initialized_ = true;
     return true;
 }
-
 
 bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     if (!is_initialized_) {
@@ -83,16 +86,21 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         return false;
     }
     
-    // 2. 直接传递音频帧描述符
-    rgb_pair.audio_frame = raw_frames.audio_frame;
+    // 获取当前缓冲pair的引用
+    RGBFramePair& current_pair = borrowed_pairs_[current_pair_index_];
     
-    // 3. 转换视频帧为RGB（使用纹理池）
+    // 清理之前的数据，但保持纹理资源不变（池化复用）
+    current_pair.audio_frame.is_valid = false;
+    current_pair.rgb_frame.is_valid = false;
+    // 注意：不清理 rgb_frame 的纹理资源，只清理有效性标志
+    
+    // 直接传递音频帧描述符
+    current_pair.audio_frame = raw_frames.audio_frame;
+    
+    // 3. 转换视频帧为RGB（使用双缓冲）
     std::cout << "Debug: Raw video frame is_valid: " << raw_frames.video_frame.is_valid << std::endl;
     if (raw_frames.video_frame.is_valid) {
         std::cout << "Debug: Video frame timestamp: " << raw_frames.video_frame.timestamp << std::endl;
-        
-        // 获取当前纹理槽
-        TextureSlot* slot = &texture_pool_[current_slot_index_];
         
         // 获取视频尺寸
         AVFrame* video_frame = raw_frames.video_frame.get();
@@ -100,48 +108,50 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         int video_height = video_frame->height;
         
         // 如果尺寸不匹配，重新创建纹理
-        if (!slot->is_created || slot->width != video_width || slot->height != video_height) {
-            std::cout << "Debug: Creating texture slot: " << video_width << "x" << video_height << std::endl;
-            if (!createTextureSlot(slot, video_width, video_height)) {
-                rgb_pair.rgb_frame.is_valid = false;
+        if (!current_pair.rgb_frame.hasValidResources() || 
+            current_pair.rgb_frame.width != video_width || 
+            current_pair.rgb_frame.height != video_height) {
+            std::cout << "Debug: Creating RGB texture: " << video_width << "x" << video_height << std::endl;
+            if (!createRGBTexture(current_pair.rgb_frame, video_width, video_height)) {
+                current_pair.rgb_frame.is_valid = false;
                 return false;
             }
         }
         
-        // 转换到纹理槽
+        // 转换到RGB纹理
         std::cout << "Debug: Converting NV12 to RGB..." << std::endl;
-        if (convertNV12ToRGB(raw_frames.video_frame, slot)) {
-            rgb_pair.rgb_frame.rgb_texture = slot->texture;
-            rgb_pair.rgb_frame.rgb_srv = slot->srv;
-            rgb_pair.rgb_frame.width = slot->width;
-            rgb_pair.rgb_frame.height = slot->height;
-            rgb_pair.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
-            rgb_pair.rgb_frame.is_valid = true;
-            
-            // 移动到下一个槽位
-            current_slot_index_ = (current_slot_index_ + 1) % TEXTURE_POOL_SIZE;
+        if (convertNV12ToRGB(raw_frames.video_frame, current_pair.rgb_frame)) {
+            current_pair.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
+            current_pair.rgb_frame.is_valid = true;
             std::cout << "Debug: RGB conversion successful!" << std::endl;
         } else {
-            rgb_pair.rgb_frame.is_valid = false;
+            current_pair.rgb_frame.is_valid = false;
             std::cout << "Debug: RGB conversion failed!" << std::endl;
         }
     } else {
-        rgb_pair.rgb_frame.is_valid = false;
+        current_pair.rgb_frame.is_valid = false;
         std::cout << "Debug: No valid video frame from decoder" << std::endl;
     }
     
     // 4. 注意：不再需要释放任何AVFrame，因为所有权从未转移
     
     // 设置整体有效性
-    rgb_pair.is_valid = rgb_pair.audio_frame.is_valid || rgb_pair.rgb_frame.is_valid;
-    return rgb_pair.is_valid;
+    current_pair.is_valid = current_pair.audio_frame.is_valid || current_pair.rgb_frame.is_valid;
+    
+    // 将当前pair返回给调用者
+    if (current_pair.is_valid) {
+        rgb_pair = current_pair;
+        // 切换到下一个pair
+        current_pair_index_ = (current_pair_index_ + 1) % 2;
+    }
+    
+    return current_pair.is_valid;
 }
 
-
-bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame_desc, TextureSlot* slot) {
+bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame_desc, RGBFrame& rgb_frame) {
     AVFrame* nv12_frame = nv12_frame_desc.get();
-    if (!nv12_frame || !d3d11_device_ || !d3d11_context_ || !slot) {
-        std::cerr << "Error: Invalid frame, device, or slot provided." << std::endl;
+    if (!nv12_frame || !d3d11_device_ || !d3d11_context_) {
+        std::cerr << "Error: Invalid frame, device, or rgb_frame provided." << std::endl;
         return false;
     }
     
@@ -167,7 +177,6 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     // 检查输入纹理格式
     D3D11_TEXTURE2D_DESC input_desc;
     input_texture->GetDesc(&input_desc);
-    
     
     if (input_desc.Format != DXGI_FORMAT_NV12) {
         std::cerr << "Error: Expected DXGI_FORMAT_NV12 format, got " << input_desc.Format << std::endl;
@@ -201,7 +210,7 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     output_view_desc.Texture2D.MipSlice = 0;
 
     ID3D11VideoProcessorOutputView* output_view = nullptr;
-    hr = video_device_->CreateVideoProcessorOutputView(slot->texture.Get(), video_enum_.Get(), &output_view_desc, &output_view);
+    hr = video_device_->CreateVideoProcessorOutputView(rgb_frame.rgb_texture.Get(), video_enum_.Get(), &output_view_desc, &output_view);
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create output view. HRESULT: 0x" << std::hex << hr << std::endl;
         input_view->Release();
@@ -235,7 +244,6 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     std::cout << "Color space validation: PASSED" << std::endl;
     return true;
 }
-
 
 void RGBFrameDecoder::close() {
     frame_decoder_.close();
@@ -324,13 +332,15 @@ bool RGBFrameDecoder::ensureVideoProcessor() {
     return true;
 }
 
-bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height) {
-    if (!slot || !d3d11_device_) {
+bool RGBFrameDecoder::createRGBTexture(RGBFrame& rgb_frame, int width, int height) {
+    if (!d3d11_device_) {
         return false;
     }
     
-    // 释放旧纹理
-    releaseTextureSlot(slot);
+    // 只在尺寸变化时才释放旧纹理
+    if (rgb_frame.width != width || rgb_frame.height != height) {
+        rgb_frame.reset();
+    }
     
     // 创建RGB纹理
     D3D11_TEXTURE2D_DESC texture_desc = {};
@@ -346,7 +356,7 @@ bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height
     texture_desc.CPUAccessFlags = 0;
     texture_desc.MiscFlags = 0;
 
-    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, slot->texture.GetAddressOf());
+    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, rgb_frame.rgb_texture.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create RGB texture. HRESULT: 0x" << std::hex << hr << std::endl;
         return false;
@@ -359,28 +369,18 @@ bool RGBFrameDecoder::createTextureSlot(TextureSlot* slot, int width, int height
     srv_desc.Texture2D.MostDetailedMip = 0;
     srv_desc.Texture2D.MipLevels = 1;
 
-    hr = d3d11_device_->CreateShaderResourceView(slot->texture.Get(), &srv_desc, slot->srv.GetAddressOf());
+    hr = d3d11_device_->CreateShaderResourceView(rgb_frame.rgb_texture.Get(), &srv_desc, rgb_frame.rgb_srv.GetAddressOf());
     if (FAILED(hr)) {
         std::cerr << "Error: Failed to create shader resource view. HRESULT: 0x" << std::hex << hr << std::endl;
-        slot->texture.Reset();
+        rgb_frame.rgb_texture.Reset();
         return false;
     }
 
-    slot->width = width;
-    slot->height = height;
-    slot->is_created = true;
+    rgb_frame.width = width;
+    rgb_frame.height = height;
+    rgb_frame.is_valid = true;
     
     return true;
-}
-
-void RGBFrameDecoder::releaseTextureSlot(TextureSlot* slot) {
-    if (!slot) return;
-    
-    slot->srv.Reset();
-    slot->texture.Reset();
-    slot->width = 0;
-    slot->height = 0;
-    slot->is_created = false;
 }
 
 void RGBFrameDecoder::releaseVideoProcessor() {
@@ -392,18 +392,29 @@ void RGBFrameDecoder::releaseVideoProcessor() {
 }
 
 void RGBFrameDecoder::releaseResources() {
-    // 释放纹理池
-    for (int i = 0; i < TEXTURE_POOL_SIZE; i++) {
-        releaseTextureSlot(&texture_pool_[i]);
+    // 释放双缓冲纹理
+    for (int i = 0; i < 2; i++) {
+        borrowed_pairs_[i].rgb_frame.reset();
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
     }
     
     // 释放Video Processor
     releaseVideoProcessor();
     
-    // 重置槽位索引
-    current_slot_index_ = 0;
+    // 重置索引
+    current_pair_index_ = 0;
     
     // 外部设备，只清空指针
     d3d11_context_ = nullptr;
     d3d11_device_ = nullptr;
+}
+
+void RGBFrameDecoder::initializeBorrowedPairs() {
+    // 初始化双缓冲对
+    for (int i = 0; i < 2; i++) {
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].rgb_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
+    }
 }

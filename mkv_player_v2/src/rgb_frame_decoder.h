@@ -43,9 +43,9 @@ public:
             height = 0;
         }
         
-        // 检查资源是否有效
+        // 检查纹理资源是否存在（不检查帧有效性）
         bool hasValidResources() const {
-            return rgb_texture && rgb_srv && is_valid;
+            return rgb_texture && rgb_srv;
         }
     };
     
@@ -84,25 +84,9 @@ private:
     // 状态信息
     bool is_initialized_;
     
-    // 纹理池 - 改为智能指针管理，避免生命周期问题
-    struct TextureSlot {
-        D3D11TexturePtr texture;
-        D3D11SRVPtr srv;
-        int width = 0;
-        int height = 0;
-        bool is_created = false;
-        
-        void reset() {
-            texture.Reset();
-            srv.Reset();
-            width = 0;
-            height = 0;
-            is_created = false;
-        }
-    };
-    static const int TEXTURE_POOL_SIZE = 3;
-    TextureSlot texture_pool_[TEXTURE_POOL_SIZE];
-    int current_slot_index_;
+    // 双缓冲机制 - 支持两个RGBFramePair同时存在
+    RGBFramePair borrowed_pairs_[2];
+    int current_pair_index_;
     
     // Video Processor使用智能指针管理
     D3D11VideoDevicePtr video_device_;
@@ -112,10 +96,10 @@ private:
     bool video_processor_initialized_;
     
     // 内部方法
-    bool convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame, TextureSlot* slot);
+    bool convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame, RGBFrame& rgb_frame);
     bool ensureVideoProcessor();
-    bool createTextureSlot(TextureSlot* slot, int width, int height);
-    void releaseTextureSlot(TextureSlot* slot);
+    bool createRGBTexture(RGBFrame& rgb_frame, int width, int height);
     void releaseVideoProcessor();
     void releaseResources();
+    void initializeBorrowedPairs();
 };
