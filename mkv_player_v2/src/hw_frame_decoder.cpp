@@ -2,9 +2,7 @@
 #include <iostream>
 
 HwFrameDecoder::HwFrameDecoder() 
-    : d3d11_device_(nullptr)
-    , d3d11_context_(nullptr)
-    , video_codec_context_(nullptr)
+    : video_codec_context_(nullptr)
     , audio_codec_context_(nullptr)
     , hw_device_ctx_(nullptr)
     , video_codec_(nullptr)
@@ -59,9 +57,10 @@ bool HwFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 5. 创建硬件上下文（FFmpeg会创建自己的D3D11设备）
-    if (!createHardwareContext()) {
-        std::cerr << "Failed to create hardware context" << std::endl;
+    // 5. 创建硬件上下文（让FFmpeg自动管理）
+    int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+    if (ret < 0) {
+        std::cerr << "Failed to create D3D11VA hardware device context, error: " << ret << std::endl;
         demuxer_.close();
         return false;
     }
@@ -272,53 +271,22 @@ void HwFrameDecoder::close() {
     is_initialized_ = false;
 }
 
-bool HwFrameDecoder::createHardwareContext() {
-    // 让FFmpeg自动创建D3D11VA硬件设备上下文
-    int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
-    if (ret < 0) {
-        std::cerr << "Failed to create D3D11VA hardware device context, error: " << ret << std::endl;
-        return false;
-    }
-    
-    // 从硬件设备上下文中提取D3D11设备和设备上下文（参考d11_decode.cpp）
-    AVHWDeviceContext* hw_device_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
-    AVD3D11VADeviceContext* d3d11_device_ctx = (AVD3D11VADeviceContext*)hw_device_ctx->hwctx;
-    
-    // 使用FFmpeg创建的D3D11设备，而不是自己创建的
-    if (d3d11_device_) {
-        d3d11_device_->Release();
-        d3d11_device_ = nullptr;
-    }
-    if (d3d11_context_) {
-        d3d11_context_->Release();
-        d3d11_context_ = nullptr;
-    }
-    
-    d3d11_device_ = d3d11_device_ctx->device;
-    d3d11_context_ = d3d11_device_ctx->device_context;
-    
-    // 增加引用计数，防止FFmpeg释放时导致野指针
-    if (d3d11_device_) {
-        d3d11_device_->AddRef();
-    }
-    if (d3d11_context_) {
-        d3d11_context_->AddRef();
-    }
-    
-    std::cout << "D3D11VA hardware context created successfully" << std::endl;
-    std::cout << "Using FFmpeg's D3D11 device for hardware acceleration" << std::endl;
-    return true;
-}
-
 bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
-    // 查找支持D3D11VA的通用解码器
+    // 直接查找支持D3D11VA的硬件解码器
+    video_codec_ = avcodec_find_decoder_by_name(getHardwareDecoderName(codec_id));
+    if (video_codec_) {
+        std::cout << "Found D3D11VA hardware decoder: " << video_codec_->name << std::endl;
+        return true;
+    }
+    
+    // 如果没有找到专用硬件解码器，尝试通用解码器
     video_codec_ = avcodec_find_decoder(codec_id);
     if (!video_codec_) {
         std::cerr << "No video decoder found for codec ID: " << codec_id << std::endl;
         return false;
     }
     
-    // 检查解码器是否支持D3D11VA硬件加速
+    // 检查通用解码器是否支持D3D11VA硬件加速
     for (int i = 0;; i++) {
         const AVCodecHWConfig* config = avcodec_get_hw_config(video_codec_, i);
         if (!config) {
@@ -334,6 +302,21 @@ bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
     
     std::cerr << "Video codec does not support D3D11VA hardware acceleration" << std::endl;
     return false;
+}
+
+const char* HwFrameDecoder::getHardwareDecoderName(AVCodecID codec_id) {
+    switch (codec_id) {
+        case AV_CODEC_ID_H264:
+            return "h264_d3d11va";
+        case AV_CODEC_ID_HEVC:
+            return "hevc_d3d11va";
+        case AV_CODEC_ID_VP9:
+            return "vp9_d3d11va";
+        case AV_CODEC_ID_AV1:
+            return "av1_d3d11va";
+        default:
+            return nullptr;
+    }
 }
 
 bool HwFrameDecoder::findAudioDecoder(AVCodecID codec_id) {
@@ -438,15 +421,6 @@ void HwFrameDecoder::releaseResources() {
         hw_device_ctx_ = nullptr;
     }
     
-    if (d3d11_context_) {
-        d3d11_context_->Release();
-        d3d11_context_ = nullptr;
-    }
-    
-    if (d3d11_device_) {
-        d3d11_device_->Release();
-        d3d11_device_ = nullptr;
-    }
     
     // 释放AVFrame池
     releaseFramePools();

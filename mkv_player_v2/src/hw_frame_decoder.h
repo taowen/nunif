@@ -74,10 +74,6 @@ public:
     // 获取内部reader（便利方法）
     MKVStreamReader* getReader() { return &demuxer_.getReader(); }
     
-    // 获取内部D3D11设备（用于RGB转换器）
-    ID3D11Device* getD3D11Device() { return d3d11_device_; }
-    ID3D11DeviceContext* getD3D11Context() { return d3d11_context_; }
-    
     // 获取池中的帧（供DecodedFrame使用）
     AVFrame* getFrameFromPool(int index, bool is_audio) const;
     
@@ -86,9 +82,6 @@ public:
     void close();
 
 private:
-    // DirectX11设备
-    ID3D11Device* d3d11_device_;
-    ID3D11DeviceContext* d3d11_context_;
     
     // FFmpeg解码器
     AVCodecContext* video_codec_context_;
@@ -118,12 +111,12 @@ private:
     int current_pair_index_;
     
     // 内部方法
-    bool createHardwareContext();
     bool findVideoHardwareDecoder(AVCodecID codec_id);
     bool findAudioDecoder(AVCodecID codec_id);
     bool configureVideoDecoder(AVCodecParameters* codec_params);
     bool configureAudioDecoder(AVCodecParameters* codec_params);
     bool initializeAudioResampler();
+    const char* getHardwareDecoderName(AVCodecID codec_id);
     
     // AVFrame池管理
     void initializeFramePools();
