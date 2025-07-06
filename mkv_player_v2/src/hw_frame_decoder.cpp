@@ -272,28 +272,6 @@ void HwFrameDecoder::close() {
     is_initialized_ = false;
 }
 
-bool HwFrameDecoder::createD3D11Device() {
-    HRESULT hr = D3D11CreateDevice(
-        nullptr,                    // 默认适配器
-        D3D_DRIVER_TYPE_HARDWARE,   // 硬件驱动
-        nullptr,                    // 软件驱动句柄
-        D3D11_CREATE_DEVICE_VIDEO_SUPPORT, // 支持视频
-        nullptr,                    // 功能级别数组
-        0,                          // 功能级别数组大小
-        D3D11_SDK_VERSION,          // SDK版本
-        &d3d11_device_,             // 输出设备
-        nullptr,                    // 输出功能级别
-        &d3d11_context_             // 输出设备上下文
-    );
-    
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create D3D11 device, HRESULT: 0x" << std::hex << hr << std::endl;
-        return false;
-    }
-    
-    return true;
-}
-
 bool HwFrameDecoder::createHardwareContext() {
     // 让FFmpeg自动创建D3D11VA硬件设备上下文
     int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);

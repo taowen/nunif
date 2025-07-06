@@ -118,7 +118,6 @@ private:
     int current_pair_index_;
     
     // 内部方法
-    bool createD3D11Device();
     bool createHardwareContext();
     bool findVideoHardwareDecoder(AVCodecID codec_id);
     bool findAudioDecoder(AVCodecID codec_id);
