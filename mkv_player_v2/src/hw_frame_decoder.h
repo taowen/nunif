@@ -79,6 +79,9 @@ public:
     static ID3D11Device* getD3D11DeviceFromFrame(AVFrame* frame);
     static ID3D11DeviceContext* getD3D11ContextFromFrame(AVFrame* frame);
     
+    // 直接从硬件上下文获取D3D11设备（避免临时帧创建）
+    ID3D11Device* getD3D11Device() const;
+    ID3D11DeviceContext* getD3D11Context() const;
     
     // 资源管理
     void close();

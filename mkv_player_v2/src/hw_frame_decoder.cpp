@@ -506,3 +506,32 @@ ID3D11DeviceContext* HwFrameDecoder::getD3D11ContextFromFrame(AVFrame* frame) {
     device->Release(); // 释放从GetDevice获取的引用
     return context;
 }
+
+// 直接从硬件上下文获取D3D11设备（避免临时帧创建）
+ID3D11Device* HwFrameDecoder::getD3D11Device() const {
+    if (!hw_device_ctx_) {
+        return nullptr;
+    }
+    
+    AVHWDeviceContext* hw_device = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (!hw_device || hw_device->type != AV_HWDEVICE_TYPE_D3D11VA) {
+        return nullptr;
+    }
+    
+    AVD3D11VADeviceContext* d3d11_device = (AVD3D11VADeviceContext*)hw_device->hwctx;
+    return d3d11_device->device;
+}
+
+ID3D11DeviceContext* HwFrameDecoder::getD3D11Context() const {
+    if (!hw_device_ctx_) {
+        return nullptr;
+    }
+    
+    AVHWDeviceContext* hw_device = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (!hw_device || hw_device->type != AV_HWDEVICE_TYPE_D3D11VA) {
+        return nullptr;
+    }
+    
+    AVD3D11VADeviceContext* d3d11_device = (AVD3D11VADeviceContext*)hw_device->hwctx;
+    return d3d11_device->device_context;
+}

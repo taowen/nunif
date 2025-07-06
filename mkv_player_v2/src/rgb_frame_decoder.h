@@ -29,6 +29,8 @@ public:
     struct RGBFrame {
         D3D11TexturePtr rgb_texture;
         D3D11SRVPtr rgb_srv;
+        // 缓存视频处理器输出视图以避免每帧重新创建
+        D3D11VideoOutputViewPtr cached_output_view;
         double timestamp = 0.0;
         bool is_valid = false;
         int width = 0;
@@ -38,6 +40,7 @@ public:
         void reset() {
             rgb_texture.Reset();
             rgb_srv.Reset();
+            cached_output_view.Reset();
             is_valid = false;
             width = 0;
             height = 0;
@@ -46,6 +49,11 @@ public:
         // 检查纹理资源是否存在（不检查帧有效性）
         bool hasValidResources() const {
             return rgb_texture && rgb_srv;
+        }
+        
+        // 检查输出视图是否存在
+        bool hasValidOutputView() const {
+            return cached_output_view.Get() != nullptr;
         }
     };
     

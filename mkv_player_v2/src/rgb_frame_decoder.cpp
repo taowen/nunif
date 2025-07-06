@@ -34,25 +34,9 @@ bool RGBFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 2. 通过解码第一帧获取FFmpeg的D3D11设备（确保设备一致性）
-    AVFrame* temp_frame = av_frame_alloc();
-    if (!temp_frame) {
-        std::cerr << "Failed to allocate temporary frame" << std::endl;
-        frame_decoder_.close();
-        return false;
-    }
-    
-    if (!frame_decoder_.tryDecodeFirstVideoFrame(temp_frame)) {
-        std::cerr << "Failed to decode first video frame" << std::endl;
-        av_frame_free(&temp_frame);
-        frame_decoder_.close();
-        return false;
-    }
-    
-    d3d11_device_ = HwFrameDecoder::getD3D11DeviceFromFrame(temp_frame);
-    d3d11_context_ = HwFrameDecoder::getD3D11ContextFromFrame(temp_frame);
-    
-    av_frame_free(&temp_frame);
+    // 2. 直接从硬件上下文获取D3D11设备（避免临时帧创建）
+    d3d11_device_ = frame_decoder_.getD3D11Device();
+    d3d11_context_ = frame_decoder_.getD3D11Context();
     
     if (!d3d11_device_ || !d3d11_context_) {
         std::cerr << "Failed to get D3D11 device from decoded frame" << std::endl;
@@ -197,17 +181,18 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
         return false;
     }
 
-    // 创建输出视图
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {};
-    output_view_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
-    output_view_desc.Texture2D.MipSlice = 0;
+    // 懒创建输出视图（在第一次转换时创建）
+    if (!rgb_frame.hasValidOutputView()) {
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_view_desc = {};
+        output_view_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        output_view_desc.Texture2D.MipSlice = 0;
 
-    ID3D11VideoProcessorOutputView* output_view = nullptr;
-    hr = video_device_->CreateVideoProcessorOutputView(rgb_frame.rgb_texture.Get(), video_enum_.Get(), &output_view_desc, &output_view);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create output view. HRESULT: 0x" << std::hex << hr << std::endl;
-        input_view->Release();
-        return false;
+        HRESULT hr = video_device_->CreateVideoProcessorOutputView(rgb_frame.rgb_texture.Get(), video_enum_.Get(), &output_view_desc, rgb_frame.cached_output_view.GetAddressOf());
+        if (FAILED(hr)) {
+            std::cerr << "Error: Failed to create cached output view. HRESULT: 0x" << std::hex << hr << std::endl;
+            input_view->Release();
+            return false;
+        }
     }
 
     // 执行颜色空间转换
@@ -223,10 +208,9 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     stream_data.ppPastSurfacesRight = nullptr;
     stream_data.ppFutureSurfacesRight = nullptr;
 
-    hr = video_context_->VideoProcessorBlt(video_processor_.Get(), output_view, 0, 1, &stream_data);
+    hr = video_context_->VideoProcessorBlt(video_processor_.Get(), rgb_frame.cached_output_view.Get(), 0, 1, &stream_data);
     
-    // 清理临时资源
-    output_view->Release();
+    // 只释放输入视图（输出视图已缓存）
     input_view->Release();
     
     if (FAILED(hr)) {
@@ -336,7 +320,7 @@ bool RGBFrameDecoder::createRGBTexture(RGBFrame& rgb_frame, int width, int heigh
         return false;
     }
     
-    // 只在尺寸变化时才释放旧纹理
+    // 只在尺寸变化时才释放旧纹理和视图
     if (rgb_frame.width != width || rgb_frame.height != height) {
         rgb_frame.reset();
     }
@@ -374,6 +358,8 @@ bool RGBFrameDecoder::createRGBTexture(RGBFrame& rgb_frame, int width, int heigh
         rgb_frame.rgb_texture.Reset();
         return false;
     }
+    
+    // 注意：输出视图将在第一次转换时懒创建（在ensureVideoProcessor之后）
 
     rgb_frame.width = width;
     rgb_frame.height = height;
