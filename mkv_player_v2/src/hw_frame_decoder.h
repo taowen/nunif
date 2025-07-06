@@ -39,6 +39,10 @@ public:
     struct HwFramePair {
         HwFrame audio_frame;
         HwFrame video_frame;
+        bool is_valid = false;             // 标记此pair是否包含有效数据
+        
+        // 注意：使用方不要手动释放HwFrame中的数据
+        // 这些帧由HwFrameDecoder内部管理，会在适当时候自动释放和复用
     };
 
     HwFrameDecoder();
@@ -47,8 +51,8 @@ public:
     // 初始化解码器 - 打开MKV文件并设置解码器
     bool open(const std::string& filepath);
     
-    // Pull-style解码接口 - 返回同步的音视频帧
-    bool readNextFrames(HwFramePair& decoded_frames);
+    // Pull-style解码接口 - 返回同步的音视频帧（双缓冲机制）
+    bool readNextHwFramePair(HwFramePair& decoded_frames);
     
     // 直接解码接口（用于测试和特殊用途）
     bool decodeVideoPacket(AVPacket* packet, AVFrame* frame);
@@ -59,6 +63,10 @@ public:
     bool isHardwareAccelerated() const { return hw_device_ctx_ != nullptr; }
     const char* getVideoCodecName() const;
     const char* getAudioCodecName() const;
+    
+    // 缓存状态查询
+    bool hasValidPair() const;          // 检查是否还有有效的缓存pair
+    int getValidPairCount() const;      // 获取当前有效pair数量(0-2)
     
     // 获取内部demuxer（用于测试）
     PacketDemuxer* getDemuxer() { return &demuxer_; }
@@ -96,11 +104,15 @@ private:
     bool is_initialized_;
     
     // AVFrame池 - 复用避免频繁分配
-    static const int AVFRAME_POOL_SIZE = 3;
+    static const int AVFRAME_POOL_SIZE = 6;  // 增加池大小支持双缓冲
     AVFrame* audio_frame_pool_[AVFRAME_POOL_SIZE];
     AVFrame* video_frame_pool_[AVFRAME_POOL_SIZE];
     int current_audio_frame_index_;
     int current_video_frame_index_;
+    
+    // 双缓冲机制 - 支持两个HwFramePair同时存在
+    HwFramePair borrowed_pairs_[2];
+    int current_pair_index_;
     
     // 内部方法
     bool createD3D11Device();
@@ -116,6 +128,10 @@ private:
     AVFrame* getNextAudioFrame();
     AVFrame* getNextVideoFrame();
     void releaseFramePools();
+    
+    // 双缓冲管理
+    void clearBorrowedPairs();
+    void clearCurrentPair();
     
     void releaseResources();
 };

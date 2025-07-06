@@ -68,7 +68,7 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
         HwFrameDecoder::HwFramePair decoded_frames;
         
         // 解码前20对音视频帧
-        while (decoder.readNextFrames(decoded_frames) && frames_decoded < 20) {
+        while (decoder.readNextHwFramePair(decoded_frames) && frames_decoded < 20) {
             frames_decoded++;
             
             // 验证音频帧
@@ -186,7 +186,7 @@ TEST_CASE("FrameDecoder error handling", "[frame_decoder]") {
         HwFrameDecoder::HwFramePair frames;
         
         // 未初始化时的操作应该安全失败
-        REQUIRE_FALSE(decoder.readNextFrames(frames));
+        REQUIRE_FALSE(decoder.readNextHwFramePair(frames));
         
         // 直接包解码也应该失败
         AVPacket* dummy_packet = av_packet_alloc();

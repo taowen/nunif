@@ -94,7 +94,7 @@ bool RGBFrameDecoder::readNextFrames(DecodedFrames& decoded_frames) {
     
     // 1. 从内部HwFrameDecoder获取原始帧的描述信息（非指针）
     HwFrameDecoder::HwFramePair raw_frames;
-    if (!frame_decoder_.readNextFrames(raw_frames)) {
+    if (!frame_decoder_.readNextHwFramePair(raw_frames)) {
         decoded_frames.audio_frame.is_valid = false;
         decoded_frames.rgb_frame.is_valid = false;
         return false;
