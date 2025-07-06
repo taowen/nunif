@@ -217,28 +217,6 @@ const char* HwFrameDecoder::getAudioCodecName() const {
 
 
 
-void HwFrameDecoder::flush() {
-    if (is_initialized_) {
-        if (video_codec_context_) {
-            avcodec_send_packet(video_codec_context_, nullptr);
-            // 必须循环接收剩余帧
-            AVFrame* temp_frame = av_frame_alloc();
-            while (avcodec_receive_frame(video_codec_context_, temp_frame) == 0) {
-                av_frame_unref(temp_frame);
-            }
-            av_frame_free(&temp_frame);
-        }
-        if (audio_codec_context_) {
-            avcodec_send_packet(audio_codec_context_, nullptr);
-            // 必须循环接收剩余帧
-            AVFrame* temp_frame = av_frame_alloc();
-            while (avcodec_receive_frame(audio_codec_context_, temp_frame) == 0) {
-                av_frame_unref(temp_frame);
-            }
-            av_frame_free(&temp_frame);
-        }
-    }
-}
 
 void HwFrameDecoder::close() {
     demuxer_.close();

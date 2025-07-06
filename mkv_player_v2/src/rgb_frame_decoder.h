@@ -79,7 +79,6 @@ public:
     
     
     // 资源管理
-    void flush();
     void close();
 
 private:

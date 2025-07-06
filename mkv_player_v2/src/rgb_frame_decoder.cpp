@@ -298,9 +298,6 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     return true;
 }
 
-void RGBFrameDecoder::flush() {
-    frame_decoder_.flush();
-}
 
 void RGBFrameDecoder::close() {
     frame_decoder_.close();
