@@ -29,6 +29,8 @@ add_executable(spike
     tests/test_frame_decoder.cpp
     src/rgb_frame_decoder.cpp
     tests/test_rgb_frame_decoder.cpp
+    src/async_rgb_frame_decoder.cpp
+    tests/test_async_rgb_frame_decoder.cpp
     src/rgb_verification.cpp
     tests/test_rgb_verification.cpp
 )

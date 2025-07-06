@@ -103,3 +103,36 @@ tests/         # 测试代码
 2. 使用该组件的上层代码
 3. 对应的测试文件
 4. 可能依赖该组件的其他组件
+
+## 资源管理原则
+
+### 双缓冲机制
+所有解码器类都采用双缓冲设计，支持两个数据对象同时存在：
+- `PacketDemuxer`: `borrowed_pairs_[2]` 存储PacketPair
+- `HwFrameDecoder`: `borrowed_pairs_[2]` 存储HwFramePair  
+- `RGBFrameDecoder`: `borrowed_pairs_[2]` 存储RGBFramePair
+
+### 内部资源管理
+**核心原则：使用方完全不需要管理资源**
+- 所有FFmpeg资源（AVPacket、AVFrame）由类内部池化管理
+- 所有DirectX资源使用ComPtr智能指针自动管理
+- 资源在下次读取调用时自动复用，析构时自动释放
+
+### 资源所有权规则
+1. **PacketDemuxer**: 
+   - 管理AVPacket生命周期
+   - 使用方不要手动释放audio_packet和video_packet
+   
+2. **HwFrameDecoder**:
+   - 管理AVFrame生命周期和硬件加速上下文
+   - 使用方不要调用av_frame_free()或任何释放函数
+   
+3. **RGBFrameDecoder**:
+   - 管理D3D11纹理和视频处理器资源
+   - 使用ComPtr自动管理DirectX对象生命周期
+
+### 接口设计规范
+- 所有read方法返回引用，而非拷贝
+- 标记所有返回的数据结构为"内部管理，使用方无需释放"
+- 提供is_valid标志位判断数据有效性
+- 提供状态查询方法（hasValidPair、getValidPairCount等）
