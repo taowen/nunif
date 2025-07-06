@@ -34,13 +34,7 @@ public:
         
         std::cout << "App window created successfully" << std::endl;
         
-        if (!InitializeD3D()) {
-            std::cout << "Failed to initialize DirectX11" << std::endl;
-            return false;
-        }
-        
-        std::cout << "DirectX11 initialized successfully" << std::endl;
-        
+        // 先初始化解码器（如果有视频文件）
         if (!m_videoPath.empty()) {
             if (!m_decoder.open(m_videoPath)) {
                 std::cout << "Failed to open video file: " << m_videoPath << std::endl;
@@ -48,6 +42,13 @@ public:
             }
             std::cout << "Video decoder initialized successfully" << std::endl;
         }
+        
+        if (!InitializeD3D()) {
+            std::cout << "Failed to initialize DirectX11" << std::endl;
+            return false;
+        }
+        
+        std::cout << "DirectX11 initialized successfully" << std::endl;
         
         return true;
     }
@@ -146,6 +147,42 @@ private:
     }
     
     bool InitializeD3D() {
+        // 必须从解码器获取D3D11设备以确保兼容性
+        if (m_videoPath.empty()) {
+            std::cout << "No video file provided, cannot initialize D3D11" << std::endl;
+            return false;
+        }
+        
+        // 从解码器获取D3D11设备
+        m_device = m_decoder.getD3D11Device();
+        if (!m_device) {
+            std::cout << "Failed to get D3D11 device from decoder" << std::endl;
+            return false;
+        }
+        
+        // 从设备获取device context
+        m_device->GetImmediateContext(&m_deviceContext);
+        std::cout << "Using D3D11 device from decoder" << std::endl;
+        
+        // 创建DXGI Factory和SwapChain
+        ComPtr<IDXGIDevice> dxgiDevice;
+        HRESULT hr = m_device.As(&dxgiDevice);
+        if (FAILED(hr)) {
+            return false;
+        }
+        
+        ComPtr<IDXGIAdapter> dxgiAdapter;
+        hr = dxgiDevice->GetAdapter(&dxgiAdapter);
+        if (FAILED(hr)) {
+            return false;
+        }
+        
+        ComPtr<IDXGIFactory> dxgiFactory;
+        hr = dxgiAdapter->GetParent(__uuidof(IDXGIFactory), (void**)&dxgiFactory);
+        if (FAILED(hr)) {
+            return false;
+        }
+        
         DXGI_SWAP_CHAIN_DESC swapChainDesc = {};
         swapChainDesc.BufferCount = 1;
         swapChainDesc.BufferDesc.Width = 800;
@@ -159,22 +196,7 @@ private:
         swapChainDesc.SampleDesc.Quality = 0;
         swapChainDesc.Windowed = TRUE;
         
-        D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
-        
-        HRESULT hr = D3D11CreateDeviceAndSwapChain(
-            nullptr,
-            D3D_DRIVER_TYPE_HARDWARE,
-            nullptr,
-            0,
-            &featureLevel, 1,
-            D3D11_SDK_VERSION,
-            &swapChainDesc,
-            &m_swapChain,
-            &m_device,
-            nullptr,
-            &m_deviceContext
-        );
-        
+        hr = dxgiFactory->CreateSwapChain(m_device.Get(), &swapChainDesc, &m_swapChain);
         if (FAILED(hr)) {
             return false;
         }

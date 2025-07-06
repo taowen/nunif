@@ -147,6 +147,34 @@ void AsyncRGBFrameDecoder::releaseResources() {
     first_frame_loaded_ = false;
 }
 
+ID3D11Device* AsyncRGBFrameDecoder::getD3D11Device() {
+    if (!is_initialized_) {
+        return nullptr;
+    }
+    
+    // 通过内部RGBFrameDecoder获取D3D11设备
+    HwFrameDecoder* hw_decoder = rgb_decoder_.getFrameDecoder();
+    if (!hw_decoder) {
+        return nullptr;
+    }
+    
+    // 尝试解码第一帧以获取设备
+    AVFrame* temp_frame = av_frame_alloc();
+    if (!temp_frame) {
+        return nullptr;
+    }
+    
+    if (!hw_decoder->tryDecodeFirstVideoFrame(temp_frame)) {
+        av_frame_free(&temp_frame);
+        return nullptr;
+    }
+    
+    ID3D11Device* device = HwFrameDecoder::getD3D11DeviceFromFrame(temp_frame);
+    av_frame_free(&temp_frame);
+    
+    return device;
+}
+
 void AsyncRGBFrameDecoder::stopWorker() {
     if (worker_thread_.joinable()) {
         // 通知worker线程停止
