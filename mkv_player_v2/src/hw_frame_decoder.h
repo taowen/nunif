@@ -34,8 +34,11 @@ public:
         HwFrame video_frame;
         bool is_valid = false;             // 标记此pair是否包含有效数据
         
-        // 注意：使用方不要手动释放HwFrame中的数据
-        // 这些帧由HwFrameDecoder内部管理，会在适当时候自动释放和复用
+        // 重要：使用方完全不需要管理资源！
+        // - 所有AVFrame由HwFrameDecoder内部池化管理
+        // - 不要调用av_frame_free()或任何释放函数
+        // - 帧会在下次readNextHwFramePair()调用时自动复用
+        // - HwFrameDecoder析构时会自动释放所有资源
     };
 
     HwFrameDecoder();
@@ -45,6 +48,7 @@ public:
     bool open(const std::string& filepath);
     
     // Pull-style解码接口 - 返回同步的音视频帧（双缓冲机制）
+    // 重要：返回的HwFramePair由内部池化管理，使用方无需释放任何资源
     bool readNextHwFramePair(HwFramePair& decoded_frames);
     
     // 直接解码接口（用于测试和特殊用途）
@@ -111,8 +115,6 @@ private:
     
     // 双缓冲管理
     void initializeBorrowedPairs();
-    void clearBorrowedPairs();
-    void clearCurrentPair();
     
     void releaseResources();
 };

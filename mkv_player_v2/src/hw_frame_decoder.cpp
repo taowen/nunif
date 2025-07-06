@@ -88,8 +88,6 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
         return false;
     }
     
-    // 清理当前要使用的pair
-    clearCurrentPair();
     
     // 从demuxer获取同步的包
     PacketDemuxer::PacketPair synced_packets;
@@ -100,15 +98,7 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     // 获取当前pair的引用
     HwFramePair& current_pair = borrowed_pairs_[current_pair_index_];
     
-    // 如果当前pair的帧为空，则分配新的AVFrame
-    if (!current_pair.audio_frame.frame) {
-        current_pair.audio_frame.frame = av_frame_alloc();
-    }
-    if (!current_pair.video_frame.frame) {
-        current_pair.video_frame.frame = av_frame_alloc();
-    }
-    
-    // 清理之前的数据
+    // 清理之前的数据，但保持AVFrame结构体不变（池化复用）
     av_frame_unref(current_pair.audio_frame.frame);
     av_frame_unref(current_pair.video_frame.frame);
     
@@ -251,7 +241,6 @@ void HwFrameDecoder::flush() {
 }
 
 void HwFrameDecoder::close() {
-    clearBorrowedPairs();
     demuxer_.close();
     releaseResources();
     is_initialized_ = false;
@@ -367,6 +356,7 @@ bool HwFrameDecoder::initializeAudioResampler() {
 }
 
 void HwFrameDecoder::releaseResources() {
+    // 释放编解码器上下文
     if (video_codec_context_) {
         avcodec_free_context(&video_codec_context_);
         video_codec_context_ = nullptr;
@@ -387,23 +377,37 @@ void HwFrameDecoder::releaseResources() {
         hw_device_ctx_ = nullptr;
     }
     
-    
+    // 释放池化的AVFrame（只在这里释放！）
+    for (int i = 0; i < 2; i++) {
+        if (borrowed_pairs_[i].audio_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
+            borrowed_pairs_[i].audio_frame.frame = nullptr;
+        }
+        if (borrowed_pairs_[i].video_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].video_frame.frame);
+            borrowed_pairs_[i].video_frame.frame = nullptr;
+        }
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].video_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
+    }
     
     video_codec_ = nullptr;
     audio_codec_ = nullptr;
 }
 
 void HwFrameDecoder::initializeBorrowedPairs() {
-    // 初始化双缓冲HwFramePair，按需分配AVFrame
+    // 一次性分配所有AVFrame，池化管理避免频繁分配释放
     for (int i = 0; i < 2; i++) {
-        if (borrowed_pairs_[i].audio_frame.frame) {
-            av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
+        // 分配音频和视频帧，生命周期与HwFrameDecoder相同
+        if (!borrowed_pairs_[i].audio_frame.frame) {
+            borrowed_pairs_[i].audio_frame.frame = av_frame_alloc();
         }
-        if (borrowed_pairs_[i].video_frame.frame) {
-            av_frame_free(&borrowed_pairs_[i].video_frame.frame);
+        if (!borrowed_pairs_[i].video_frame.frame) {
+            borrowed_pairs_[i].video_frame.frame = av_frame_alloc();
         }
-        borrowed_pairs_[i].audio_frame.frame = nullptr;
-        borrowed_pairs_[i].video_frame.frame = nullptr;
+        
+        // 初始化状态
         borrowed_pairs_[i].audio_frame.is_valid = false;
         borrowed_pairs_[i].video_frame.is_valid = false;
         borrowed_pairs_[i].is_valid = false;
@@ -414,32 +418,6 @@ void HwFrameDecoder::initializeBorrowedPairs() {
 
 
 
-void HwFrameDecoder::clearBorrowedPairs() {
-    for (int i = 0; i < 2; i++) {
-        if (borrowed_pairs_[i].audio_frame.frame) {
-            av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
-        }
-        if (borrowed_pairs_[i].video_frame.frame) {
-            av_frame_free(&borrowed_pairs_[i].video_frame.frame);
-        }
-        borrowed_pairs_[i].audio_frame.frame = nullptr;
-        borrowed_pairs_[i].video_frame.frame = nullptr;
-        borrowed_pairs_[i].audio_frame.is_valid = false;
-        borrowed_pairs_[i].video_frame.is_valid = false;
-        borrowed_pairs_[i].is_valid = false;
-        borrowed_pairs_[i].audio_frame.timestamp = 0.0;
-        borrowed_pairs_[i].video_frame.timestamp = 0.0;
-    }
-}
-
-void HwFrameDecoder::clearCurrentPair() {
-    HwFramePair& current_pair = borrowed_pairs_[current_pair_index_];
-    current_pair.audio_frame.is_valid = false;
-    current_pair.video_frame.is_valid = false;
-    current_pair.is_valid = false;
-    current_pair.audio_frame.timestamp = 0.0;
-    current_pair.video_frame.timestamp = 0.0;
-}
 
 bool HwFrameDecoder::hasValidPair() const {
     return borrowed_pairs_[0].is_valid || borrowed_pairs_[1].is_valid;
