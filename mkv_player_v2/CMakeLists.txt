@@ -72,6 +72,12 @@ copy_tensorrt_dlls(spike)
 # GUI Player target
 add_executable(gui_player
     src/gui_player.cpp
+    src/mkv_stream_reader.cpp
+    src/packet_demuxer.cpp
+    src/hw_frame_decoder.cpp
+    src/rgb_frame_decoder.cpp
+    src/async_rgb_frame_decoder.cpp
+    src/rgb_verification.cpp
 )
 
 # Apply Windows/MSVC compile options for gui_player
@@ -92,3 +98,15 @@ target_link_libraries(gui_player PRIVATE
     user32.lib
     gdi32.lib
 )
+
+# Link FFmpeg to gui_player
+target_link_ffmpeg(gui_player)
+copy_ffmpeg_dlls(gui_player)
+
+# Link CUDA to gui_player
+target_link_cuda(gui_player)
+copy_cuda_dlls(gui_player)
+
+# Link TensorRT to gui_player
+target_link_tensorrt(gui_player)
+copy_tensorrt_dlls(gui_player)

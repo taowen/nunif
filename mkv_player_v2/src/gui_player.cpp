@@ -8,15 +8,20 @@
 #include <iostream>
 #include <io.h>
 #include <fcntl.h>
+#include "async_rgb_frame_decoder.h"
 
 using Microsoft::WRL::ComPtr;
 
 class GUIPlayer {
 public:
-    GUIPlayer() : m_hwnd(nullptr), m_colorIndex(0), m_lastColorChange(std::chrono::steady_clock::now()), m_startTime(std::chrono::steady_clock::now()), m_autoExitTimeMs(0) {}
+    GUIPlayer() : m_hwnd(nullptr), m_startTime(std::chrono::steady_clock::now()), m_autoExitTimeMs(0), m_videoPath("") {}
     
     void SetAutoExitTime(int timeMs) {
         m_autoExitTimeMs = timeMs;
+    }
+    
+    void SetVideoPath(const std::string& path) {
+        m_videoPath = path;
     }
     
     bool Initialize(HINSTANCE hInstance, int nCmdShow) {
@@ -35,6 +40,15 @@ public:
         }
         
         std::cout << "DirectX11 initialized successfully" << std::endl;
+        
+        if (!m_videoPath.empty()) {
+            if (!m_decoder.open(m_videoPath)) {
+                std::cout << "Failed to open video file: " << m_videoPath << std::endl;
+                return false;
+            }
+            std::cout << "Video decoder initialized successfully" << std::endl;
+        }
+        
         return true;
     }
     
@@ -62,7 +76,7 @@ public:
                 if (frameCount % 60 == 0) {
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime);
-                    std::cout << "Frame " << frameCount << " at " << elapsed.count() << "ms, color: " << GetCurrentColorName() << std::endl;
+                    std::cout << "Frame " << frameCount << " at " << elapsed.count() << "ms" << std::endl;
                 }
             }
         }
@@ -85,10 +99,11 @@ private:
     ComPtr<IDXGISwapChain> m_swapChain;
     ComPtr<ID3D11RenderTargetView> m_renderTargetView;
     
-    int m_colorIndex;
-    std::chrono::steady_clock::time_point m_lastColorChange;
     std::chrono::steady_clock::time_point m_startTime;
     int m_autoExitTimeMs;
+    
+    std::string m_videoPath;
+    AsyncRGBFrameDecoder m_decoder;
     
     bool CreateAppWindow(HINSTANCE hInstance, int nCmdShow) {
         WNDCLASSEXW wcex = {};
@@ -184,45 +199,41 @@ private:
     }
     
     void Render() {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastColorChange);
-        
-        if (elapsed.count() >= 1000) {
-            int oldColorIndex = m_colorIndex;
-            m_colorIndex = (m_colorIndex + 1) % 3;
-            m_lastColorChange = now;
-            std::cout << "Color changed from " << GetColorName(oldColorIndex) << " to " << GetColorName(m_colorIndex) << std::endl;
+        if (!m_videoPath.empty() && m_decoder.isInitialized()) {
+            RGBFrameDecoder::RGBFramePair rgbPair;
+            if (m_decoder.readNextRGBFramePair(rgbPair)) {
+                if (rgbPair.is_valid && rgbPair.rgb_frame.hasValidResources()) {
+                    RenderVideoFrame(rgbPair.rgb_frame.rgb_texture.Get());
+                } else {
+                    RenderBlackScreen();
+                }
+            } else {
+                RenderBlackScreen();
+            }
+        } else {
+            RenderBlackScreen();
         }
         
-        float clearColor[4];
-        switch (m_colorIndex) {
-            case 0:
-                clearColor[0] = 1.0f; clearColor[1] = 0.0f; clearColor[2] = 0.0f; clearColor[3] = 1.0f;
-                break;
-            case 1:
-                clearColor[0] = 0.0f; clearColor[1] = 1.0f; clearColor[2] = 0.0f; clearColor[3] = 1.0f;
-                break;
-            case 2:
-                clearColor[0] = 0.0f; clearColor[1] = 0.0f; clearColor[2] = 1.0f; clearColor[3] = 1.0f;
-                break;
-        }
-        
-        m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
         m_swapChain->Present(0, 0);
     }
     
-    const char* GetColorName(int colorIndex) {
-        switch (colorIndex) {
-            case 0: return "Red";
-            case 1: return "Green";
-            case 2: return "Blue";
-            default: return "Unknown";
+    void RenderVideoFrame(ID3D11Texture2D* videoTexture) {
+        ComPtr<ID3D11ShaderResourceView> srv;
+        HRESULT hr = m_device->CreateShaderResourceView(videoTexture, nullptr, &srv);
+        if (FAILED(hr)) {
+            RenderBlackScreen();
+            return;
         }
+        
+        float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
     }
     
-    const char* GetCurrentColorName() {
-        return GetColorName(m_colorIndex);
+    void RenderBlackScreen() {
+        float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
     }
+    
     
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GUIPlayer* player = nullptr;
@@ -259,16 +270,22 @@ int main() {
     
     int argc;
     LPWSTR* argv = CommandLineToArgvW(lpCmdLine, &argc);
-    LPWSTR cmdArg = nullptr;
-    if (argc > 1) {
-        cmdArg = argv[1];
-    }
     GUIPlayer player;
     
-    if (cmdArg && wcslen(cmdArg) > 0) {
-        int autoExitTime = _wtoi(cmdArg);
-        if (autoExitTime > 0) {
-            player.SetAutoExitTime(autoExitTime);
+    for (int i = 1; i < argc; i++) {
+        std::wstring arg = argv[i];
+        if (arg.find(L".mkv") != std::wstring::npos || arg.find(L".mp4") != std::wstring::npos) {
+            int size = WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            std::string videoPath(size, 0);
+            WideCharToMultiByte(CP_UTF8, 0, arg.c_str(), -1, &videoPath[0], size, nullptr, nullptr);
+            videoPath.resize(size - 1);
+            player.SetVideoPath(videoPath);
+            std::cout << "Video path set to: " << videoPath << std::endl;
+        } else {
+            int autoExitTime = _wtoi(argv[i]);
+            if (autoExitTime > 0) {
+                player.SetAutoExitTime(autoExitTime);
+            }
         }
     }
     

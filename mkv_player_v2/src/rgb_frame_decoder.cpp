@@ -234,7 +234,6 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
         return false;
     }
 
-    std::cout << "Color space validation: PASSED" << std::endl;
     return true;
 }
 
