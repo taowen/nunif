@@ -14,6 +14,10 @@ public:
         AVPacket* audio_packet = nullptr;  // 可能为nullptr
         AVPacket* video_packet = nullptr;  // 可能为nullptr  
         double timestamp = 0.0;            // 同步时间戳（基于音频）
+        bool is_valid = false;             // 标记此pair是否包含有效数据
+        
+        // 注意：使用方不要手动释放audio_packet和video_packet
+        // 这些包由PacketDemuxer内部管理，会在适当时候自动释放和复用
     };
 
     PacketDemuxer();
@@ -33,6 +37,10 @@ public:
     bool isInitialized() const { return is_initialized_; }
     bool isEOF() const { return is_eof_; }
     
+    // 缓存状态查询
+    bool hasValidPair() const;          // 检查是否还有有效的缓存pair
+    int getValidPairCount() const;      // 获取当前有效pair数量(0-2)
+    
     // 资源管理
     void close();
 
@@ -40,14 +48,16 @@ private:
     // MKV读取器
     MKVStreamReader reader_;
     
-    // 借出的PacketPair - 每次readNextPacketPair前会清理上一次的数据
-    PacketPair borrowed_pair_;
+    // 借出的PacketPair - 支持两个pair同时存在
+    PacketPair borrowed_pairs_[2];
+    int current_pair_index_ = 0;
     
     // 状态
     bool is_initialized_;
     bool is_eof_;
     
     // 内部方法
-    void clearBorrowedPair();
+    void clearBorrowedPairs();
+    void clearCurrentPair();
     double getPacketTimestamp(AVPacket* packet, bool is_audio) const;
 };

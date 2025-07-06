@@ -4,7 +4,8 @@
 
 PacketDemuxer::PacketDemuxer() 
     : is_initialized_(false)
-    , is_eof_(false) {
+    , is_eof_(false)
+    , current_pair_index_(0) {
 }
 
 PacketDemuxer::~PacketDemuxer() {
@@ -39,8 +40,8 @@ bool PacketDemuxer::readNextPacketPair(PacketPair& packets) {
         return false;
     }
     
-    // 清理上一次借出的数据
-    clearBorrowedPair();
+    // 清理当前要使用的pair
+    clearCurrentPair();
     
     // 如果已经EOF，返回false
     if (is_eof_) {
@@ -80,36 +81,60 @@ bool PacketDemuxer::readNextPacketPair(PacketPair& packets) {
         return false;
     }
     
-    // 存储到借出的pair中
-    borrowed_pair_.audio_packet = audio_packet;
-    borrowed_pair_.video_packet = video_packet;
-    borrowed_pair_.timestamp = getPacketTimestamp(audio_packet, true);
+    // 存储到当前的pair中
+    PacketPair& current_pair = borrowed_pairs_[current_pair_index_];
+    current_pair.audio_packet = audio_packet;
+    current_pair.video_packet = video_packet;
+    current_pair.timestamp = getPacketTimestamp(audio_packet, true);
+    current_pair.is_valid = true;
     
-    // 将借出的pair的指针返回给调用者
-    packets = borrowed_pair_;
+    // 将当前pair的指针返回给调用者
+    packets = current_pair;
+    
+    // 切换到下一个pair
+    current_pair_index_ = (current_pair_index_ + 1) % 2;
     
     return true;
 }
 
 void PacketDemuxer::close() {
-    clearBorrowedPair();
+    clearBorrowedPairs();
     reader_.close();
     is_initialized_ = false;
     is_eof_ = false;
 }
 
-void PacketDemuxer::clearBorrowedPair() {
-    if (borrowed_pair_.audio_packet) {
-        av_packet_free(&borrowed_pair_.audio_packet);
-        borrowed_pair_.audio_packet = nullptr;
+void PacketDemuxer::clearBorrowedPairs() {
+    for (int i = 0; i < 2; i++) {
+        if (borrowed_pairs_[i].audio_packet) {
+            av_packet_free(&borrowed_pairs_[i].audio_packet);
+            borrowed_pairs_[i].audio_packet = nullptr;
+        }
+        
+        if (borrowed_pairs_[i].video_packet) {
+            av_packet_free(&borrowed_pairs_[i].video_packet);
+            borrowed_pairs_[i].video_packet = nullptr;
+        }
+        
+        borrowed_pairs_[i].timestamp = 0.0;
+        borrowed_pairs_[i].is_valid = false;
+    }
+}
+
+void PacketDemuxer::clearCurrentPair() {
+    PacketPair& current_pair = borrowed_pairs_[current_pair_index_];
+    if (current_pair.audio_packet) {
+        av_packet_free(&current_pair.audio_packet);
+        current_pair.audio_packet = nullptr;
     }
     
-    if (borrowed_pair_.video_packet) {
-        av_packet_free(&borrowed_pair_.video_packet);
-        borrowed_pair_.video_packet = nullptr;
+    if (current_pair.video_packet) {
+        av_packet_free(&current_pair.video_packet);
+        current_pair.video_packet = nullptr;
     }
     
-    borrowed_pair_.timestamp = 0.0;
+    current_pair.timestamp = 0.0;
+    current_pair.is_valid = false;
 }
 
 double PacketDemuxer::getPacketTimestamp(AVPacket* packet, bool is_audio) const {
@@ -121,5 +146,16 @@ double PacketDemuxer::getPacketTimestamp(AVPacket* packet, bool is_audio) const 
     AVRational time_base = is_audio ? stream_info.audio_time_base : stream_info.video_time_base;
     
     return packet->pts * av_q2d(time_base);
+}
+
+bool PacketDemuxer::hasValidPair() const {
+    return borrowed_pairs_[0].is_valid || borrowed_pairs_[1].is_valid;
+}
+
+int PacketDemuxer::getValidPairCount() const {
+    int count = 0;
+    if (borrowed_pairs_[0].is_valid) count++;
+    if (borrowed_pairs_[1].is_valid) count++;
+    return count;
 }
 
