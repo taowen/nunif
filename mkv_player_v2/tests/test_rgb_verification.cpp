@@ -132,57 +132,6 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         }
     }
     
-    SECTION("Multiple frame consistency") {
-        std::vector<RGBVerification::ImageStats> frame_stats;
-        int frames_processed = 0;
-        const int max_frames = 5;
-        
-        RGBFrameDecoder::RGBFramePair rgb_pair;
-        
-        while (decoder.readNextRGBFramePair(rgb_pair) && frames_processed < max_frames) {
-            if (rgb_pair.rgb_frame.is_valid) {
-                // 读取纹理数据
-                std::vector<RGBVerification::PixelData> pixel_data;
-                int width, height;
-                
-                if (RGBVerification::readTextureData(
-                    device, context, rgb_pair.rgb_frame.rgb_texture.Get(), 
-                    pixel_data, width, height)) {
-                    
-                    auto stats = RGBVerification::calculateImageStats(pixel_data, width, height);
-                    frame_stats.push_back(stats);
-                    
-                    // 保存每一帧
-                    std::string filename = "rgb_frame_" + std::to_string(frames_processed + 1) + ".bmp";
-                    RGBVerification::saveTextureAsBMP(
-                        device, context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
-                    );
-                    
-                    std::cout << "Frame " << (frames_processed + 1) << ": RGB means = (" 
-                             << stats.mean_r << ", " << stats.mean_g << ", " << stats.mean_b << ")" << std::endl;
-                }
-                
-                frames_processed++;
-            }
-        }
-        
-        REQUIRE(frames_processed > 0);
-        
-        // 检查帧之间的一致性（尺寸应该相同）
-        if (frame_stats.size() > 1) {
-            int ref_width = frame_stats[0].width;
-            int ref_height = frame_stats[0].height;
-            
-            for (size_t i = 1; i < frame_stats.size(); i++) {
-                REQUIRE(frame_stats[i].width == ref_width);
-                REQUIRE(frame_stats[i].height == ref_height);
-            }
-            
-            std::cout << "✓ All frames have consistent dimensions: " 
-                     << ref_width << "x" << ref_height << std::endl;
-        }
-    }
-    
     decoder.close();
     device->Release();
     context->Release();

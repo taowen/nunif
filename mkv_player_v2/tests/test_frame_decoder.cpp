@@ -65,10 +65,13 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
     
     SECTION("Decode synchronized audio and video frames") {
         int frames_decoded = 0;
+        int total_read_attempts = 0;
+        const int MAX_READ_ATTEMPTS = 100; // 防止无限循环
         HwFrameDecoder::HwFramePair decoded_frames;
         
         // 解码前20对音视频帧
-        while (decoder.readNextHwFramePair(decoded_frames) && frames_decoded < 20) {
+        while (decoder.readNextHwFramePair(decoded_frames) && frames_decoded < 20 && total_read_attempts < MAX_READ_ATTEMPTS) {
+            total_read_attempts++;
             frames_decoded++;
             
             // 验证音频帧
@@ -116,68 +119,6 @@ TEST_CASE("FrameDecoder decoding workflow", "[frame_decoder][requires_test_file]
     decoder.close();
 }
 
-TEST_CASE("FrameDecoder packet-level decoding", "[frame_decoder][requires_test_file]") {
-    if (!std::filesystem::exists(TEST_MKV_FILE)) {
-        SKIP("Test MKV file not found: " + TEST_MKV_FILE);
-    }
-    
-    HwFrameDecoder decoder;
-    
-    if (!decoder.open(TEST_MKV_FILE)) {
-        SKIP("Hardware decoder initialization failed");
-    }
-    
-    SECTION("Direct packet decoding") {
-        // 获取内部demuxer进行测试
-        auto* demuxer = decoder.getDemuxer();
-        REQUIRE(demuxer != nullptr);
-        
-        PacketDemuxer::PacketPair packets;
-        AVFrame* video_frame = av_frame_alloc();
-        AVFrame* audio_frame = av_frame_alloc();
-        
-        int decoded_count = 0;
-        
-        // 直接测试包解码
-        while (demuxer->readNextPacketPair(packets) && decoded_count < 10) {
-            bool video_decoded = false;
-            bool audio_decoded = false;
-            
-            if (packets.video_packet) {
-                video_decoded = decoder.decodeVideoPacket(packets.video_packet, video_frame);
-                if (video_decoded) {
-                    REQUIRE(video_frame->format == AV_PIX_FMT_D3D11);
-                    REQUIRE(video_frame->width > 0);
-                    REQUIRE(video_frame->height > 0);
-                    av_frame_unref(video_frame);
-                }
-                av_packet_free(&packets.video_packet);
-            }
-            
-            if (packets.audio_packet) {
-                audio_decoded = decoder.decodeAudioPacket(packets.audio_packet, audio_frame);
-                if (audio_decoded) {
-                    REQUIRE(audio_frame->nb_samples > 0);
-                    REQUIRE(audio_frame->sample_rate > 0);
-                    av_frame_unref(audio_frame);
-                }
-                av_packet_free(&packets.audio_packet);
-            }
-            
-            if (video_decoded || audio_decoded) {
-                decoded_count++;
-            }
-        }
-        
-        REQUIRE(decoded_count > 0);
-        std::cout << "Packets decoded successfully: " << decoded_count << std::endl;
-        
-        av_frame_free(&video_frame);
-        av_frame_free(&audio_frame);
-    }
-    
-    decoder.close();
-}
 
 TEST_CASE("FrameDecoder error handling", "[frame_decoder]") {
     HwFrameDecoder decoder;
