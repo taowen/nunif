@@ -58,8 +58,8 @@ public:
     RGBFrameDecoder();
     ~RGBFrameDecoder();
 
-    // 使用外部提供的D3D11设备进行初始化（可选，如果为nullptr则使用内部设备）
-    bool open(const std::string& filepath, ID3D11Device* external_device = nullptr);
+    // 使用外部提供的D3D11设备进行初始化（必须提供有效设备）
+    bool open(const std::string& filepath, ID3D11Device* external_device);
     
     // Pull-style解码接口 - 返回RGB转换后的帧和音频帧
     bool readNextRGBFramePair(RGBFramePair& rgb_pair);

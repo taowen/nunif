@@ -7,7 +7,7 @@
 const std::string TEST_MKV_FILE = "test_data/sample_hw.mkv";
 
 // 辅助函数：创建D3D11设备
-bool CreateTestD3D11Device(ID3D11Device** device, ID3D11DeviceContext** context) {
+static bool CreateTestD3D11Device(ID3D11Device** device, ID3D11DeviceContext** context) {
     HRESULT hr = D3D11CreateDevice(
         nullptr,                    // 默认适配器
         D3D_DRIVER_TYPE_HARDWARE,   // 硬件驱动
@@ -33,14 +33,11 @@ TEST_CASE("RGBFrameDecoder basic functionality", "[rgb_frame_decoder]") {
         REQUIRE(decoder.getVideoHeight() == 0);
     }
     
-    SECTION("Open with nullptr should use internal device") {
-        // 现在nullptr会使用内部设备，所以应该成功
+    SECTION("Open with nullptr should fail") {
+        // 现在强制要求外部设备，nullptr应该失败
         bool result = decoder.open(TEST_MKV_FILE, nullptr);
-        if (result) {
-            REQUIRE(decoder.isInitialized());
-            decoder.close();
-        }
-        // 如果失败，说明内部设备不支持Video Processor，这也是可接受的
+        REQUIRE_FALSE(result);
+        REQUIRE_FALSE(decoder.isInitialized());
     }
     
     SECTION("Open non-existent file should fail") {
@@ -74,7 +71,7 @@ TEST_CASE("RGBFrameDecoder with valid MKV file", "[rgb_frame_decoder][requires_t
     RGBFrameDecoder decoder;
     
     SECTION("Open valid MKV file") {
-        bool open_result = decoder.open(TEST_MKV_FILE); // 使用内部设备
+        bool open_result = decoder.open(TEST_MKV_FILE, device); // 使用外部设备
         
         if (open_result) {
             REQUIRE(decoder.isInitialized());
@@ -113,7 +110,7 @@ TEST_CASE("RGBFrameDecoder RGB conversion workflow", "[rgb_frame_decoder][requir
     
     RGBFrameDecoder decoder;
     
-    if (!decoder.open(TEST_MKV_FILE)) { // 使用内部设备
+    if (!decoder.open(TEST_MKV_FILE, device)) { // 使用外部设备
         SKIP("RGB decoder initialization failed - may not support Video Processor on this system");
     }
     

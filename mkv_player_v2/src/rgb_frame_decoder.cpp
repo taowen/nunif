@@ -34,24 +34,16 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
         return false;
     }
     
-    // 2. 决定使用哪个D3D11设备
-    if (external_device) {
-        // 使用外部设备
-        d3d11_device_ = external_device;
-        d3d11_device_->GetImmediateContext(&d3d11_context_);
-        std::cout << "Using external D3D11 device for RGB conversion" << std::endl;
-    } else {
-        // 使用HwFrameDecoder内部设备
-        d3d11_device_ = frame_decoder_.getD3D11Device();
-        d3d11_context_ = frame_decoder_.getD3D11Context();
-        
-        if (!d3d11_device_ || !d3d11_context_) {
-            std::cerr << "Failed to get D3D11 device from HwFrameDecoder" << std::endl;
-            frame_decoder_.close();
-            return false;
-        }
-        std::cout << "Using internal D3D11 device for RGB conversion" << std::endl;
+    // 2. 使用外部提供的D3D11设备
+    if (!external_device) {
+        std::cerr << "External D3D11 device is required" << std::endl;
+        frame_decoder_.close();
+        return false;
     }
+    
+    d3d11_device_ = external_device;
+    d3d11_device_->GetImmediateContext(&d3d11_context_);
+    std::cout << "Using external D3D11 device for RGB conversion" << std::endl;
     
     // 2. 获取视频尺寸信息 - 从demuxer获取而不是解码帧
     auto* demuxer = frame_decoder_.getDemuxer();
@@ -380,9 +372,8 @@ void RGBFrameDecoder::releaseResources() {
     // 重置槽位索引
     current_slot_index_ = 0;
     
-    // 只在使用外部设备时释放context引用（内部设备不需要释放）
-    if (d3d11_context_ && d3d11_device_ && frame_decoder_.isInitialized() && 
-        d3d11_device_ != frame_decoder_.getD3D11Device()) {
+    // 释放外部设备的context引用
+    if (d3d11_context_) {
         d3d11_context_->Release();
     }
     d3d11_context_ = nullptr;

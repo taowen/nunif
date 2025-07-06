@@ -7,8 +7,23 @@
 // 测试用MKV文件路径
 const std::string TEST_MKV_FILE = "test_data/sample_hw.mkv";
 
-// 声明外部函数
-extern bool CreateTestD3D11Device(ID3D11Device** device, ID3D11DeviceContext** context);
+// 辅助函数：创建D3D11设备
+static bool CreateTestD3D11Device(ID3D11Device** device, ID3D11DeviceContext** context) {
+    HRESULT hr = D3D11CreateDevice(
+        nullptr,                    // 默认适配器
+        D3D_DRIVER_TYPE_HARDWARE,   // 硬件驱动
+        nullptr,                    // 软件驱动句柄
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT, // 支持视频
+        nullptr,                    // 功能级别数组
+        0,                          // 功能级别数组大小
+        D3D11_SDK_VERSION,          // SDK版本
+        device,                     // 输出设备
+        nullptr,                    // 输出功能级别
+        context                     // 输出设备上下文
+    );
+    
+    return SUCCEEDED(hr);
+}
 
 TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     if (!std::filesystem::exists(TEST_MKV_FILE)) {
@@ -25,7 +40,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     
     RGBFrameDecoder decoder;
     
-    if (!decoder.open(TEST_MKV_FILE)) { // 使用内部设备
+    if (!decoder.open(TEST_MKV_FILE, device)) { // 使用外部设备
         SKIP("RGB decoder initialization failed");
     }
     
@@ -60,12 +75,9 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             std::vector<RGBVerification::PixelData> pixel_data;
             int width, height;
             
-            // 获取RGB解码器内部使用的D3D11设备
-            ID3D11Device* rgb_device = decoder.getFrameDecoder()->getD3D11Device();
-            ID3D11DeviceContext* rgb_context = decoder.getFrameDecoder()->getD3D11Context();
-            
+            // 使用外部设备读取纹理数据
             bool read_success = RGBVerification::readTextureData(
-                rgb_device, rgb_context, rgb_pair.rgb_frame.rgb_texture.Get(), 
+                device, context, rgb_pair.rgb_frame.rgb_texture.Get(), 
                 pixel_data, width, height
             );
             
@@ -99,7 +111,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
             bool save_success = RGBVerification::saveTextureAsBMP(
-                rgb_device, rgb_context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
+                device, context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
             );
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;
