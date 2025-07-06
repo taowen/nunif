@@ -33,6 +33,7 @@ add_executable(spike
     tests/test_async_rgb_frame_decoder.cpp
     src/rgb_verification.cpp
     tests/test_rgb_verification.cpp
+    tests/test_gui_player.cpp
 )
 
 # Link Catch2 to the executable
@@ -67,3 +68,27 @@ copy_cuda_dlls(spike)
 include(cmake/FindTensorRT.cmake)
 target_link_tensorrt(spike)
 copy_tensorrt_dlls(spike)
+
+# GUI Player target
+add_executable(gui_player
+    src/gui_player.cpp
+)
+
+# Apply Windows/MSVC compile options for gui_player
+target_compile_options(gui_player PRIVATE
+    /W4 /WX- /permissive- /std:c++latest
+)
+
+# Set subsystem to Console for gui_player to enable stdout
+set_target_properties(gui_player PROPERTIES
+    LINK_FLAGS "/SUBSYSTEM:CONSOLE"
+)
+
+# Link DirectX libraries for gui_player (Windows only)
+target_link_libraries(gui_player PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+    user32.lib
+    gdi32.lib
+)
