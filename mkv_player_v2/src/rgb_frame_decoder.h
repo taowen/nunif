@@ -61,6 +61,9 @@ public:
     // 使用外部提供的D3D11设备进行初始化（必须提供有效设备）
     bool open(const std::string& filepath, ID3D11Device* external_device);
     
+    // 自行创建D3D11设备进行初始化
+    bool open(const std::string& filepath);
+    
     // Pull-style解码接口 - 返回RGB转换后的帧和音频帧
     bool readNextRGBFramePair(RGBFramePair& rgb_pair);
     
@@ -86,9 +89,10 @@ private:
     // 内部HwFrameDecoder实例
     HwFrameDecoder frame_decoder_;
     
-    // D3D11设备（不拥有，只使用）
+    // D3D11设备（可能拥有）
     ID3D11Device* d3d11_device_;
     ID3D11DeviceContext* d3d11_context_;
+    bool owns_d3d11_device_; // 是否拥有设备（需要释放）
     
     // 视频信息
     int video_width_;

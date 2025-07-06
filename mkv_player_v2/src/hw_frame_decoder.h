@@ -74,6 +74,10 @@ public:
     // 获取内部reader（便利方法）
     MKVStreamReader* getReader() { return &demuxer_.getReader(); }
     
+    // 获取D3D11设备（用于设备共享）
+    ID3D11Device* getD3D11Device() const;
+    ID3D11DeviceContext* getD3D11Context() const;
+    
     // 获取池中的帧（供DecodedFrame使用）
     AVFrame* getFrameFromPool(int index, bool is_audio) const;
     

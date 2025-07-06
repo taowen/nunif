@@ -4,6 +4,7 @@
 RGBFrameDecoder::RGBFrameDecoder() 
     : d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
+    , owns_d3d11_device_(false)
     , video_width_(0)
     , video_height_(0)
     , is_initialized_(false)
@@ -43,6 +44,7 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
     
     d3d11_device_ = external_device;
     d3d11_device_->GetImmediateContext(&d3d11_context_);
+    owns_d3d11_device_ = false;
     std::cout << "Using external D3D11 device for RGB conversion" << std::endl;
     
     // 2. 获取视频尺寸信息 - 从demuxer获取而不是解码帧
@@ -70,6 +72,51 @@ bool RGBFrameDecoder::open(const std::string& filepath, ID3D11Device* external_d
     return true;
 }
 
+bool RGBFrameDecoder::open(const std::string& filepath) {
+    // 清理已有资源
+    close();
+    
+    // 1. 首先初始化内部HwFrameDecoder
+    if (!frame_decoder_.open(filepath)) {
+        std::cerr << "Failed to open file with HwFrameDecoder" << std::endl;
+        return false;
+    }
+    
+    // 2. 获取FFmpeg的D3D11设备（确保设备一致性）
+    d3d11_device_ = frame_decoder_.getD3D11Device();
+    d3d11_context_ = frame_decoder_.getD3D11Context();
+    
+    if (!d3d11_device_ || !d3d11_context_) {
+        std::cerr << "Failed to get D3D11 device from FFmpeg" << std::endl;
+        frame_decoder_.close();
+        return false;
+    }
+    
+    owns_d3d11_device_ = false; // 不拥有设备，由FFmpeg管理
+    std::cout << "Using FFmpeg's D3D11 device for RGB conversion" << std::endl;
+    
+    // 3. 获取视频尺寸信息
+    auto* video_params = frame_decoder_.getReader()->getVideoCodecParameters();
+    
+    if (!video_params) {
+        std::cerr << "Failed to get video codec parameters" << std::endl;
+        frame_decoder_.close();
+        return false;
+    }
+    
+    video_width_ = video_params->width;
+    video_height_ = video_params->height;
+    
+    if (video_width_ <= 0 || video_height_ <= 0) {
+        std::cerr << "Invalid video dimensions: " << video_width_ << "x" << video_height_ << std::endl;
+        frame_decoder_.close();
+        return false;
+    }
+    
+    is_initialized_ = true;
+    return true;
+}
+
 bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     if (!is_initialized_) {
         rgb_pair.audio_frame.is_valid = false;
@@ -91,12 +138,16 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     rgb_pair.audio_frame = raw_frames.audio_frame;
     
     // 3. 转换视频帧为RGB（使用纹理池）
+    std::cout << "Debug: Raw video frame is_valid: " << raw_frames.video_frame.is_valid << std::endl;
     if (raw_frames.video_frame.is_valid) {
+        std::cout << "Debug: Video frame timestamp: " << raw_frames.video_frame.timestamp << std::endl;
+        
         // 获取当前纹理槽
         TextureSlot* slot = &texture_pool_[current_slot_index_];
         
         // 如果尺寸不匹配，重新创建纹理
         if (!slot->is_created || slot->width != video_width_ || slot->height != video_height_) {
+            std::cout << "Debug: Creating texture slot: " << video_width_ << "x" << video_height_ << std::endl;
             if (!createTextureSlot(slot, video_width_, video_height_)) {
                 rgb_pair.rgb_frame.is_valid = false;
                 return false;
@@ -104,6 +155,7 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         }
         
         // 转换到纹理槽
+        std::cout << "Debug: Converting NV12 to RGB..." << std::endl;
         if (convertNV12ToRGB(raw_frames.video_frame, slot)) {
             rgb_pair.rgb_frame.rgb_texture = slot->texture;
             rgb_pair.rgb_frame.rgb_srv = slot->srv;
@@ -114,11 +166,14 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
             
             // 移动到下一个槽位
             current_slot_index_ = (current_slot_index_ + 1) % TEXTURE_POOL_SIZE;
+            std::cout << "Debug: RGB conversion successful!" << std::endl;
         } else {
             rgb_pair.rgb_frame.is_valid = false;
+            std::cout << "Debug: RGB conversion failed!" << std::endl;
         }
     } else {
         rgb_pair.rgb_frame.is_valid = false;
+        std::cout << "Debug: No valid video frame from decoder" << std::endl;
     }
     
     // 4. 注意：不再需要释放任何AVFrame，因为所有权从未转移
@@ -158,17 +213,26 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     // 检查输入纹理格式
     D3D11_TEXTURE2D_DESC input_desc;
     input_texture->GetDesc(&input_desc);
+    
+    
     if (input_desc.Format != DXGI_FORMAT_NV12) {
         std::cerr << "Error: Expected DXGI_FORMAT_NV12 format, got " << input_desc.Format << std::endl;
         return false;
     }
 
-    // 创建输入视图
+    // 创建输入视图 - 确保参数正确
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {};
     input_view_desc.FourCC = 0;
     input_view_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
     input_view_desc.Texture2D.MipSlice = 0;
-    input_view_desc.Texture2D.ArraySlice = texture_index;
+    
+    // 检查ArraySlice是否超出范围
+    if (texture_index >= 0 && texture_index < input_desc.ArraySize) {
+        input_view_desc.Texture2D.ArraySlice = texture_index;
+    } else {
+        std::cerr << "Warning: Invalid texture index " << texture_index << ", using 0. Array size: " << input_desc.ArraySize << std::endl;
+        input_view_desc.Texture2D.ArraySlice = 0;
+    }
 
     ID3D11VideoProcessorInputView* input_view = nullptr;
     HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_.Get(), &input_view_desc, &input_view);
@@ -225,6 +289,24 @@ void RGBFrameDecoder::flush() {
 void RGBFrameDecoder::close() {
     frame_decoder_.close();
     releaseResources();
+    
+    // 释放D3D11设备（如果拥有的话）
+    if (owns_d3d11_device_) {
+        if (d3d11_context_) {
+            d3d11_context_->Release();
+            d3d11_context_ = nullptr;
+        }
+        if (d3d11_device_) {
+            d3d11_device_->Release();
+            d3d11_device_ = nullptr;
+        }
+        owns_d3d11_device_ = false;
+    } else {
+        // 外部设备，只清空指针
+        d3d11_context_ = nullptr;
+        d3d11_device_ = nullptr;
+    }
+    
     is_initialized_ = false;
 }
 

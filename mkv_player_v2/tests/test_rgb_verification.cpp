@@ -30,19 +30,16 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
     }
     
-    // 创建D3D11设备
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    
-    if (!CreateTestD3D11Device(&device, &context)) {
-        SKIP("Failed to create D3D11 device");
-    }
-    
     RGBFrameDecoder decoder;
     
-    if (!decoder.open(TEST_MKV_FILE, device)) { // 使用外部设备
+    // 使用内部设备方式初始化（避免设备兼容性问题）
+    if (!decoder.open(TEST_MKV_FILE)) {
         SKIP("RGB decoder initialization failed");
     }
+    
+    // 使用解码器内部的设备进行验证
+    ID3D11Device* decoder_device = decoder.getD3D11Device();
+    ID3D11DeviceContext* decoder_context = decoder.getD3D11Context();
     
     SECTION("RGB frame correctness verification") {
         RGBFrameDecoder::RGBFramePair rgb_pair;
@@ -75,9 +72,9 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             std::vector<RGBVerification::PixelData> pixel_data;
             int width, height;
             
-            // 使用外部设备读取纹理数据
+            // 使用解码器内部的设备读取纹理数据
             bool read_success = RGBVerification::readTextureData(
-                device, context, rgb_pair.rgb_frame.rgb_texture.Get(), 
+                decoder_device, decoder_context, rgb_pair.rgb_frame.rgb_texture.Get(), 
                 pixel_data, width, height
             );
             
@@ -111,7 +108,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
             bool save_success = RGBVerification::saveTextureAsBMP(
-                device, context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
+                decoder_device, decoder_context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
             );
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;
@@ -133,6 +130,4 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     }
     
     decoder.close();
-    device->Release();
-    context->Release();
 }

@@ -515,3 +515,23 @@ int HwFrameDecoder::getValidPairCount() const {
     if (borrowed_pairs_[1].is_valid) count++;
     return count;
 }
+
+ID3D11Device* HwFrameDecoder::getD3D11Device() const {
+    if (!hw_device_ctx_) return nullptr;
+    
+    AVHWDeviceContext* hw_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (hw_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    
+    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)hw_ctx->hwctx;
+    return d3d11_ctx->device;
+}
+
+ID3D11DeviceContext* HwFrameDecoder::getD3D11Context() const {
+    if (!hw_device_ctx_) return nullptr;
+    
+    AVHWDeviceContext* hw_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (hw_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) return nullptr;
+    
+    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)hw_ctx->hwctx;
+    return d3d11_ctx->device_context;
+}
