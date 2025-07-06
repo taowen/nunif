@@ -94,7 +94,7 @@ TEST_CASE("gui_player with video file", "[gui_player][video]") {
     
     REQUIRE(std::filesystem::exists(exePath));
     
-    std::wstring cmdLine = L"\"" + exePath.wstring() + L"\" test_video.mkv 3000";
+    std::wstring cmdLine = L"\"" + exePath.wstring() + L"\" test_data\\sample_hw.mkv 3000";
     
     HANDLE hStdoutRead, hStdoutWrite;
     SECURITY_ATTRIBUTES sa;
