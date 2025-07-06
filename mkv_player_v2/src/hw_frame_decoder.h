@@ -112,8 +112,6 @@ private:
     static const int AVFRAME_POOL_SIZE = 6;  // 增加池大小支持双缓冲
     AVFrame* audio_frame_pool_[AVFRAME_POOL_SIZE];
     AVFrame* video_frame_pool_[AVFRAME_POOL_SIZE];
-    int current_audio_frame_index_;
-    int current_video_frame_index_;
     
     // 双缓冲机制 - 支持两个HwFramePair同时存在
     HwFramePair borrowed_pairs_[2];

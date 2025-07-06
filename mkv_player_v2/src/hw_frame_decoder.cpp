@@ -9,8 +9,6 @@ HwFrameDecoder::HwFrameDecoder()
     , audio_codec_(nullptr)
     , audio_resampler_(nullptr)
     , is_initialized_(false)
-    , current_audio_frame_index_(0)
-    , current_video_frame_index_(0)
     , current_pair_index_(0) {
     
     // 初始化AVFrame池
@@ -99,11 +97,10 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     // 获取当前pair的引用
     HwFramePair& current_pair = borrowed_pairs_[current_pair_index_];
     
-    // 从池中获取下一帧的索引
-    int audio_idx = current_audio_frame_index_;
-    int video_idx = current_video_frame_index_;
-    AVFrame* audio_frame = audio_frame_pool_[audio_idx];
-    AVFrame* video_frame = video_frame_pool_[video_idx];
+    // 使用current_pair_index_作为帧池索引，确保同步帧对使用相同索引
+    int frame_idx = current_pair_index_;
+    AVFrame* audio_frame = audio_frame_pool_[frame_idx];
+    AVFrame* video_frame = video_frame_pool_[frame_idx];
 
     // 清理之前的数据
     av_frame_unref(audio_frame);
@@ -111,9 +108,9 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
 
     // 设置帧的所有权信息
     current_pair.audio_frame.owner = this;
-    current_pair.audio_frame.pool_index = audio_idx;
+    current_pair.audio_frame.pool_index = frame_idx;
     current_pair.video_frame.owner = this;
-    current_pair.video_frame.pool_index = video_idx;
+    current_pair.video_frame.pool_index = frame_idx;
     
     // 重置有效标志
     current_pair.audio_frame.is_valid = false;
@@ -141,13 +138,7 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
         // 注意：不再手动释放包，由PacketDemuxer管理
     }
 
-    // 如果成功解码，移动到下一个槽位
-    if (current_pair.audio_frame.is_valid) {
-        current_audio_frame_index_ = (current_audio_frame_index_ + 1) % AVFRAME_POOL_SIZE;
-    }
-    if (current_pair.video_frame.is_valid) {
-        current_video_frame_index_ = (current_video_frame_index_ + 1) % AVFRAME_POOL_SIZE;
-    }
+    // 注意：帧池索引将随着current_pair_index_的切换而自动更新
     
     // 至少要有一个有效帧
     bool has_valid_frame = current_pair.audio_frame.is_valid || current_pair.video_frame.is_valid;
@@ -420,9 +411,6 @@ void HwFrameDecoder::initializeFramePools() {
     for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
         video_frame_pool_[i] = av_frame_alloc();
     }
-    
-    current_audio_frame_index_ = 0;
-    current_video_frame_index_ = 0;
 }
 
 
@@ -442,9 +430,6 @@ void HwFrameDecoder::releaseFramePools() {
             video_frame_pool_[i] = nullptr;
         }
     }
-    
-    current_audio_frame_index_ = 0;
-    current_video_frame_index_ = 0;
 }
 
 void HwFrameDecoder::clearBorrowedPairs() {
