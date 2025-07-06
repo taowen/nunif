@@ -98,9 +98,7 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
     current_pair.audio_frame = raw_frames.audio_frame;
     
     // 3. 转换视频帧为RGB（使用双缓冲）
-    std::cout << "Debug: Raw video frame is_valid: " << raw_frames.video_frame.is_valid << std::endl;
     if (raw_frames.video_frame.is_valid) {
-        std::cout << "Debug: Video frame timestamp: " << raw_frames.video_frame.timestamp << std::endl;
         
         // 获取视频尺寸
         AVFrame* video_frame = raw_frames.video_frame.get();
@@ -111,7 +109,6 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         if (!current_pair.rgb_frame.hasValidResources() || 
             current_pair.rgb_frame.width != video_width || 
             current_pair.rgb_frame.height != video_height) {
-            std::cout << "Debug: Creating RGB texture: " << video_width << "x" << video_height << std::endl;
             if (!createRGBTexture(current_pair.rgb_frame, video_width, video_height)) {
                 current_pair.rgb_frame.is_valid = false;
                 return false;
@@ -119,18 +116,14 @@ bool RGBFrameDecoder::readNextRGBFramePair(RGBFramePair& rgb_pair) {
         }
         
         // 转换到RGB纹理
-        std::cout << "Debug: Converting NV12 to RGB..." << std::endl;
         if (convertNV12ToRGB(raw_frames.video_frame, current_pair.rgb_frame)) {
             current_pair.rgb_frame.timestamp = raw_frames.video_frame.timestamp;
             current_pair.rgb_frame.is_valid = true;
-            std::cout << "Debug: RGB conversion successful!" << std::endl;
         } else {
             current_pair.rgb_frame.is_valid = false;
-            std::cout << "Debug: RGB conversion failed!" << std::endl;
         }
     } else {
         current_pair.rgb_frame.is_valid = false;
-        std::cout << "Debug: No valid video frame from decoder" << std::endl;
     }
     
     // 4. 注意：不再需要释放任何AVFrame，因为所有权从未转移
