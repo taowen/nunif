@@ -205,13 +205,19 @@ private:
                 if (rgbPair.is_valid && rgbPair.rgb_frame.hasValidResources()) {
                     RenderVideoFrame(rgbPair.rgb_frame.rgb_texture.Get());
                 } else {
-                    RenderBlackScreen();
+                    std::cerr << "ERROR: RGB frame pair is invalid or has no valid resources" << std::endl;
+                    PostQuitMessage(-1);
+                    return;
                 }
             } else {
-                RenderBlackScreen();
+                std::cerr << "ERROR: Failed to read next RGB frame pair" << std::endl;
+                PostQuitMessage(-1);
+                return;
             }
         } else {
-            RenderBlackScreen();
+            std::cerr << "ERROR: Video path is empty or decoder is not initialized" << std::endl;
+            PostQuitMessage(-1);
+            return;
         }
         
         m_swapChain->Present(0, 0);
@@ -221,7 +227,8 @@ private:
         ComPtr<ID3D11ShaderResourceView> srv;
         HRESULT hr = m_device->CreateShaderResourceView(videoTexture, nullptr, &srv);
         if (FAILED(hr)) {
-            RenderBlackScreen();
+            std::cerr << "ERROR: Failed to create shader resource view, HRESULT: 0x" << std::hex << hr << std::endl;
+            PostQuitMessage(-1);
             return;
         }
         
@@ -229,10 +236,6 @@ private:
         m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
     }
     
-    void RenderBlackScreen() {
-        float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
-    }
     
     
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

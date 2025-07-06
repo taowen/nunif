@@ -32,6 +32,10 @@ if "%TARGET%"=="test" (
     set BUILD_DESC=test target
     set RUN_TESTS=1
     goto :build
+) else if "%TARGET%"=="gui" (
+    set BUILD_TARGET=gui_player
+    set BUILD_DESC=gui target
+    goto :build
 )
 
 echo Unknown target: %TARGET%
@@ -64,4 +68,6 @@ echo.
 if "!RUN_TESTS!"=="1" (
     echo Running tests...
     build\Debug\spike.exe
+) else if "%TARGET%"=="gui" (
+    build\Debug\gui_player.exe
 )
