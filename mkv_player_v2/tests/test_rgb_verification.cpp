@@ -37,9 +37,7 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
         SKIP("RGB decoder initialization failed");
     }
     
-    // 使用解码器内部的设备进行验证
-    ID3D11Device* decoder_device = decoder.getD3D11Device();
-    ID3D11DeviceContext* decoder_context = decoder.getD3D11Context();
+    // 解码器内部设备已经初始化完成
     
     SECTION("RGB frame correctness verification") {
         RGBFrameDecoder::RGBFramePair rgb_pair;
@@ -72,11 +70,20 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             std::vector<RGBVerification::PixelData> pixel_data;
             int width, height;
             
-            // 使用解码器内部的设备读取纹理数据
+            // 从RGB纹理获取D3D11设备进行数据读取
+            ID3D11Device* device = nullptr;
+            rgb_pair.rgb_frame.rgb_texture->GetDevice(&device);
+            ID3D11DeviceContext* context = nullptr;
+            device->GetImmediateContext(&context);
+            
             bool read_success = RGBVerification::readTextureData(
-                decoder_device, decoder_context, rgb_pair.rgb_frame.rgb_texture.Get(), 
+                device, context, rgb_pair.rgb_frame.rgb_texture.Get(), 
                 pixel_data, width, height
             );
+            
+            // 释放引用
+            context->Release();
+            device->Release();
             
             REQUIRE(read_success);
             REQUIRE(width == rgb_pair.rgb_frame.width);
@@ -107,9 +114,20 @@ TEST_CASE("RGB verification functionality", "[rgb_verification]") {
             
             // 4. 保存第一帧为图片文件
             std::string filename = "rgb_frame_0.bmp";
+            
+            // 再次获取设备用于保存操作
+            ID3D11Device* save_device = nullptr;
+            rgb_pair.rgb_frame.rgb_texture->GetDevice(&save_device);
+            ID3D11DeviceContext* save_context = nullptr;
+            save_device->GetImmediateContext(&save_context);
+            
             bool save_success = RGBVerification::saveTextureAsBMP(
-                decoder_device, decoder_context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
+                save_device, save_context, rgb_pair.rgb_frame.rgb_texture.Get(), filename
             );
+            
+            // 释放引用
+            save_context->Release();
+            save_device->Release();
             REQUIRE(save_success);
             std::cout << "✓ Saved RGB frame as: " << filename << std::endl;
             

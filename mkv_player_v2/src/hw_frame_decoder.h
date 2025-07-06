@@ -120,12 +120,9 @@ private:
     int current_pair_index_;
     
     // 内部方法
-    bool findVideoHardwareDecoder(AVCodecID codec_id);
-    bool findAudioDecoder(AVCodecID codec_id);
     bool configureVideoDecoder(AVCodecParameters* codec_params);
     bool configureAudioDecoder(AVCodecParameters* codec_params);
     bool initializeAudioResampler();
-    const char* getHardwareDecoderName(AVCodecID codec_id);
     
     // AVFrame池管理
     void initializeFramePools();

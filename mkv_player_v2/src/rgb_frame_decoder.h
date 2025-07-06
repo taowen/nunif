@@ -77,9 +77,6 @@ public:
     int getVideoWidth() const { return video_width_; }
     int getVideoHeight() const { return video_height_; }
     
-    // 获取D3D11设备（用于设备共享）
-    ID3D11Device* getD3D11Device() const { return d3d11_device_; }
-    ID3D11DeviceContext* getD3D11Context() const { return d3d11_context_; }
     
     // 资源管理
     void flush();

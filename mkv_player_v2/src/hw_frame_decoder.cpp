@@ -46,21 +46,7 @@ bool HwFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 3. 查找视频硬件解码器
-    if (!findVideoHardwareDecoder(video_codec_params->codec_id)) {
-        std::cerr << "Video hardware decoder not found" << std::endl;
-        demuxer_.close();
-        return false;
-    }
-    
-    // 4. 查找音频解码器
-    if (!findAudioDecoder(audio_codec_params->codec_id)) {
-        std::cerr << "Audio decoder not found" << std::endl;
-        demuxer_.close();
-        return false;
-    }
-    
-    // 5. 创建硬件上下文（让FFmpeg自动管理）
+    // 3. 创建硬件上下文（让FFmpeg自动管理）
     int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
     if (ret < 0) {
         std::cerr << "Failed to create D3D11VA hardware device context, error: " << ret << std::endl;
@@ -68,28 +54,28 @@ bool HwFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 6. 配置视频解码器
+    // 4. 配置视频解码器
     if (!configureVideoDecoder(video_codec_params)) {
         std::cerr << "Failed to configure video decoder" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 7. 配置音频解码器
+    // 5. 配置音频解码器
     if (!configureAudioDecoder(audio_codec_params)) {
         std::cerr << "Failed to configure audio decoder" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 8. 初始化音频重采样器
+    // 6. 初始化音频重采样器
     if (!initializeAudioResampler()) {
         std::cerr << "Failed to initialize audio resampler" << std::endl;
         demuxer_.close();
         return false;
     }
     
-    // 9. 初始化AVFrame池
+    // 7. 初始化AVFrame池
     initializeFramePools();
     
     is_initialized_ = true;
@@ -287,22 +273,17 @@ void HwFrameDecoder::close() {
     filepath_.clear();
 }
 
-bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
-    // 直接查找支持D3D11VA的硬件解码器
-    video_codec_ = avcodec_find_decoder_by_name(getHardwareDecoderName(codec_id));
-    if (video_codec_) {
-        std::cout << "Found D3D11VA hardware decoder: " << video_codec_->name << std::endl;
-        return true;
-    }
-    
-    // 如果没有找到专用硬件解码器，尝试通用解码器
-    video_codec_ = avcodec_find_decoder(codec_id);
+
+bool HwFrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
+    // 查找视频硬件解码器
+    video_codec_ = avcodec_find_decoder(codec_params->codec_id);
     if (!video_codec_) {
-        std::cerr << "No video decoder found for codec ID: " << codec_id << std::endl;
+        std::cerr << "No video decoder found for codec ID: " << codec_params->codec_id << std::endl;
         return false;
     }
     
     // 检查通用解码器是否支持D3D11VA硬件加速
+    bool supports_d3d11 = false;
     for (int i = 0;; i++) {
         const AVCodecHWConfig* config = avcodec_get_hw_config(video_codec_, i);
         if (!config) {
@@ -312,41 +293,16 @@ bool HwFrameDecoder::findVideoHardwareDecoder(AVCodecID codec_id) {
         if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
             config->device_type == AV_HWDEVICE_TYPE_D3D11VA) {
             std::cout << "Found D3D11VA support for video codec: " << video_codec_->name << std::endl;
-            return true;
+            supports_d3d11 = true;
+            break;
         }
     }
     
-    std::cerr << "Video codec does not support D3D11VA hardware acceleration" << std::endl;
-    return false;
-}
-
-const char* HwFrameDecoder::getHardwareDecoderName(AVCodecID codec_id) {
-    switch (codec_id) {
-        case AV_CODEC_ID_H264:
-            return "h264_d3d11va";
-        case AV_CODEC_ID_HEVC:
-            return "hevc_d3d11va";
-        case AV_CODEC_ID_VP9:
-            return "vp9_d3d11va";
-        case AV_CODEC_ID_AV1:
-            return "av1_d3d11va";
-        default:
-            return nullptr;
-    }
-}
-
-bool HwFrameDecoder::findAudioDecoder(AVCodecID codec_id) {
-    audio_codec_ = avcodec_find_decoder(codec_id);
-    if (!audio_codec_) {
-        std::cerr << "No audio decoder found for codec ID: " << codec_id << std::endl;
+    if (!supports_d3d11) {
+        std::cerr << "Video codec does not support D3D11VA hardware acceleration" << std::endl;
         return false;
     }
-    
-    std::cout << "Found audio decoder: " << audio_codec_->name << std::endl;
-    return true;
-}
 
-bool HwFrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
     // 分配视频解码器上下文
     video_codec_context_ = avcodec_alloc_context3(video_codec_);
     if (!video_codec_context_) {
@@ -386,6 +342,15 @@ bool HwFrameDecoder::configureVideoDecoder(AVCodecParameters* codec_params) {
 }
 
 bool HwFrameDecoder::configureAudioDecoder(AVCodecParameters* codec_params) {
+    // 查找音频解码器
+    audio_codec_ = avcodec_find_decoder(codec_params->codec_id);
+    if (!audio_codec_) {
+        std::cerr << "No audio decoder found for codec ID: " << codec_params->codec_id << std::endl;
+        return false;
+    }
+    
+    std::cout << "Found audio decoder: " << audio_codec_->name << std::endl;
+
     // 分配音频解码器上下文
     audio_codec_context_ = avcodec_alloc_context3(audio_codec_);
     if (!audio_codec_context_) {
