@@ -11,10 +11,13 @@ HwFrameDecoder::HwFrameDecoder()
     , is_initialized_(false)
     , current_pair_index_(0) {
     
-    // 初始化AVFrame池
-    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
-        audio_frame_pool_[i] = nullptr;
-        video_frame_pool_[i] = nullptr;
+    // 初始化双缓冲HwFramePair
+    for (int i = 0; i < 2; i++) {
+        borrowed_pairs_[i].audio_frame.frame = nullptr;
+        borrowed_pairs_[i].video_frame.frame = nullptr;
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].video_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
     }
 }
 
@@ -73,8 +76,8 @@ bool HwFrameDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 7. 初始化AVFrame池
-    initializeFramePools();
+    // 7. 初始化双缓冲帧
+    initializeBorrowedPairs();
     
     is_initialized_ = true;
     return true;
@@ -97,20 +100,17 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     // 获取当前pair的引用
     HwFramePair& current_pair = borrowed_pairs_[current_pair_index_];
     
-    // 使用current_pair_index_作为帧池索引，确保同步帧对使用相同索引
-    int frame_idx = current_pair_index_;
-    AVFrame* audio_frame = audio_frame_pool_[frame_idx];
-    AVFrame* video_frame = video_frame_pool_[frame_idx];
-
+    // 如果当前pair的帧为空，则分配新的AVFrame
+    if (!current_pair.audio_frame.frame) {
+        current_pair.audio_frame.frame = av_frame_alloc();
+    }
+    if (!current_pair.video_frame.frame) {
+        current_pair.video_frame.frame = av_frame_alloc();
+    }
+    
     // 清理之前的数据
-    av_frame_unref(audio_frame);
-    av_frame_unref(video_frame);
-
-    // 设置帧的所有权信息
-    current_pair.audio_frame.owner = this;
-    current_pair.audio_frame.pool_index = frame_idx;
-    current_pair.video_frame.owner = this;
-    current_pair.video_frame.pool_index = frame_idx;
+    av_frame_unref(current_pair.audio_frame.frame);
+    av_frame_unref(current_pair.video_frame.frame);
     
     // 重置有效标志
     current_pair.audio_frame.is_valid = false;
@@ -124,7 +124,7 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     if (synced_packets.audio_packet) {
         current_pair.audio_frame.is_valid = decodeAudioPacket(
             synced_packets.audio_packet, 
-            audio_frame
+            current_pair.audio_frame.frame
         );
         // 注意：不再手动释放包，由PacketDemuxer管理
     }
@@ -133,7 +133,7 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     if (synced_packets.video_packet) {
         current_pair.video_frame.is_valid = decodeVideoPacket(
             synced_packets.video_packet,
-            video_frame
+            current_pair.video_frame.frame
         );
         // 注意：不再手动释放包，由PacketDemuxer管理
     }
@@ -225,12 +225,6 @@ const char* HwFrameDecoder::getAudioCodecName() const {
     return nullptr;
 }
 
-AVFrame* HwFrameDecoder::getFrameFromPool(int index, bool is_audio) const {
-    if (index < 0 || index >= AVFRAME_POOL_SIZE) {
-        return nullptr;
-    }
-    return is_audio ? audio_frame_pool_[index] : video_frame_pool_[index];
-}
 
 
 void HwFrameDecoder::flush() {
@@ -394,53 +388,45 @@ void HwFrameDecoder::releaseResources() {
     }
     
     
-    // 释放AVFrame池
-    releaseFramePools();
     
     video_codec_ = nullptr;
     audio_codec_ = nullptr;
 }
 
-void HwFrameDecoder::initializeFramePools() {
-    // 初始化音频帧池
-    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
-        audio_frame_pool_[i] = av_frame_alloc();
-    }
-    
-    // 初始化视频帧池
-    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
-        video_frame_pool_[i] = av_frame_alloc();
-    }
-}
-
-
-void HwFrameDecoder::releaseFramePools() {
-    // 释放音频帧池
-    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
-        if (audio_frame_pool_[i]) {
-            av_frame_free(&audio_frame_pool_[i]);
-            audio_frame_pool_[i] = nullptr;
-        }
-    }
-    
-    // 释放视频帧池
-    for (int i = 0; i < AVFRAME_POOL_SIZE; i++) {
-        if (video_frame_pool_[i]) {
-            av_frame_free(&video_frame_pool_[i]);
-            video_frame_pool_[i] = nullptr;
-        }
-    }
-}
-
-void HwFrameDecoder::clearBorrowedPairs() {
+void HwFrameDecoder::initializeBorrowedPairs() {
+    // 初始化双缓冲HwFramePair，按需分配AVFrame
     for (int i = 0; i < 2; i++) {
+        if (borrowed_pairs_[i].audio_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
+        }
+        if (borrowed_pairs_[i].video_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].video_frame.frame);
+        }
+        borrowed_pairs_[i].audio_frame.frame = nullptr;
+        borrowed_pairs_[i].video_frame.frame = nullptr;
         borrowed_pairs_[i].audio_frame.is_valid = false;
         borrowed_pairs_[i].video_frame.is_valid = false;
         borrowed_pairs_[i].is_valid = false;
-        borrowed_pairs_[i].audio_frame.owner = nullptr;
-        borrowed_pairs_[i].video_frame.owner = nullptr;
-        borrowed_pairs_[i].audio_frame.pool_index = -1;
-        borrowed_pairs_[i].video_frame.pool_index = -1;
+        borrowed_pairs_[i].audio_frame.timestamp = 0.0;
+        borrowed_pairs_[i].video_frame.timestamp = 0.0;
+    }
+}
+
+
+
+void HwFrameDecoder::clearBorrowedPairs() {
+    for (int i = 0; i < 2; i++) {
+        if (borrowed_pairs_[i].audio_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
+        }
+        if (borrowed_pairs_[i].video_frame.frame) {
+            av_frame_free(&borrowed_pairs_[i].video_frame.frame);
+        }
+        borrowed_pairs_[i].audio_frame.frame = nullptr;
+        borrowed_pairs_[i].video_frame.frame = nullptr;
+        borrowed_pairs_[i].audio_frame.is_valid = false;
+        borrowed_pairs_[i].video_frame.is_valid = false;
+        borrowed_pairs_[i].is_valid = false;
         borrowed_pairs_[i].audio_frame.timestamp = 0.0;
         borrowed_pairs_[i].video_frame.timestamp = 0.0;
     }
@@ -451,10 +437,6 @@ void HwFrameDecoder::clearCurrentPair() {
     current_pair.audio_frame.is_valid = false;
     current_pair.video_frame.is_valid = false;
     current_pair.is_valid = false;
-    current_pair.audio_frame.owner = nullptr;
-    current_pair.video_frame.owner = nullptr;
-    current_pair.audio_frame.pool_index = -1;
-    current_pair.video_frame.pool_index = -1;
     current_pair.audio_frame.timestamp = 0.0;
     current_pair.video_frame.timestamp = 0.0;
 }

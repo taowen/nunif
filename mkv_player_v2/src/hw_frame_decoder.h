@@ -15,24 +15,17 @@ extern "C" {
 class HwFrameDecoder {
 public:
     struct HwFrame {
-        HwFrameDecoder* owner = nullptr; // 指向拥有此帧的解码器
-        int pool_index = -1;           // 在池中的索引
+        AVFrame* frame = nullptr;      // 直接存储AVFrame指针
         double timestamp = 0.0;
         bool is_valid = false;
 
         AVFrame* get() const {
-            if (owner && pool_index != -1) {
-                return owner->getFrameFromPool(pool_index, false); // false for video
-            }
-            return nullptr;
+            return frame;
         }
 
         // 兼容音频帧的get方法
         AVFrame* getAudioFrame() const {
-            if (owner && pool_index != -1) {
-                return owner->getFrameFromPool(pool_index, true); // true for audio
-            }
-            return nullptr;
+            return frame;
         }
     };
     
@@ -82,8 +75,6 @@ public:
     static ID3D11Device* getD3D11DeviceFromFrame(AVFrame* frame);
     static ID3D11DeviceContext* getD3D11ContextFromFrame(AVFrame* frame);
     
-    // 获取池中的帧（供DecodedFrame使用）
-    AVFrame* getFrameFromPool(int index, bool is_audio) const;
     
     // 资源管理
     void flush();
@@ -108,11 +99,6 @@ private:
     bool is_initialized_;
     std::string filepath_;
     
-    // AVFrame池 - 复用避免频繁分配
-    static const int AVFRAME_POOL_SIZE = 6;  // 增加池大小支持双缓冲
-    AVFrame* audio_frame_pool_[AVFRAME_POOL_SIZE];
-    AVFrame* video_frame_pool_[AVFRAME_POOL_SIZE];
-    
     // 双缓冲机制 - 支持两个HwFramePair同时存在
     HwFramePair borrowed_pairs_[2];
     int current_pair_index_;
@@ -122,13 +108,9 @@ private:
     bool configureAudioDecoder(AVCodecParameters* codec_params);
     bool initializeAudioResampler();
     
-    // AVFrame池管理
-    void initializeFramePools();
-    AVFrame* getNextAudioFrame();
-    AVFrame* getNextVideoFrame();
-    void releaseFramePools();
     
     // 双缓冲管理
+    void initializeBorrowedPairs();
     void clearBorrowedPairs();
     void clearCurrentPair();
     
