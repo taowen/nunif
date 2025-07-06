@@ -102,6 +102,9 @@ bool HwFrameDecoder::readNextHwFramePair(HwFramePair& decoded_frames) {
     av_frame_unref(current_pair.audio_frame.frame);
     av_frame_unref(current_pair.video_frame.frame);
     
+    // 清理缓存的InputView（当帧数据变化时）
+    current_pair.video_frame.clearInputViewCache();
+    
     // 重置有效标志
     current_pair.audio_frame.is_valid = false;
     current_pair.video_frame.is_valid = false;
@@ -357,6 +360,9 @@ void HwFrameDecoder::releaseResources() {
     
     // 释放池化的AVFrame（只在这里释放！）
     for (int i = 0; i < 2; i++) {
+        // 清理缓存的InputView
+        borrowed_pairs_[i].video_frame.clearInputViewCache();
+        
         if (borrowed_pairs_[i].audio_frame.frame) {
             av_frame_free(&borrowed_pairs_[i].audio_frame.frame);
             borrowed_pairs_[i].audio_frame.frame = nullptr;

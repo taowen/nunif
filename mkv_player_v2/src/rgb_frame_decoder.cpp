@@ -160,25 +160,39 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
         return false;
     }
 
-    // 创建输入视图 - 确保参数正确
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {};
-    input_view_desc.FourCC = 0;
-    input_view_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
-    input_view_desc.Texture2D.MipSlice = 0;
-    
-    // 检查ArraySlice是否超出范围
-    if (texture_index >= 0 && texture_index < input_desc.ArraySize) {
-        input_view_desc.Texture2D.ArraySlice = texture_index;
-    } else {
-        std::cerr << "Warning: Invalid texture index " << texture_index << ", using 0. Array size: " << input_desc.ArraySize << std::endl;
-        input_view_desc.Texture2D.ArraySlice = 0;
-    }
-
+    // 使用缓存的InputView（避免频繁创建）
     ID3D11VideoProcessorInputView* input_view = nullptr;
-    HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_.Get(), &input_view_desc, &input_view);
-    if (FAILED(hr)) {
-        std::cerr << "Error: Failed to create input view. HRESULT: 0x" << std::hex << hr << std::endl;
-        return false;
+    
+    if (nv12_frame_desc.hasValidInputView()) {
+        // 复用缓存的InputView
+        input_view = nv12_frame_desc.cached_input_view;
+    } else {
+        // 清理旧的缓存（如果有）
+        nv12_frame_desc.clearInputViewCache();
+        
+        // 创建新的InputView
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {};
+        input_view_desc.FourCC = 0;
+        input_view_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        input_view_desc.Texture2D.MipSlice = 0;
+        
+        // 检查ArraySlice是否超出范围
+        if (texture_index >= 0 && texture_index < input_desc.ArraySize) {
+            input_view_desc.Texture2D.ArraySlice = texture_index;
+        } else {
+            std::cerr << "Warning: Invalid texture index " << texture_index << ", using 0. Array size: " << input_desc.ArraySize << std::endl;
+            input_view_desc.Texture2D.ArraySlice = 0;
+        }
+
+        HRESULT hr = video_device_->CreateVideoProcessorInputView(input_texture, video_enum_.Get(), &input_view_desc, &input_view);
+        if (FAILED(hr)) {
+            std::cerr << "Error: Failed to create input view. HRESULT: 0x" << std::hex << hr << std::endl;
+            return false;
+        }
+        
+        // 缓存新创建的InputView
+        nv12_frame_desc.cached_input_view = input_view;
+        nv12_frame_desc.cached_texture_ptr = input_texture;
     }
 
     // 懒创建输出视图（在第一次转换时创建）
@@ -208,10 +222,9 @@ bool RGBFrameDecoder::convertNV12ToRGB(const HwFrameDecoder::HwFrame& nv12_frame
     stream_data.ppPastSurfacesRight = nullptr;
     stream_data.ppFutureSurfacesRight = nullptr;
 
-    hr = video_context_->VideoProcessorBlt(video_processor_.Get(), rgb_frame.cached_output_view.Get(), 0, 1, &stream_data);
+    HRESULT hr = video_context_->VideoProcessorBlt(video_processor_.Get(), rgb_frame.cached_output_view.Get(), 0, 1, &stream_data);
     
-    // 只释放输入视图（输出视图已缓存）
-    input_view->Release();
+    // 注意：不再释放input_view，因为它现在被缓存在nv12_frame_desc中
     
     if (FAILED(hr)) {
         std::cerr << "Error: VideoProcessorBlt failed. HRESULT: 0x" << std::hex << hr << std::endl;

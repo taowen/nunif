@@ -18,6 +18,10 @@ public:
         AVFrame* frame = nullptr;      // 直接存储AVFrame指针
         double timestamp = 0.0;
         bool is_valid = false;
+        
+        // 缓存D3D11 Input View（按纹理指针索引，避免频繁创建）
+        mutable ID3D11VideoProcessorInputView* cached_input_view = nullptr;
+        mutable ID3D11Texture2D* cached_texture_ptr = nullptr;  // 用于检测纹理变化
 
         AVFrame* get() const {
             return frame;
@@ -26,6 +30,21 @@ public:
         // 兼容音频帧的get方法
         AVFrame* getAudioFrame() const {
             return frame;
+        }
+        
+        // 检查缓存的InputView是否有效（纹理未变化）
+        bool hasValidInputView() const {
+            return cached_input_view && cached_texture_ptr && 
+                   frame && frame->data[0] == (uint8_t*)cached_texture_ptr;
+        }
+        
+        // 清理缓存的InputView资源
+        void clearInputViewCache() const {
+            if (cached_input_view) {
+                cached_input_view->Release();
+                cached_input_view = nullptr;
+            }
+            cached_texture_ptr = nullptr;
         }
     };
     
