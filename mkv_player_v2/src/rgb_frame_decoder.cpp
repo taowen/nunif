@@ -272,17 +272,24 @@ bool RGBFrameDecoder::ensureVideoProcessor() {
     content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     content_desc.InputFrameRate.Numerator = 30;
     content_desc.InputFrameRate.Denominator = 1;
-    // 获取视频尺寸信息
-    AVFrame* temp_frame = av_frame_alloc();
-    if (!temp_frame || !frame_decoder_.tryDecodeFirstVideoFrame(temp_frame)) {
-        std::cerr << "Error: Failed to get video dimensions for video processor" << std::endl;
-        if (temp_frame) av_frame_free(&temp_frame);
-        return false;
-    }
+    // 获取视频尺寸信息（从流信息获取，不再重复解码第一帧）
+    int video_width = 1920;  // 默认值
+    int video_height = 1080;
     
-    int video_width = temp_frame->width;
-    int video_height = temp_frame->height;
-    av_frame_free(&temp_frame);
+    // 从解码器获取视频流信息
+    if (frame_decoder_.isInitialized()) {
+        PacketDemuxer* demuxer = frame_decoder_.getDemuxer();
+        if (demuxer && demuxer->isInitialized()) {
+            const MKVStreamReader& reader = demuxer->getReader();
+            if (reader.isOpen()) {
+                MKVStreamReader::StreamInfo stream_info = reader.getStreamInfo();
+                if (stream_info.width > 0 && stream_info.height > 0) {
+                    video_width = stream_info.width;
+                    video_height = stream_info.height;
+                }
+            }
+        }
+    }
     
     content_desc.InputWidth = video_width;
     content_desc.InputHeight = video_height;

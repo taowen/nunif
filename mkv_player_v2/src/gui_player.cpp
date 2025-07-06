@@ -239,14 +239,16 @@ private:
                 if (rgbPair.is_valid && rgbPair.rgb_frame.hasValidResources()) {
                     RenderVideoFrame(rgbPair.rgb_frame.rgb_texture.Get());
                 } else {
-                    std::cerr << "ERROR: RGB frame pair is invalid or has no valid resources" << std::endl;
-                    PostQuitMessage(-1);
-                    return;
+                    // 输出错误信息但不退出，显示黑屏
+                    std::cerr << "WARNING: RGB frame pair is invalid or has no valid resources, showing black screen" << std::endl;
+                    float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                    m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
                 }
             } else {
-                std::cerr << "ERROR: Failed to read next RGB frame pair" << std::endl;
-                PostQuitMessage(-1);
-                return;
+                // 可能是文件末尾或暂时错误，显示黑屏
+                std::cerr << "WARNING: Failed to read next RGB frame pair, showing black screen" << std::endl;
+                float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                m_deviceContext->ClearRenderTargetView(m_renderTargetView.Get(), clearColor);
             }
         } else {
             // 无视频文件时，显示黑屏

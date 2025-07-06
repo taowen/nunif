@@ -44,17 +44,23 @@ bool AsyncRGBFrameDecoder::readNextRGBFramePair(RGBFrameDecoder::RGBFramePair& p
     if (!first_frame_loaded_) {
         RGBFrameDecoder::RGBFramePair rgb_pair;
         if (!rgb_decoder_.readNextRGBFramePair(rgb_pair)) {
+            std::cerr << "AsyncRGBFrameDecoder: Failed to read first RGB frame pair" << std::endl;
             return false;
         }
         
         current_pair_ = rgb_pair;
         first_frame_loaded_ = true;
         
+        // 立即返回第一帧，同时通知worker线程开始预取下一帧
+        pair = current_pair_;
+        
         // 通知worker线程开始预取下一帧
         {
             std::lock_guard<std::mutex> lock(buffer_mutex_);
             buffer_cv_.notify_one();
         }
+        
+        return pair.is_valid;
     }
     
     // 等待worker线程准备好下一帧
@@ -116,7 +122,8 @@ void AsyncRGBFrameDecoder::workerThreadFunc() {
             }
             buffer_cv_.notify_one();
         } else {
-            // 读取失败，可能是EOF
+            // 读取失败，可能是EOF或暂时错误
+            std::cerr << "AsyncRGBFrameDecoder: Worker thread failed to read next RGB frame pair" << std::endl;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex_);
                 next_pair_.is_valid = false;
