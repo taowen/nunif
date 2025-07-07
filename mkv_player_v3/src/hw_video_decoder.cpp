@@ -4,11 +4,10 @@
 HwVideoDecoder::HwVideoDecoder()
     : stream_reader_(std::make_unique<MKVStreamReader>())
     , codec_context_(nullptr)
-    , hw_frame_(nullptr)
-    , sw_frame_(nullptr)
-    , hw_device_ctx_(nullptr)
-    , is_open_(false)
-    , is_eof_(false) {
+    , current_frame_index_(0)
+    , hw_device_ctx_(nullptr) {
+    hw_frames_[0] = nullptr;
+    hw_frames_[1] = nullptr;
 }
 
 HwVideoDecoder::~HwVideoDecoder() {
@@ -16,7 +15,7 @@ HwVideoDecoder::~HwVideoDecoder() {
 }
 
 bool HwVideoDecoder::open(const std::string& filepath) {
-    if (is_open_) {
+    if (isOpen()) {
         close();
     }
     
@@ -31,22 +30,22 @@ bool HwVideoDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    hw_frame_ = av_frame_alloc();
-    sw_frame_ = av_frame_alloc();
-    if (!hw_frame_ || !sw_frame_) {
+    // 分配双缓冲frames
+    hw_frames_[0] = av_frame_alloc();
+    hw_frames_[1] = av_frame_alloc();
+    if (!hw_frames_[0] || !hw_frames_[1]) {
         std::cerr << "Failed to allocate frames" << std::endl;
         close();
         return false;
     }
     
-    is_open_ = true;
-    is_eof_ = false;
+    current_frame_index_ = 0;
     
     return true;
 }
 
 bool HwVideoDecoder::readNextFrame(DecodedFrame& frame) {
-    if (!is_open_ || is_eof_) {
+    if (!isOpen() || isEOF()) {
         return false;
     }
     
@@ -72,16 +71,15 @@ bool HwVideoDecoder::readNextFrame(DecodedFrame& frame) {
     }
     
     av_packet_free(&packet);
-    is_eof_ = stream_reader_->isEOF();
     return false;
 }
 
 bool HwVideoDecoder::isOpen() const {
-    return is_open_;
+    return stream_reader_->isOpen() && codec_context_ != nullptr;
 }
 
 bool HwVideoDecoder::isEOF() const {
-    return is_eof_;
+    return stream_reader_->isEOF();
 }
 
 void HwVideoDecoder::close() {
@@ -90,9 +88,6 @@ void HwVideoDecoder::close() {
     if (stream_reader_) {
         stream_reader_->close();
     }
-    
-    is_open_ = false;
-    is_eof_ = false;
 }
 
 MKVStreamReader* HwVideoDecoder::getStreamReader() const {
@@ -100,26 +95,24 @@ MKVStreamReader* HwVideoDecoder::getStreamReader() const {
 }
 
 bool HwVideoDecoder::seekToTime(double seconds) {
-    if (!is_open_) {
+    if (!isOpen()) {
         return false;
     }
     
     bool success = stream_reader_->seekToTime(seconds);
     if (success) {
-        is_eof_ = false;
         avcodec_flush_buffers(codec_context_);
     }
     return success;
 }
 
 bool HwVideoDecoder::seekToFrame(int64_t frame_number) {
-    if (!is_open_) {
+    if (!isOpen()) {
         return false;
     }
     
     bool success = stream_reader_->seekToFrame(frame_number);
     if (success) {
-        is_eof_ = false;
         avcodec_flush_buffers(codec_context_);
     }
     return success;
@@ -175,7 +168,7 @@ bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    ret = avcodec_receive_frame(codec_context_, hw_frame_);
+    ret = avcodec_receive_frame(codec_context_, hw_frames_[current_frame_index_]);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return false;
     } else if (ret < 0) {
@@ -183,25 +176,26 @@ bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    return fillDecodedFrame(hw_frame_, frame);
+    return fillDecodedFrame(hw_frames_[current_frame_index_], frame);
 }
 
 bool HwVideoDecoder::fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame) {
     decoded_frame.frame = frame;
     decoded_frame.is_valid = true;
     
+    // 轮换到下一个frame - 实现双缓冲
+    current_frame_index_ = (current_frame_index_ + 1) % 2;
+    
     return true;
 }
 
 void HwVideoDecoder::cleanup() {
-    if (hw_frame_) {
-        av_frame_free(&hw_frame_);
-        hw_frame_ = nullptr;
-    }
-    
-    if (sw_frame_) {
-        av_frame_free(&sw_frame_);
-        sw_frame_ = nullptr;
+    // 清理双缓冲frames
+    for (int i = 0; i < 2; i++) {
+        if (hw_frames_[i]) {
+            av_frame_free(&hw_frames_[i]);
+            hw_frames_[i] = nullptr;
+        }
     }
     
     if (codec_context_) {
@@ -213,4 +207,6 @@ void HwVideoDecoder::cleanup() {
         av_buffer_unref(&hw_device_ctx_);
         hw_device_ctx_ = nullptr;
     }
+    
+    current_frame_index_ = 0;
 }
