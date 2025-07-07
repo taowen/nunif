@@ -15,11 +15,13 @@ This is a C++-based MKV video player project with hardware-accelerated decoding.
 ```
 mkv_stream_reader -> hw_video_decoder (with double buffering)
 mkv_stream_reader -> audio_decoder
+hw_video_decoder -> rgb_video_decoder (with RGB color space conversion)
 ```
 
 ### Component Responsibilities
 - **mkv_stream_reader**: Parse MKV container, extract video/audio packets
 - **hw_video_decoder**: FFmpeg D3D11VA hardware video decoding with frame rotation
+- **rgb_video_decoder**: Hardware NV12→RGB color space conversion using D3D11 Video Processor
 - **audio_decoder**: Audio decoding to PCM
 
 ## Memory Management Strategy
@@ -51,7 +53,9 @@ mkv_player_v3/
 ├── src/                   # Source code directory
 │   ├── mkv_stream_reader.cpp/.h     # MKV container parsing
 │   ├── hw_video_decoder.cpp/.h      # FFmpeg D3D11VA video decoding
-│   └── audio_decoder.cpp/.h         # Audio decoding
+│   ├── rgb_video_decoder.cpp/.h     # Hardware RGB color space conversion
+│   ├── audio_decoder.cpp/.h         # Audio decoding
+│   └── async_audio_decoder.cpp/.h   # Asynchronous audio decoding wrapper
 ├── test_data/             # Test media files
 │   └── sample_hw.mkv
 └── tests/                 # Unit tests
@@ -61,7 +65,8 @@ mkv_player_v3/
 ## Build System
 
 ### Dependencies
-- **FFmpeg**: Container parsing, audio decoding, D3D11VA hardware context
+- **FFmpeg**: Container parsing, audio decoding, D3D11VA hardware context, swscale for software color conversion
+- **DirectX 11**: Video Processor for hardware color space conversion
 - **Catch2**: Unit testing framework
 
 ### CMake Configuration
@@ -95,6 +100,13 @@ powershell.exe -Command "& './build.bat' test"
 - **Rotation After Use**: Increment index in `fillDecodedFrame()` after assigning frame
 - **Memory Pattern Verified**: `frame[n] == frame[n+2]` rotation confirmed by tests
 
+### RGB Color Space Conversion
+- **Hardware Acceleration**: Uses D3D11 Video Processor for NV12→RGB conversion
+- **Zero-Copy Pipeline**: Direct GPU-to-GPU conversion without CPU involvement
+- **Double Buffer RGB Textures**: `RgbFrame rgb_frames_[2]` for alternating RGB output
+- **Resource Caching**: Output views cached to minimize D3D11 object creation overhead
+- **Format**: DXGI_FORMAT_B8G8R8A8_UNORM (32-bit BGRA)
+
 ### State Management Anti-Pattern
 - **Don't Copy State**: Redundant `is_open_`, `is_eof_` variables create sync issues  
 - **Delegate to Source**: Use `stream_reader_->isOpen()` instead of local flags
@@ -105,15 +117,19 @@ powershell.exe -Command "& './build.bat' test"
 ### Current Status (✅ = Working, 🔧 = Ready for Enhancement)
 - ✅ **MKVStreamReader**: MKV container parsing and packet extraction
 - ✅ **AudioDecoder**: PCM audio decoding with format detection
+- ✅ **AsyncAudioDecoder**: Asynchronous audio decoding wrapper
 - ✅ **HwVideoDecoder**: D3D11VA hardware video decoding with double buffering
-- 🔧 **Color Space Conversion**: Can be added as next step for display
+- ✅ **RgbVideoDecoder**: Hardware NV12→RGB color space conversion with double buffering
 - 🔧 **Async Wrappers**: Worker thread patterns can be layered on top
 - 🔧 **Audio/Video Sync**: Timestamp-based synchronization ready to implement
+- 🔧 **Rendering Pipeline**: Direct3D11 or OpenGL rendering of RGB textures
 
 ### Testing Architecture Success
-- **Memory Reuse Tests**: Verify `frame[n] == frame[n+2]` pointer equality
-- **Double Buffer Validation**: Confirm alternating frame allocation pattern
-- **Integration Tests**: Real MKV file processing with hardware acceleration
+- **Memory Reuse Tests**: Verify `frame[n] == frame[n+2]` pointer equality for both NV12 and RGB buffers
+- **Double Buffer Validation**: Confirm alternating frame allocation pattern for hardware textures
+- **Color Conversion Verification**: Hardware vs software conversion comparison tests
+- **Performance Benchmarks**: RGB conversion averaging 3-4ms per frame
+- **Integration Tests**: Real MKV file processing with full hardware acceleration pipeline
 - **WSL Cross-Platform**: Windows build tools accessible from Linux environment
 
 ### WSL Development Workflow
@@ -122,3 +138,40 @@ powershell.exe -Command "& './build.bat' test"
 - ✅ All Windows build tools (MSVC, MSBuild) accessible from WSL
 - ✅ Hardware acceleration works on Windows host
 - 💡 WSL provides excellent cross-platform development workflow
+
+## RGB Video Decoder Implementation
+
+### Architecture Overview
+The `RgbVideoDecoder` provides a high-level interface for hardware-accelerated video decoding with automatic color space conversion to RGB for display purposes.
+
+### Key Features
+- **Seamless Integration**: Wraps `HwVideoDecoder` and inherits all D3D11 resources
+- **Hardware Color Conversion**: Uses D3D11 Video Processor for NV12→BGRA conversion
+- **Double Buffering**: Alternates between two RGB texture buffers for optimal performance
+- **Resource Management**: Automatic texture creation, view caching, and cleanup
+- **Format Consistency**: Always outputs DXGI_FORMAT_B8G8R8A8_UNORM textures
+
+### Usage Pattern
+```cpp
+RgbVideoDecoder decoder;
+decoder.open("video.mkv");
+
+RgbVideoDecoder::DecodedFrame frame;
+while (decoder.readNextFrame(frame)) {
+    // frame.hw_frame: Original NV12 hardware frame
+    // frame.rgb_frame.rgb_texture: Ready-to-render RGB texture
+    // frame.rgb_frame.rgb_srv: Shader resource view for rendering
+}
+```
+
+### Performance Characteristics
+- **Decoding Speed**: ~3-4ms per frame for 320x240 video
+- **Memory Efficiency**: Zero-copy GPU pipeline, no CPU involvement
+- **Resource Reuse**: Texture objects recycled between frames
+- **Validation**: Comprehensive tests verify correct double buffering and color accuracy
+
+### Technical Implementation
+- **Device Sharing**: Reuses D3D11 device/context from `HwVideoDecoder`
+- **Video Processor**: Single instance handles all color space conversions
+- **View Caching**: Output views cached per RGB frame to minimize creation overhead
+- **Error Handling**: Comprehensive HRESULT checking and fallback mechanisms

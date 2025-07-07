@@ -25,10 +25,12 @@ add_executable(spike
     src/audio_decoder.cpp
     src/async_audio_decoder.cpp
     src/hw_video_decoder.cpp
+    src/rgb_video_decoder.cpp
     tests/test_mkv_stream_reader.cpp
     tests/test_audio_decoder.cpp
     tests/test_async_audio_decoder.cpp
     tests/test_hw_video_decoder.cpp
+    tests/test_rgb_video_decoder.cpp
 )
 
 # Link Catch2 to the executable
@@ -47,6 +49,8 @@ target_link_libraries(spike PRIVATE
     d3d11.lib
     dxgi.lib
     d3dcompiler.lib
+    ole32.lib
+    oleaut32.lib
 )
 
 # Link FFmpeg to target

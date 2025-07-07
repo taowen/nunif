@@ -19,8 +19,11 @@ TEST_CASE("AsyncAudioDecoder Basic Test", "[AsyncAudioDecoder]") {
     
     AsyncAudioDecoder decoder;
     REQUIRE(decoder.open(test_file.string()));
-    REQUIRE(decoder.isOpen());
-    REQUIRE_FALSE(decoder.isEOF());
+    
+    MKVStreamReader* stream_reader = decoder.getStreamReader();
+    REQUIRE(stream_reader != nullptr);
+    REQUIRE(stream_reader->isOpen());
+    REQUIRE_FALSE(stream_reader->isEOF());
 }
 
 TEST_CASE("AsyncAudioDecoder Read Audio Frame", "[AsyncAudioDecoder]") {
@@ -208,7 +211,10 @@ TEST_CASE("AsyncAudioDecoder Close and Reopen", "[AsyncAudioDecoder]") {
     
     // 第一次打开
     REQUIRE(decoder.open(test_file.string()));
-    REQUIRE(decoder.isOpen());
+    
+    MKVStreamReader* stream_reader = decoder.getStreamReader();
+    REQUIRE(stream_reader != nullptr);
+    REQUIRE(stream_reader->isOpen());
     
     // 读取一帧
     AsyncAudioDecoder::DecodedFrame frame;
@@ -216,12 +222,15 @@ TEST_CASE("AsyncAudioDecoder Close and Reopen", "[AsyncAudioDecoder]") {
     
     // 关闭
     decoder.close();
-    REQUIRE_FALSE(decoder.isOpen());
+    stream_reader = decoder.getStreamReader();
+    REQUIRE_FALSE(stream_reader->isOpen());
     
     // 重新打开
     REQUIRE(decoder.open(test_file.string()));
-    REQUIRE(decoder.isOpen());
-    REQUIRE_FALSE(decoder.isEOF());
+    stream_reader = decoder.getStreamReader();
+    REQUIRE(stream_reader != nullptr);
+    REQUIRE(stream_reader->isOpen());
+    REQUIRE_FALSE(stream_reader->isEOF());
     
 }
 
@@ -251,7 +260,8 @@ TEST_CASE("AsyncAudioDecoder EOF Detection", "[AsyncAudioDecoder]") {
     
     // 验证EOF状态
     if (frame_count > 0) {
-        REQUIRE(decoder.isEOF());
+        MKVStreamReader* stream_reader = decoder.getStreamReader();
+        REQUIRE(stream_reader->isEOF());
     } else {
         WARN("No audio frames found in test file");
     }

@@ -13,7 +13,8 @@ AsyncAudioDecoder::~AsyncAudioDecoder() {
 }
 
 bool AsyncAudioDecoder::open(const std::string& filepath) {
-    if (isOpen()) {
+    MKVStreamReader* stream_reader = getStreamReader();
+    if (stream_reader && stream_reader->isOpen()) {
         close();
     }
     
@@ -26,7 +27,8 @@ bool AsyncAudioDecoder::open(const std::string& filepath) {
 }
 
 bool AsyncAudioDecoder::readNextFrame(DecodedFrame& frame) {
-    if (!isOpen()) {
+    MKVStreamReader* stream_reader = getStreamReader();
+    if (!stream_reader || !stream_reader->isOpen()) {
         frame.is_eof = true;
         return false;
     }
@@ -34,7 +36,8 @@ bool AsyncAudioDecoder::readNextFrame(DecodedFrame& frame) {
     // 等待下一帧准备好
     std::unique_lock<std::mutex> lock(frame_mutex_);
     frame_cv_.wait(lock, [this] { 
-        return next_frame_ready_.load() || isEOF() || should_stop_.load(); 
+        MKVStreamReader* sr = getStreamReader();
+        return next_frame_ready_.load() || (sr && sr->isEOF()) || should_stop_.load(); 
     });
     
     if (should_stop_.load()) {
@@ -42,7 +45,8 @@ bool AsyncAudioDecoder::readNextFrame(DecodedFrame& frame) {
         return false;
     }
     
-    if (isEOF() && !next_frame_ready_.load()) {
+    stream_reader = getStreamReader();
+    if (stream_reader && stream_reader->isEOF() && !next_frame_ready_.load()) {
         frame.is_eof = true;
         return false;
     }
@@ -58,13 +62,6 @@ bool AsyncAudioDecoder::readNextFrame(DecodedFrame& frame) {
     return frame.is_valid;
 }
 
-bool AsyncAudioDecoder::isOpen() const {
-    return audio_decoder_ && audio_decoder_->isOpen();
-}
-
-bool AsyncAudioDecoder::isEOF() const {
-    return audio_decoder_ && audio_decoder_->isEOF();
-}
 
 void AsyncAudioDecoder::close() {
     stopWorkerThread();
@@ -79,7 +76,8 @@ MKVStreamReader* AsyncAudioDecoder::getStreamReader() const {
 }
 
 bool AsyncAudioDecoder::seekToTime(double seconds) {
-    if (!isOpen()) {
+    MKVStreamReader* stream_reader = getStreamReader();
+    if (!stream_reader || !stream_reader->isOpen()) {
         return false;
     }
     
@@ -105,7 +103,8 @@ bool AsyncAudioDecoder::seekToTime(double seconds) {
 }
 
 bool AsyncAudioDecoder::seekToFrame(int64_t frame_number) {
-    if (!isOpen()) {
+    MKVStreamReader* stream_reader = getStreamReader();
+    if (!stream_reader || !stream_reader->isOpen()) {
         return false;
     }
     
@@ -183,7 +182,12 @@ void AsyncAudioDecoder::stopWorkerThread() {
 }
 
 bool AsyncAudioDecoder::prepareNextFrame() {
-    if (!audio_decoder_ || !audio_decoder_->isOpen()) {
+    if (!audio_decoder_) {
+        return false;
+    }
+    
+    MKVStreamReader* stream_reader = getStreamReader();
+    if (!stream_reader || !stream_reader->isOpen()) {
         return false;
     }
     

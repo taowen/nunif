@@ -39,6 +39,10 @@ public:
     
     bool seekToTime(double seconds);
     bool seekToFrame(int64_t frame_number);
+    
+    // D3D11 resource getters for external components
+    ID3D11Device* getD3D11Device() const;
+    ID3D11DeviceContext* getD3D11Context() const;
 
 private:
     std::unique_ptr<MKVStreamReader> stream_reader_;

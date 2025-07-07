@@ -14,7 +14,7 @@ AudioDecoder::~AudioDecoder() {
 }
 
 bool AudioDecoder::open(const std::string& filepath) {
-    if (isOpen()) {
+    if (stream_reader_ && stream_reader_->isOpen()) {
         close();
     }
     
@@ -44,8 +44,8 @@ bool AudioDecoder::open(const std::string& filepath) {
 }
 
 bool AudioDecoder::readNextFrame(DecodedFrame& frame) {
-    if (!isOpen() || isEOF()) {
-        frame.is_eof = isEOF();
+    if (!stream_reader_ || !stream_reader_->isOpen() || stream_reader_->isEOF()) {
+        frame.is_eof = stream_reader_ ? stream_reader_->isEOF() : false;
         return false;
     }
     
@@ -76,13 +76,6 @@ bool AudioDecoder::readNextFrame(DecodedFrame& frame) {
     return false;
 }
 
-bool AudioDecoder::isOpen() const {
-    return stream_reader_ && stream_reader_->isOpen();
-}
-
-bool AudioDecoder::isEOF() const {
-    return stream_reader_ && stream_reader_->isEOF();
-}
 
 void AudioDecoder::close() {
     cleanup();
@@ -97,7 +90,7 @@ MKVStreamReader* AudioDecoder::getStreamReader() const {
 }
 
 bool AudioDecoder::seekToTime(double seconds) {
-    if (!isOpen()) {
+    if (!stream_reader_ || !stream_reader_->isOpen()) {
         return false;
     }
     
@@ -109,7 +102,7 @@ bool AudioDecoder::seekToTime(double seconds) {
 }
 
 bool AudioDecoder::seekToFrame(int64_t frame_number) {
-    if (!isOpen()) {
+    if (!stream_reader_ || !stream_reader_->isOpen()) {
         return false;
     }
     

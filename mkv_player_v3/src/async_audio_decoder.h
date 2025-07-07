@@ -17,10 +17,15 @@ public:
     ~AsyncAudioDecoder();
 
     bool open(const std::string& filepath);
+    
+    // 获取下一个解码帧（阻塞调用）
+    // 注意：
+    // 1. 返回的 frame.frame 指针由内部管理，调用者不需要释放
+    // 2. 再次调用 readNextFrame 后，上次返回的 frame 内容将失效
+    // 3. 如果解码线程未准备好数据，此调用会同步等待
+    // 4. 返回 false 表示到达文件末尾或发生错误
     bool readNextFrame(DecodedFrame& frame);
     
-    bool isOpen() const;
-    bool isEOF() const;
     void close();
     
     MKVStreamReader* getStreamReader() const;

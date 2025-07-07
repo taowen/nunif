@@ -261,3 +261,31 @@ void HwVideoDecoder::cleanup() {
     
     current_frame_index_ = 0;
 }
+
+ID3D11Device* HwVideoDecoder::getD3D11Device() const {
+    if (!hw_device_ctx_) {
+        return nullptr;
+    }
+    
+    AVHWDeviceContext* device_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (device_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) {
+        return nullptr;
+    }
+    
+    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)device_ctx->hwctx;
+    return d3d11_ctx->device;
+}
+
+ID3D11DeviceContext* HwVideoDecoder::getD3D11Context() const {
+    if (!hw_device_ctx_) {
+        return nullptr;
+    }
+    
+    AVHWDeviceContext* device_ctx = (AVHWDeviceContext*)hw_device_ctx_->data;
+    if (device_ctx->type != AV_HWDEVICE_TYPE_D3D11VA) {
+        return nullptr;
+    }
+    
+    AVD3D11VADeviceContext* d3d11_ctx = (AVD3D11VADeviceContext*)device_ctx->hwctx;
+    return d3d11_ctx->device_context;
+}

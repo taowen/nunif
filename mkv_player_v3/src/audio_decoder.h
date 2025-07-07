@@ -25,9 +25,6 @@ public:
 
     bool open(const std::string& filepath);
     bool readNextFrame(DecodedFrame& frame);
-    
-    bool isOpen() const;
-    bool isEOF() const;
     void close();
     
     MKVStreamReader* getStreamReader() const;
