@@ -7,24 +7,6 @@
 // 测试用MKV文件路径
 const std::string TEST_MKV_FILE = "test_data/sample_hw.mkv";
 
-// 辅助函数：创建D3D11设备
-static bool CreateTestD3D11Device(ID3D11Device** device, ID3D11DeviceContext** context) {
-    HRESULT hr = D3D11CreateDevice(
-        nullptr,                    // 默认适配器
-        D3D_DRIVER_TYPE_HARDWARE,   // 硬件驱动
-        nullptr,                    // 软件驱动句柄
-        D3D11_CREATE_DEVICE_VIDEO_SUPPORT, // 支持视频
-        nullptr,                    // 功能级别数组
-        0,                          // 功能级别数组大小
-        D3D11_SDK_VERSION,          // SDK版本
-        device,                     // 输出设备
-        nullptr,                    // 输出功能级别
-        context                     // 输出设备上下文
-    );
-    
-    return SUCCEEDED(hr);
-}
-
 TEST_CASE("RGB verification functionality", "[rgb_verification]") {
     if (!std::filesystem::exists(TEST_MKV_FILE)) {
         SKIP("Test MKV file not found: " + TEST_MKV_FILE);
