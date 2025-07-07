@@ -136,3 +136,49 @@ tests/         # 测试代码
 - 标记所有返回的数据结构为"内部管理，使用方无需释放"
 - 提供is_valid标志位判断数据有效性
 - 提供状态查询方法（hasValidPair、getValidPairCount等）
+
+## 主要源文件位置
+
+### 核心组件文件
+```
+src/
+├── mkv_stream_reader.h/.cpp          # 底层MKV文件读取
+├── packet_demuxer.h/.cpp             # 包解复用器
+├── frame_decoder.h/.cpp              # 帧解码器基类
+├── hw_frame_decoder.h/.cpp           # 硬件加速帧解码器
+├── rgb_frame_decoder.h/.cpp          # RGB帧解码器
+├── async_rgb_frame_decoder.h/.cpp    # 异步RGB帧解码器
+├── gui_player.cpp                    # GUI播放器主程序
+```
+
+### 测试文件
+```
+tests/
+├── test_mkv_stream_reader.cpp        # MKV读取器测试
+├── test_packet_demuxer.cpp           # 包解复用器测试
+├── test_frame_decoder.cpp            # 帧解码器测试
+├── test_gui_player.cpp               # GUI播放器测试
+```
+
+### 应用程序
+```
+build/Debug/
+├── spike.exe                         # 测试运行器
+├── gui_player.exe                    # GUI播放器
+```
+
+## 运行GUI播放器
+
+### 基本运行
+```bash
+# 运行GUI播放器并播放视频文件
+cmd.exe /c "build\\Debug\\gui_player.exe test_data\\sample_hw.mkv"
+
+# 自动退出（毫秒）
+cmd.exe /c "build\\Debug\\gui_player.exe test_data\\sample_hw.mkv 5000"
+```
+
+### 已知问题
+- **帧率控制缺失**：播放器使用垂直同步（60fps）而不是视频文件的真实帧率
+- **时间戳控制缺失**：没有基于视频时间戳的播放控制
+- **CPU占用过高**：主循环使用PeekMessage导致CPU占用过高

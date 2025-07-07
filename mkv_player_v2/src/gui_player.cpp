@@ -8,6 +8,7 @@
 #include <iostream>
 #include <io.h>
 #include <fcntl.h>
+#include <thread>
 #include "async_rgb_frame_decoder.h"
 
 using Microsoft::WRL::ComPtr;
@@ -41,6 +42,19 @@ public:
                 return false;
             }
             std::cout << "Video decoder initialized successfully" << std::endl;
+            
+            // 获取视频帧率并设置帧率控制
+            m_videoFPS = m_decoder.getVideoFPS();
+            if (m_videoFPS > 0.0) {
+                m_frameDuration = std::chrono::microseconds(static_cast<int64_t>(1000000.0 / m_videoFPS));
+                m_nextFrameTime = std::chrono::steady_clock::now();
+                std::cout << "Video FPS: " << m_videoFPS << ", Frame duration: " << m_frameDuration.count() << " microseconds" << std::endl;
+            } else {
+                std::cout << "WARNING: Could not get video FPS, using default 30fps" << std::endl;
+                m_videoFPS = 30.0;
+                m_frameDuration = std::chrono::microseconds(33333); // 30fps
+                m_nextFrameTime = std::chrono::steady_clock::now();
+            }
         }
         
         if (!InitializeD3D()) {
@@ -72,12 +86,31 @@ public:
                         break;
                     }
                 }
-                Render();
-                frameCount++;
-                if (frameCount % 60 == 0) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime);
-                    std::cout << "Frame " << frameCount << " at " << elapsed.count() << "ms" << std::endl;
+                
+                // 基于帧率的时间控制
+                auto now = std::chrono::steady_clock::now();
+                if (now >= m_nextFrameTime) {
+                    Render();
+                    frameCount++;
+                    
+                    // 设置下一帧的时间
+                    m_nextFrameTime += m_frameDuration;
+                    
+                    // 如果帧率控制导致时间落后太多，重置时间基准
+                    if (m_nextFrameTime < now - std::chrono::milliseconds(100)) {
+                        m_nextFrameTime = now;
+                    }
+                    
+                    if (frameCount % 60 == 0) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime);
+                        std::cout << "Frame " << frameCount << " at " << elapsed.count() << "ms (FPS: " << m_videoFPS << ")" << std::endl;
+                    }
+                } else {
+                    // 等待下一帧时间，避免CPU占用过高
+                    auto waitTime = std::chrono::duration_cast<std::chrono::milliseconds>(m_nextFrameTime - now);
+                    if (waitTime > std::chrono::milliseconds(0) && waitTime < std::chrono::milliseconds(50)) {
+                        std::this_thread::sleep_for(waitTime);
+                    }
                 }
             }
         }
@@ -112,6 +145,11 @@ private:
     
     std::string m_videoPath;
     AsyncRGBFrameDecoder m_decoder;
+    
+    // 帧率控制
+    double m_videoFPS;
+    std::chrono::steady_clock::time_point m_nextFrameTime;
+    std::chrono::microseconds m_frameDuration;
     
     bool CreateAppWindow(HINSTANCE hInstance, int nCmdShow) {
         WNDCLASSEXW wcex = {};

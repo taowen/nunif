@@ -182,6 +182,28 @@ ID3D11Device* AsyncRGBFrameDecoder::getD3D11Device() {
     return device;
 }
 
+double AsyncRGBFrameDecoder::getVideoFPS() {
+    if (!is_initialized_) {
+        return 0.0;
+    }
+    
+    // 通过内部RGBFrameDecoder获取帧率
+    HwFrameDecoder* hw_decoder = rgb_decoder_.getFrameDecoder();
+    if (!hw_decoder) {
+        return 0.0;
+    }
+    
+    // 获取底层的MKVStreamReader
+    MKVStreamReader* reader = hw_decoder->getReader();
+    if (!reader) {
+        return 0.0;
+    }
+    
+    // 获取流信息并返回帧率
+    MKVStreamReader::StreamInfo info = reader->getStreamInfo();
+    return info.fps;
+}
+
 void AsyncRGBFrameDecoder::stopWorker() {
     if (worker_thread_.joinable()) {
         // 通知worker线程停止

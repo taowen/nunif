@@ -29,6 +29,9 @@ public:
     // 获取D3D11设备（用于GUI渲染，设备可以跨线程共享）
     ID3D11Device* getD3D11Device();
     
+    // 获取视频帧率
+    double getVideoFPS();
+    
     // 资源管理
     void close();
 
