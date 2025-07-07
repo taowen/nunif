@@ -7,13 +7,8 @@ HwVideoDecoder::HwVideoDecoder()
     , hw_frame_(nullptr)
     , sw_frame_(nullptr)
     , hw_device_ctx_(nullptr)
-    , hw_frames_ctx_(nullptr)
     , is_open_(false)
-    , is_eof_(false)
-    , width_(0)
-    , height_(0)
-    , fps_(0.0)
-    , duration_(0.0) {
+    , is_eof_(false) {
 }
 
 HwVideoDecoder::~HwVideoDecoder() {
@@ -30,26 +25,8 @@ bool HwVideoDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    auto stream_info = stream_reader_->getStreamInfo();
-    width_ = stream_info.width;
-    height_ = stream_info.height;
-    fps_ = stream_info.fps;
-    duration_ = stream_info.duration;
-    
-    if (!initializeDirectX()) {
-        std::cerr << "Failed to initialize DirectX 11" << std::endl;
-        close();
-        return false;
-    }
-    
     if (!initializeFFmpegHWDecoder()) {
         std::cerr << "Failed to initialize FFmpeg hardware decoder" << std::endl;
-        close();
-        return false;
-    }
-    
-    if (!createHWFramesContext()) {
-        std::cerr << "Failed to create hardware frames context" << std::endl;
         close();
         return false;
     }
@@ -118,20 +95,8 @@ void HwVideoDecoder::close() {
     is_eof_ = false;
 }
 
-int HwVideoDecoder::getWidth() const {
-    return width_;
-}
-
-int HwVideoDecoder::getHeight() const {
-    return height_;
-}
-
-double HwVideoDecoder::getFPS() const {
-    return fps_;
-}
-
-double HwVideoDecoder::getDuration() const {
-    return duration_;
+MKVStreamReader* HwVideoDecoder::getStreamReader() const {
+    return stream_reader_.get();
 }
 
 bool HwVideoDecoder::seekToTime(double seconds) {
@@ -160,39 +125,6 @@ bool HwVideoDecoder::seekToFrame(int64_t frame_number) {
     return success;
 }
 
-bool HwVideoDecoder::initializeDirectX() {
-    HRESULT hr;
-    
-    UINT createDeviceFlags = 0;
-#ifdef _DEBUG
-    createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-    
-    D3D_FEATURE_LEVEL featureLevels[] = {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0,
-    };
-    
-    hr = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        createDeviceFlags,
-        featureLevels,
-        ARRAYSIZE(featureLevels),
-        D3D11_SDK_VERSION,
-        &d3d11_device_,
-        nullptr,
-        &d3d11_context_
-    );
-    
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create D3D11 device: " << std::hex << hr << std::endl;
-        return false;
-    }
-    
-    return true;
-}
 
 bool HwVideoDecoder::initializeFFmpegHWDecoder() {
     AVCodecParameters* codecpar = stream_reader_->getVideoCodecParameters();
@@ -218,23 +150,10 @@ bool HwVideoDecoder::initializeFFmpegHWDecoder() {
         return false;
     }
     
-    hw_device_ctx_ = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
-    if (!hw_device_ctx_) {
-        std::cerr << "Failed to allocate hardware device context" << std::endl;
-        return false;
-    }
-    
-    AVHWDeviceContext* hw_device_context = (AVHWDeviceContext*)hw_device_ctx_->data;
-    AVD3D11VADeviceContext* d3d11_device_context = (AVD3D11VADeviceContext*)hw_device_context->hwctx;
-    
-    d3d11_device_context->device = d3d11_device_.Get();
-    d3d11_device_context->device_context = d3d11_context_.Get();
-    
-    d3d11_device_.Get()->AddRef();
-    d3d11_context_.Get()->AddRef();
-    
-    if (av_hwdevice_ctx_init(hw_device_ctx_) < 0) {
-        std::cerr << "Failed to initialize hardware device context" << std::endl;
+    // 让FFmpeg自动创建和管理D3D11VA设备
+    int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+    if (ret < 0) {
+        std::cerr << "Failed to create D3D11VA device context: " << ret << std::endl;
         return false;
     }
     
@@ -248,27 +167,6 @@ bool HwVideoDecoder::initializeFFmpegHWDecoder() {
     return true;
 }
 
-bool HwVideoDecoder::createHWFramesContext() {
-    hw_frames_ctx_ = av_hwframe_ctx_alloc(hw_device_ctx_);
-    if (!hw_frames_ctx_) {
-        std::cerr << "Failed to allocate hardware frames context" << std::endl;
-        return false;
-    }
-    
-    AVHWFramesContext* frames_ctx = (AVHWFramesContext*)hw_frames_ctx_->data;
-    frames_ctx->format = AV_PIX_FMT_D3D11;
-    frames_ctx->sw_format = codec_context_->sw_pix_fmt;
-    frames_ctx->width = codec_context_->width;
-    frames_ctx->height = codec_context_->height;
-    frames_ctx->initial_pool_size = 10;
-    
-    if (av_hwframe_ctx_init(hw_frames_ctx_) < 0) {
-        std::cerr << "Failed to initialize hardware frames context" << std::endl;
-        return false;
-    }
-    
-    return true;
-}
 
 bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
     int ret = avcodec_send_packet(codec_context_, packet);
@@ -285,44 +183,11 @@ bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    return convertFrameToTexture(hw_frame_, frame);
+    return fillDecodedFrame(hw_frame_, frame);
 }
 
-bool HwVideoDecoder::convertFrameToTexture(AVFrame* frame, DecodedFrame& decoded_frame) {
-    if (frame->format != AV_PIX_FMT_D3D11) {
-        std::cerr << "Frame is not in D3D11 format" << std::endl;
-        return false;
-    }
-    
-    ID3D11Texture2D* texture = (ID3D11Texture2D*)frame->data[0];
-    int texture_index = (intptr_t)frame->data[1];
-    
-    D3D11_TEXTURE2D_DESC texture_desc;
-    texture->GetDesc(&texture_desc);
-    
-    texture_desc.Usage = D3D11_USAGE_DEFAULT;
-    texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    texture_desc.CPUAccessFlags = 0;
-    texture_desc.MiscFlags = 0;
-    texture_desc.ArraySize = 1;
-    
-    ComPtr<ID3D11Texture2D> output_texture;
-    HRESULT hr = d3d11_device_->CreateTexture2D(&texture_desc, nullptr, &output_texture);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create output texture" << std::endl;
-        return false;
-    }
-    
-    d3d11_context_->CopySubresourceRegion(
-        output_texture.Get(), 0, 0, 0, 0,
-        texture, texture_index, nullptr
-    );
-    
-    decoded_frame.texture = output_texture;
-    decoded_frame.pts = frame->pts;
-    decoded_frame.duration = frame->duration;
-    decoded_frame.width = frame->width;
-    decoded_frame.height = frame->height;
+bool HwVideoDecoder::fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame) {
+    decoded_frame.frame = frame;
     decoded_frame.is_valid = true;
     
     return true;
@@ -344,16 +209,8 @@ void HwVideoDecoder::cleanup() {
         codec_context_ = nullptr;
     }
     
-    if (hw_frames_ctx_) {
-        av_buffer_unref(&hw_frames_ctx_);
-        hw_frames_ctx_ = nullptr;
-    }
-    
     if (hw_device_ctx_) {
         av_buffer_unref(&hw_device_ctx_);
         hw_device_ctx_ = nullptr;
     }
-    
-    d3d11_context_.Reset();
-    d3d11_device_.Reset();
 }

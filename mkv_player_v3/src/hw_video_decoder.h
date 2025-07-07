@@ -19,14 +19,10 @@ using Microsoft::WRL::ComPtr;
 class HwVideoDecoder {
 public:
     struct DecodedFrame {
-        ComPtr<ID3D11Texture2D> texture;
-        int64_t pts;
-        int64_t duration;
-        int width;
-        int height;
+        AVFrame* frame;
         bool is_valid;
         
-        DecodedFrame() : pts(0), duration(0), width(0), height(0), is_valid(false) {}
+        DecodedFrame() : frame(nullptr), is_valid(false) {}
     };
 
     HwVideoDecoder();
@@ -39,10 +35,7 @@ public:
     bool isEOF() const;
     void close();
     
-    int getWidth() const;
-    int getHeight() const;
-    double getFPS() const;
-    double getDuration() const;
+    MKVStreamReader* getStreamReader() const;
     
     bool seekToTime(double seconds);
     bool seekToFrame(int64_t frame_number);
@@ -54,23 +47,13 @@ private:
     AVFrame* hw_frame_;
     AVFrame* sw_frame_;
     
-    ComPtr<ID3D11Device> d3d11_device_;
-    ComPtr<ID3D11DeviceContext> d3d11_context_;
-    
     AVBufferRef* hw_device_ctx_;
-    AVBufferRef* hw_frames_ctx_;
     
     bool is_open_;
     bool is_eof_;
-    int width_;
-    int height_;
-    double fps_;
-    double duration_;
     
-    bool initializeDirectX();
     bool initializeFFmpegHWDecoder();
-    bool createHWFramesContext();
     bool processPacket(AVPacket* packet, DecodedFrame& frame);
-    bool convertFrameToTexture(AVFrame* frame, DecodedFrame& decoded_frame);
+    bool fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame);
     void cleanup();
 };
