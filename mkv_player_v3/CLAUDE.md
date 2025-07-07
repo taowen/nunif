@@ -100,16 +100,17 @@ mkv_player_v3/
   - `gui_player`: Main player application
 
 ### Build Commands
+
+#### WSL Environment
 ```bash
-# Build and run tests
-build.bat test
+# Run Windows batch script from WSL
+cmd.exe /c "build.bat test"
 
-# Build GUI player
-build.bat gui
+# Alternative: Use PowerShell
+powershell.exe -Command "& './build.bat' test"
 
-# Direct CMake build
-cd build
-cmake --build . --config Debug --target spike
+# Note: WSL can access Windows executables and build tools
+# The /mnt/c/ mount point provides access to Windows filesystem
 ```
 
 ## Development Workflow
@@ -153,19 +154,36 @@ cmake --build . --config Debug --target spike
 
 ### Current Status
 - ✅ MKVStreamReader: Implemented and tested
-- ⏳ Hardware decoders: To be implemented
+- 🟡 HwVideoDecoder: Basic implementation complete, runtime issues need fixing
+- ⏳ RgbVideoDecoder: To be implemented  
 - ⏳ Async wrappers: To be implemented
 - ⏳ GUI integration: To be implemented
 
 ### Next Steps
-1. Implement hw_video_decoder with DirectX 11 DXVA
-2. Add rgb_video_decoder with VideoProcessorBlt
+1. Fix HwVideoDecoder pixel format detection issues
+2. Add rgb_video_decoder with VideoProcessorBlt  
 3. Create async wrappers with worker threads
 4. Integrate audio decoding pipeline
 5. Build GUI player application
 
-### Performance Targets
-- **4K Video**: Smooth playback at 60fps
-- **Memory Usage**: Minimal VRAM footprint with double buffering
-- **Latency**: Sub-frame decode latency for responsive playback
-- **CPU Usage**: Minimal CPU involvement in decode pipeline
+## Implementation Lessons
+
+### HwVideoDecoder Implementation Details
+
+#### Architecture Decisions Made
+- **FFmpeg D3D11VA Integration**: Use FFmpeg's D3D11VA hardware context for seamless hardware decoding
+- **DirectX 11 Only**: Avoid DXVA2 API confusion, stick to pure DirectX 11 video interfaces
+- **Simple Interface**: `open(filepath)` + `readNextFrame()` for easy integration
+- **ComPtr Management**: Use Microsoft::WRL::ComPtr for automatic D3D11 resource management
+
+#### WSL Development Environment
+- ✅ `cmd.exe /c "build.bat test"` works perfectly from WSL
+- ✅ Windows filesystem accessible via `/mnt/c/` mount point
+- ✅ All Windows build tools (MSVC, MSBuild) accessible from WSL
+- ⚠️ DirectX 11 hardware acceleration only works on Windows host
+- 💡 WSL provides excellent cross-platform development workflow
+
+#### Testing Strategy Validation
+- **Unit Tests**: Basic functionality, error handling, performance metrics
+- **Integration Tests**: Real MKV file processing with test_data/sample_hw.mkv
+- **Hardware Tests**: DirectX 11 device creation and texture validation
