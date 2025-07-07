@@ -57,6 +57,11 @@ private:
     bool is_initialized_;
     bool first_frame_loaded_;
     
+    // 时间戳验证，避免重复帧
+    int64_t last_frame_timestamp_;
+    uint64_t frame_sequence_number_;
+    uint64_t last_returned_sequence_;
+    
     // 内部方法
     void workerThreadFunc();
     void swapBuffers();

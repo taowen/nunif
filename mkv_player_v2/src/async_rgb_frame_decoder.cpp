@@ -5,6 +5,9 @@
 AsyncRGBFrameDecoder::AsyncRGBFrameDecoder()
     : is_initialized_(false)
     , first_frame_loaded_(false)
+    , last_frame_timestamp_(AV_NOPTS_VALUE)
+    , frame_sequence_number_(0)
+    , last_returned_sequence_(0)
 {
 }
 
@@ -29,6 +32,11 @@ bool AsyncRGBFrameDecoder::open(const std::string& filepath) {
     worker_should_stop_.store(false);
     worker_running_.store(false);
     
+    // 重置时间戳和序号
+    last_frame_timestamp_ = AV_NOPTS_VALUE;
+    frame_sequence_number_ = 0;
+    last_returned_sequence_ = 0;
+    
     // 启动worker线程
     worker_thread_ = std::thread(&AsyncRGBFrameDecoder::workerThreadFunc, this);
     
@@ -50,6 +58,13 @@ bool AsyncRGBFrameDecoder::readNextRGBFramePair(RGBFrameDecoder::RGBFramePair& p
         
         current_pair_ = rgb_pair;
         first_frame_loaded_ = true;
+        
+        // 记录第一帧的时间戳和序号
+        if (current_pair_.rgb_frame.is_valid) {
+            last_frame_timestamp_ = current_pair_.rgb_frame.timestamp;
+            frame_sequence_number_ = 1;
+            last_returned_sequence_ = 1;
+        }
         
         // 立即返回第一帧，同时通知worker线程开始预取下一帧
         pair = current_pair_;
@@ -116,11 +131,29 @@ void AsyncRGBFrameDecoder::workerThreadFunc() {
         // 预取下一帧
         RGBFrameDecoder::RGBFramePair rgb_pair;
         if (rgb_decoder_.readNextRGBFramePair(next_pair_)) {
-            {
-                std::lock_guard<std::mutex> lock(buffer_mutex_);
-                next_pair_ready_.store(true);
+            // 验证是否为新帧（防止worker线程重复读取相同帧）
+            bool is_valid_new_frame = false;
+            
+            if (next_pair_.rgb_frame.is_valid) {
+                // 检查时间戳是否比已返回的最新帧更新
+                if (next_pair_.rgb_frame.timestamp > last_frame_timestamp_) {
+                    is_valid_new_frame = true;
+                } else {
+                    std::cerr << "Worker thread: Skipping frame with old timestamp " 
+                              << next_pair_.rgb_frame.timestamp << " (last: " << last_frame_timestamp_ << ")" << std::endl;
+                }
             }
-            buffer_cv_.notify_one();
+            
+            if (is_valid_new_frame) {
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex_);
+                    next_pair_ready_.store(true);
+                }
+                buffer_cv_.notify_one();
+            } else {
+                // 跳过这个旧帧，继续尝试读取下一帧
+                continue;
+            }
         } else {
             // 读取失败，可能是EOF或暂时错误
             std::cerr << "AsyncRGBFrameDecoder: Worker thread failed to read next RGB frame pair" << std::endl;
@@ -138,8 +171,32 @@ void AsyncRGBFrameDecoder::workerThreadFunc() {
 }
 
 void AsyncRGBFrameDecoder::swapBuffers() {
-    // 交换当前帧和下一帧
-    std::swap(current_pair_, next_pair_);
+    // 验证下一帧是否真的是新帧
+    bool is_new_frame = false;
+    
+    if (next_pair_.rgb_frame.is_valid) {
+        // 检查时间戳是否前进
+        if (next_pair_.rgb_frame.timestamp > last_frame_timestamp_) {
+            is_new_frame = true;
+            last_frame_timestamp_ = next_pair_.rgb_frame.timestamp;
+            frame_sequence_number_++;
+        } else {
+            std::cerr << "WARNING: Next frame timestamp (" << next_pair_.rgb_frame.timestamp 
+                      << ") is not newer than last (" << last_frame_timestamp_ 
+                      << "), skipping frame to avoid flashback" << std::endl;
+        }
+    }
+    
+    // 只有确实是新帧时才交换
+    if (is_new_frame) {
+        std::swap(current_pair_, next_pair_);
+        last_returned_sequence_ = frame_sequence_number_;
+    } else {
+        // 保持当前帧不变，标记next_pair为无效以便worker线程重新获取
+        next_pair_.is_valid = false;
+        next_pair_.rgb_frame.is_valid = false;
+        next_pair_.audio_frame.is_valid = false;
+    }
 }
 
 
