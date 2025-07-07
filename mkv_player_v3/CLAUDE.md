@@ -14,7 +14,7 @@ This is a C++-based MKV video player project with hardware-accelerated decoding.
 ### Current Pipeline (Implemented)
 ```
 mkv_stream_reader -> hw_video_decoder (with double buffering)
-mkv_stream_reader -> audio_decoder
+mkv_stream_reader -> async_audio_decoder -> audio_player (WASAPI output)
 hw_video_decoder -> rgb_video_decoder (with RGB color space conversion)
 ```
 
@@ -23,6 +23,8 @@ hw_video_decoder -> rgb_video_decoder (with RGB color space conversion)
 - **hw_video_decoder**: FFmpeg D3D11VA hardware video decoding with frame rotation
 - **rgb_video_decoder**: Hardware NV12→RGB color space conversion using D3D11 Video Processor
 - **audio_decoder**: Audio decoding to PCM
+- **async_audio_decoder**: Asynchronous audio decoding with worker thread
+- **audio_player**: WASAPI audio output with external timer integration
 
 ## Memory Management Strategy
 
@@ -55,7 +57,8 @@ mkv_player_v3/
 │   ├── hw_video_decoder.cpp/.h      # FFmpeg D3D11VA video decoding
 │   ├── rgb_video_decoder.cpp/.h     # Hardware RGB color space conversion
 │   ├── audio_decoder.cpp/.h         # Audio decoding
-│   └── async_audio_decoder.cpp/.h   # Asynchronous audio decoding wrapper
+│   ├── async_audio_decoder.cpp/.h   # Asynchronous audio decoding wrapper
+│   └── audio_player.cpp/.h          # WASAPI audio output player
 ├── test_data/             # Test media files
 │   └── sample_hw.mkv
 └── tests/                 # Unit tests
@@ -67,6 +70,7 @@ mkv_player_v3/
 ### Dependencies
 - **FFmpeg**: Container parsing, audio decoding, D3D11VA hardware context, swscale for software color conversion
 - **DirectX 11**: Video Processor for hardware color space conversion
+- **WASAPI**: Windows audio output (ole32.lib, oleaut32.lib)
 - **Catch2**: Unit testing framework
 
 ### CMake Configuration
@@ -118,9 +122,11 @@ powershell.exe -Command "& './build.bat' test"
 - ✅ **MKVStreamReader**: MKV container parsing and packet extraction
 - ✅ **AudioDecoder**: PCM audio decoding with format detection
 - ✅ **AsyncAudioDecoder**: Asynchronous audio decoding wrapper
+- ✅ **AudioPlayer**: WASAPI audio output with external timer integration
 - ✅ **HwVideoDecoder**: D3D11VA hardware video decoding with double buffering
 - ✅ **RgbVideoDecoder**: Hardware NV12→RGB color space conversion with double buffering
-- 🔧 **Async Wrappers**: Worker thread patterns can be layered on top
+- 🔧 **VideoPlayer**: Video display and timing management wrapper
+- 🔧 **GUI Application**: Windows message loop integration
 - 🔧 **Audio/Video Sync**: Timestamp-based synchronization ready to implement
 - 🔧 **Rendering Pipeline**: Direct3D11 or OpenGL rendering of RGB textures
 
@@ -175,3 +181,45 @@ while (decoder.readNextFrame(frame)) {
 - **Video Processor**: Single instance handles all color space conversions
 - **View Caching**: Output views cached per RGB frame to minimize creation overhead
 - **Error Handling**: Comprehensive HRESULT checking and fallback mechanisms
+
+## Audio Player Implementation
+
+### Architecture Overview
+The `AudioPlayer` provides a Windows-native audio output solution using WASAPI (Windows Audio Session API) with external timer integration for GUI applications.
+
+### Key Features
+- **WASAPI Integration**: Hardware-accelerated audio output with low latency
+- **External Timer Control**: Time management delegated to GUI message loop
+- **Thread-Safe Design**: Separate audio thread for buffer management
+- **Format Flexibility**: Automatic audio format detection and conversion
+- **State Management**: Play/pause/stop with proper resource cleanup
+
+### Usage Pattern
+```cpp
+AudioPlayer player;
+player.initialize();
+player.loadFile("audio.mkv");
+player.play();
+
+// In Windows message loop (WM_TIMER):
+double current_time = GetCurrentPlaybackTime();
+player.onTimer(current_time);  // Updates buffers and time
+```
+
+### Message Loop Integration
+- **Timer-Driven**: External timer calls `onTimer(current_time)` every 5-10ms
+- **Buffer Management**: WASAPI buffer monitoring and automatic refill
+- **Decoupled Design**: Audio processing independent of video timing
+- **GUI Friendly**: No blocking operations in main thread
+
+### Technical Implementation
+- **Buffer Strategy**: Continuous WASAPI buffer filling based on `GetCurrentPadding()`
+- **Format Support**: Automatic PCM format conversion for WASAPI compatibility
+- **Resource Management**: COM initialization, device enumeration, and cleanup
+- **Error Handling**: Comprehensive HRESULT checking and fallback mechanisms
+
+### Performance Characteristics
+- **Latency**: Low-latency WASAPI shared mode for responsive audio
+- **Memory Efficiency**: Streaming buffer management, no large audio caches
+- **CPU Usage**: Efficient buffer checking, minimal CPU overhead
+- **Integration**: Seamless Windows message loop integration for GUI apps
