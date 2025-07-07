@@ -44,9 +44,6 @@ TEST_CASE("AudioDecoder Read Audio Frame", "[AudioDecoder]") {
         REQUIRE(audio_frame->sample_rate > 0);
         REQUIRE(audio_frame->ch_layout.nb_channels > 0);
         
-        std::cout << "Audio frame - samples: " << audio_frame->nb_samples 
-                  << ", sample_rate: " << audio_frame->sample_rate 
-                  << ", channels: " << audio_frame->ch_layout.nb_channels << std::endl;
     } else {
         // 如果文件没有音频流，这也是合理的
         WARN("No audio frames found in test file");
@@ -74,11 +71,9 @@ TEST_CASE("AudioDecoder Multiple Frames", "[AudioDecoder]") {
         REQUIRE_FALSE(frame.is_eof);
         
         frame_count++;
-        std::cout << "Audio frame " << frame_count << " decoded successfully" << std::endl;
     }
     
     if (frame_count > 0) {
-        std::cout << "Successfully decoded " << frame_count << " audio frames" << std::endl;
     } else {
         WARN("No audio frames found in test file");
     }
@@ -111,7 +106,6 @@ TEST_CASE("AudioDecoder EOF Detection", "[AudioDecoder]") {
     // 验证EOF状态
     if (frame_count > 0) {
         REQUIRE(decoder.isEOF());
-        std::cout << "Total audio frames decoded: " << frame_count << std::endl;
     } else {
         WARN("No audio frames found in test file");
     }
@@ -159,8 +153,37 @@ TEST_CASE("AudioDecoder Stream Reader Access", "[AudioDecoder]") {
     
     // 获取流信息
     auto stream_info = stream_reader->getStreamInfo();
-    std::cout << "Audio stream index: " << stream_info.audio_stream_index << std::endl;
-    std::cout << "Audio codec: " << stream_info.audio_codec << std::endl;
-    std::cout << "Audio sample rate: " << stream_info.audio_sample_rate << std::endl;
-    std::cout << "Audio channels: " << stream_info.audio_channels << std::endl;
+}
+
+TEST_CASE("AudioDecoder Double Buffer Memory Reuse", "[AudioDecoder]") {
+    fs::path test_file = fs::current_path() / "test_data" / "sample_hw.mkv";
+    
+    if (!fs::exists(test_file)) {
+        WARN("Test file not found: " << test_file.string() << ". Skipping tests.");
+        return;
+    }
+    
+    AudioDecoder decoder;
+    REQUIRE(decoder.open(test_file.string()));
+    
+    // 解码多个音频帧并记录地址
+    std::vector<AVFrame*> frame_addresses;
+    AudioDecoder::DecodedFrame frame;
+    
+    for (int i = 0; i < 3 && decoder.readNextFrame(frame); i++) {
+        REQUIRE(frame.is_valid);
+        REQUIRE(frame.frame != nullptr);
+        frame_addresses.push_back(frame.frame);
+    }
+    
+    // 验证双缓冲：frame3应该复用frame1内存
+    if (frame_addresses.size() >= 3) {
+        AVFrame* frame1 = frame_addresses[0];
+        AVFrame* frame2 = frame_addresses[1];  
+        AVFrame* frame3 = frame_addresses[2];
+        
+        REQUIRE(frame3 == frame1);
+    } else {
+        WARN("Not enough frames to verify double buffering");
+    }
 }

@@ -39,7 +39,8 @@ private:
     std::unique_ptr<MKVStreamReader> stream_reader_;
     
     AVCodecContext* codec_context_;
-    AVFrame* audio_frame_;
+    AVFrame* audio_frames_[2];
+    int current_frame_index_;
     
     bool initializeFFmpegAudioDecoder();
     bool processPacket(AVPacket* packet, DecodedFrame& frame);

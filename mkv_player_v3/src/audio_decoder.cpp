@@ -4,7 +4,9 @@
 AudioDecoder::AudioDecoder()
     : stream_reader_(std::make_unique<MKVStreamReader>())
     , codec_context_(nullptr)
-    , audio_frame_(nullptr) {
+    , current_frame_index_(0) {
+    audio_frames_[0] = nullptr;
+    audio_frames_[1] = nullptr;
 }
 
 AudioDecoder::~AudioDecoder() {
@@ -27,12 +29,16 @@ bool AudioDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    audio_frame_ = av_frame_alloc();
-    if (!audio_frame_) {
-        std::cerr << "Failed to allocate audio frame" << std::endl;
+    // 分配双缓冲frames
+    audio_frames_[0] = av_frame_alloc();
+    audio_frames_[1] = av_frame_alloc();
+    if (!audio_frames_[0] || !audio_frames_[1]) {
+        std::cerr << "Failed to allocate audio frames" << std::endl;
         close();
         return false;
     }
+    
+    current_frame_index_ = 0;
     
     return true;
 }
@@ -153,7 +159,7 @@ bool AudioDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    ret = avcodec_receive_frame(codec_context_, audio_frame_);
+    ret = avcodec_receive_frame(codec_context_, audio_frames_[current_frame_index_]);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return false;
     } else if (ret < 0) {
@@ -161,7 +167,7 @@ bool AudioDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    return fillDecodedFrame(audio_frame_, frame);
+    return fillDecodedFrame(audio_frames_[current_frame_index_], frame);
 }
 
 bool AudioDecoder::fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame) {
@@ -169,17 +175,25 @@ bool AudioDecoder::fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame)
     decoded_frame.is_valid = true;
     decoded_frame.is_eof = false;
     
+    // 轮换到下一个frame - 实现双缓冲
+    current_frame_index_ = (current_frame_index_ + 1) % 2;
+    
     return true;
 }
 
 void AudioDecoder::cleanup() {
-    if (audio_frame_) {
-        av_frame_free(&audio_frame_);
-        audio_frame_ = nullptr;
+    // 清理双缓冲frames
+    for (int i = 0; i < 2; i++) {
+        if (audio_frames_[i]) {
+            av_frame_free(&audio_frames_[i]);
+            audio_frames_[i] = nullptr;
+        }
     }
     
     if (codec_context_) {
         avcodec_free_context(&codec_context_);
         codec_context_ = nullptr;
     }
+    
+    current_frame_index_ = 0;
 }

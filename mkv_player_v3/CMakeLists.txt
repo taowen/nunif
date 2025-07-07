@@ -23,9 +23,11 @@ FetchContent_MakeAvailable(Catch2)
 add_executable(spike 
     src/mkv_stream_reader.cpp
     src/audio_decoder.cpp
+    src/async_audio_decoder.cpp
     src/hw_video_decoder.cpp
     tests/test_mkv_stream_reader.cpp
     tests/test_audio_decoder.cpp
+    tests/test_async_audio_decoder.cpp
     tests/test_hw_video_decoder.cpp
 )
 

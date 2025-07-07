@@ -48,8 +48,10 @@ private:
     int current_frame_index_;  // 当前使用的frame索引 (0或1)
     
     AVBufferRef* hw_device_ctx_;
+    AVBufferRef* hw_frames_ctx_;  // 硬件帧上下文，用于显存池管理
     
     bool initializeFFmpegHWDecoder();
+    bool createHWFramesContext();  // 创建硬件帧上下文和显存池
     bool processPacket(AVPacket* packet, DecodedFrame& frame);
     bool fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame);
     void cleanup();

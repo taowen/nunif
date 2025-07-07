@@ -5,7 +5,8 @@ HwVideoDecoder::HwVideoDecoder()
     : stream_reader_(std::make_unique<MKVStreamReader>())
     , codec_context_(nullptr)
     , current_frame_index_(0)
-    , hw_device_ctx_(nullptr) {
+    , hw_device_ctx_(nullptr)
+    , hw_frames_ctx_(nullptr) {
     hw_frames_[0] = nullptr;
     hw_frames_[1] = nullptr;
 }
@@ -30,11 +31,25 @@ bool HwVideoDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 分配双缓冲frames
+    if (!createHWFramesContext()) {
+        std::cerr << "Failed to create hardware frames context" << std::endl;
+        close();
+        return false;
+    }
+    
+    // 从显存池分配双缓冲frames
     hw_frames_[0] = av_frame_alloc();
     hw_frames_[1] = av_frame_alloc();
     if (!hw_frames_[0] || !hw_frames_[1]) {
         std::cerr << "Failed to allocate frames" << std::endl;
+        close();
+        return false;
+    }
+    
+    // 从硬件frames上下文获取显存
+    if (av_hwframe_get_buffer(hw_frames_ctx_, hw_frames_[0], 0) < 0 ||
+        av_hwframe_get_buffer(hw_frames_ctx_, hw_frames_[1], 0) < 0) {
+        std::cerr << "Failed to allocate hardware frame buffers" << std::endl;
         close();
         return false;
     }
@@ -160,6 +175,35 @@ bool HwVideoDecoder::initializeFFmpegHWDecoder() {
     return true;
 }
 
+bool HwVideoDecoder::createHWFramesContext() {
+    if (!hw_device_ctx_ || !codec_context_) {
+        return false;
+    }
+    
+    // 创建硬件帧上下文
+    hw_frames_ctx_ = av_hwframe_ctx_alloc(hw_device_ctx_);
+    if (!hw_frames_ctx_) {
+        std::cerr << "Failed to allocate hardware frames context" << std::endl;
+        return false;
+    }
+    
+    AVHWFramesContext* frames_ctx = (AVHWFramesContext*)hw_frames_ctx_->data;
+    frames_ctx->format = AV_PIX_FMT_D3D11;
+    frames_ctx->sw_format = AV_PIX_FMT_NV12;  // 常见的硬件解码格式
+    frames_ctx->width = codec_context_->width;
+    frames_ctx->height = codec_context_->height;
+    frames_ctx->initial_pool_size = 2;  // 双缓冲，只需要2个frame
+    
+    int ret = av_hwframe_ctx_init(hw_frames_ctx_);
+    if (ret < 0) {
+        std::cerr << "Failed to initialize hardware frames context: " << ret << std::endl;
+        av_buffer_unref(&hw_frames_ctx_);
+        return false;
+    }
+    
+    return true;
+}
+
 
 bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
     int ret = avcodec_send_packet(codec_context_, packet);
@@ -168,7 +212,9 @@ bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    ret = avcodec_receive_frame(codec_context_, hw_frames_[current_frame_index_]);
+    // 直接解码到当前双缓冲frame
+    AVFrame* current_frame = hw_frames_[current_frame_index_];
+    ret = avcodec_receive_frame(codec_context_, current_frame);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return false;
     } else if (ret < 0) {
@@ -176,7 +222,7 @@ bool HwVideoDecoder::processPacket(AVPacket* packet, DecodedFrame& frame) {
         return false;
     }
     
-    return fillDecodedFrame(hw_frames_[current_frame_index_], frame);
+    return fillDecodedFrame(current_frame, frame);
 }
 
 bool HwVideoDecoder::fillDecodedFrame(AVFrame* frame, DecodedFrame& decoded_frame) {
@@ -196,6 +242,11 @@ void HwVideoDecoder::cleanup() {
             av_frame_free(&hw_frames_[i]);
             hw_frames_[i] = nullptr;
         }
+    }
+    
+    if (hw_frames_ctx_) {
+        av_buffer_unref(&hw_frames_ctx_);
+        hw_frames_ctx_ = nullptr;
     }
     
     if (codec_context_) {
