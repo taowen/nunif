@@ -15,23 +15,20 @@ public:
     VideoPlayer();
     ~VideoPlayer();
     
-    // 初始化DirectX11渲染环境
-    bool initialize(HWND hwnd);
+    // 初始化 - 外部传入D3D11资源
+    bool initialize(ID3D11Device* device, 
+                   ID3D11DeviceContext* context, 
+                   ID3D11RenderTargetView* render_target_view,
+                   IDXGISwapChain* swap_chain = nullptr);
     
     // 定时器回调 - 由外部定时器调用
-    // 这个方法会：
-    // 1. 检查是否需要获取新的视频帧
-    // 2. 渲染当前帧
-    // 3. Present到屏幕
-    // 4. 统计帧率信息
     void onTimer();
     
 private:
-    // DirectX11资源
-    HWND hwnd_;
+    // DirectX11资源 - 外部传入，不负责释放
     ID3D11Device* device_;
     ID3D11DeviceContext* context_;
-    IDXGISwapChain* swap_chain_;
+    IDXGISwapChain* swap_chain_;  // 可选，测试时为nullptr
     ID3D11RenderTargetView* render_target_view_;
     
     // 视频信号和帧率转换
@@ -51,5 +48,4 @@ private:
     std::chrono::high_resolution_clock::time_point last_stats_time_;
     
     void renderFrame(const Frame& frame);
-    void cleanup();
 };

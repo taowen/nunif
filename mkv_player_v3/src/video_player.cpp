@@ -79,8 +79,7 @@ private:
 
 // VideoPlayer实现
 VideoPlayer::VideoPlayer() 
-    : hwnd_(nullptr)
-    , device_(nullptr)
+    : device_(nullptr)
     , context_(nullptr)
     , swap_chain_(nullptr)
     , render_target_view_(nullptr)
@@ -93,69 +92,31 @@ VideoPlayer::VideoPlayer()
 }
 
 VideoPlayer::~VideoPlayer() {
-    cleanup();
+    // 不负责释放外部传入的D3D11资源
 }
 
-bool VideoPlayer::initialize(HWND hwnd) {
-    hwnd_ = hwnd;
-    
-    // 创建D3D11设备和交换链
-    DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 2;
-    scd.BufferDesc.Width = 800;
-    scd.BufferDesc.Height = 600;
-    scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    scd.BufferDesc.RefreshRate.Numerator = 60;
-    scd.BufferDesc.RefreshRate.Denominator = 1;
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scd.OutputWindow = hwnd;
-    scd.SampleDesc.Count = 1;
-    scd.SampleDesc.Quality = 0;
-    scd.Windowed = TRUE;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 
-        D3D11_CREATE_DEVICE_DEBUG,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &scd, &swap_chain_, &device_, nullptr, &context_);
-        
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create D3D11 device: " << std::hex << hr << std::endl;
+bool VideoPlayer::initialize(ID3D11Device* device, 
+                           ID3D11DeviceContext* context, 
+                           ID3D11RenderTargetView* render_target_view,
+                           IDXGISwapChain* swap_chain) {
+    if (!device || !context || !render_target_view) {
         return false;
     }
     
-    // 创建渲染目标
-    ID3D11Texture2D* back_buffer = nullptr;
-    hr = swap_chain_->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back_buffer);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to get back buffer: " << std::hex << hr << std::endl;
-        return false;
-    }
+    device_ = device;
+    context_ = context;
+    render_target_view_ = render_target_view;
+    swap_chain_ = swap_chain;
     
-    hr = device_->CreateRenderTargetView(back_buffer, nullptr, &render_target_view_);
-    back_buffer->Release();
-    
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create render target view: " << std::hex << hr << std::endl;
-        return false;
-    }
-    
-    // 设置视口
-    D3D11_VIEWPORT vp = {};
-    vp.Width = 800.0f;
-    vp.Height = 600.0f;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    vp.TopLeftX = 0;
-    vp.TopLeftY = 0;
-    context_->RSSetViewports(1, &vp);
-    
-    std::cout << "VideoPlayer初始化成功 - 支持onTimer()回调架构" << std::endl;
     return true;
 }
 
 void VideoPlayer::onTimer() {
+    // 如果未初始化，直接返回
+    if (!video_signal_ || !frame_converter_ || !render_target_view_) {
+        return;
+    }
+    
     // 检查是否需要新的视频帧
     FakeVideoSignal::Frame temp_frame;
     if (!has_frame_ || !frame_converter_->shouldDisplayFrame(temp_frame)) {
@@ -177,11 +138,13 @@ void VideoPlayer::onTimer() {
         renderFrame(current_frame_);
     }
     
-    // 立即Present，不等待VSync
-    HRESULT hr = swap_chain_->Present(0, 0);
-    if (FAILED(hr)) {
-        std::cerr << "Present failed: " << std::hex << hr << std::endl;
-        return;
+    // 如果有swap_chain则Present到屏幕
+    if (swap_chain_) {
+        HRESULT hr = swap_chain_->Present(0, 0);
+        if (FAILED(hr)) {
+            std::cerr << "Present failed: " << std::hex << hr << std::endl;
+            return;
+        }
     }
     
     render_count_++;
@@ -204,21 +167,3 @@ void VideoPlayer::renderFrame(const Frame& frame) {
     context_->OMSetRenderTargets(1, &render_target_view_, nullptr);
 }
 
-void VideoPlayer::cleanup() {
-    if (render_target_view_) {
-        render_target_view_->Release();
-        render_target_view_ = nullptr;
-    }
-    if (swap_chain_) {
-        swap_chain_->Release();
-        swap_chain_ = nullptr;
-    }
-    if (context_) {
-        context_->Release();
-        context_ = nullptr;
-    }
-    if (device_) {
-        device_->Release();
-        device_ = nullptr;
-    }
-}

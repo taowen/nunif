@@ -16,12 +16,14 @@ This is a C++-based MKV video player project with hardware-accelerated decoding.
 mkv_stream_reader -> hw_video_decoder (with double buffering)
 mkv_stream_reader -> async_audio_decoder -> audio_player (WASAPI output)
 hw_video_decoder -> rgb_video_decoder (with RGB color space conversion)
+external_d3d11_resources -> video_player (with dependency injection)
 ```
 
 ### Component Responsibilities
 - **mkv_stream_reader**: Parse MKV container, extract video/audio packets
 - **hw_video_decoder**: FFmpeg D3D11VA hardware video decoding with frame rotation
 - **rgb_video_decoder**: Hardware NV12→RGB color space conversion using D3D11 Video Processor
+- **video_player**: Timer-driven video playback with fake signal source and frame rate conversion
 - **audio_decoder**: Audio decoding to PCM
 - **async_audio_decoder**: Asynchronous audio decoding with worker thread
 - **audio_player**: WASAPI audio output with external timer integration
@@ -56,6 +58,8 @@ mkv_player_v3/
 │   ├── mkv_stream_reader.cpp/.h     # MKV container parsing
 │   ├── hw_video_decoder.cpp/.h      # FFmpeg D3D11VA video decoding
 │   ├── rgb_video_decoder.cpp/.h     # Hardware RGB color space conversion
+│   ├── video_player.cpp/.h          # Timer-driven video playback with dependency injection
+│   ├── gui_player.cpp               # GUI application with D3D11 resource management
 │   ├── audio_decoder.cpp/.h         # Audio decoding
 │   ├── async_audio_decoder.cpp/.h   # Asynchronous audio decoding wrapper
 │   └── audio_player.cpp/.h          # WASAPI audio output player
@@ -76,14 +80,19 @@ mkv_player_v3/
 ### CMake Configuration
 - **C++ Standard**: C++20
 - **Target Platform**: Windows (D3D11VA requirement)
-- **Build Target**: `spike` - Test executable with all components
+- **Build Targets**: 
+  - `spike` - Test executable with all components
+  - `gui_player` - GUI application with video playback
 
 ### Build Commands
 
 #### WSL Environment
 ```bash
-# Run Windows batch script from WSL
+# Run tests
 cmd.exe /c "build.bat test"
+
+# Run GUI application  
+cmd.exe /c "build.bat gui"
 
 # Alternative: Use PowerShell
 powershell.exe -Command "& './build.bat' test"
@@ -125,16 +134,16 @@ powershell.exe -Command "& './build.bat' test"
 - ✅ **AudioPlayer**: WASAPI audio output with external timer integration
 - ✅ **HwVideoDecoder**: D3D11VA hardware video decoding with double buffering
 - ✅ **RgbVideoDecoder**: Hardware NV12→RGB color space conversion with double buffering
-- 🔧 **VideoPlayer**: Video display and timing management wrapper
-- 🔧 **GUI Application**: Windows message loop integration
+- ✅ **VideoPlayer**: Timer-driven video playback with dependency injection architecture
+- ✅ **GUI Application**: Windows message loop with D3D11 resource management
 - 🔧 **Audio/Video Sync**: Timestamp-based synchronization ready to implement
-- 🔧 **Rendering Pipeline**: Direct3D11 or OpenGL rendering of RGB textures
+- 🔧 **Real Video Input**: Replace fake signal with actual video decoder integration
 
 ### Testing Architecture Success
 - **Memory Reuse Tests**: Verify `frame[n] == frame[n+2]` pointer equality for both NV12 and RGB buffers
 - **Double Buffer Validation**: Confirm alternating frame allocation pattern for hardware textures
 - **Color Conversion Verification**: Hardware vs software conversion comparison tests
-- **Performance Benchmarks**: RGB conversion averaging 3-4ms per frame
+- **Offscreen Rendering Tests**: VideoPlayer works without window dependency using dependency injection
 - **Integration Tests**: Real MKV file processing with full hardware acceleration pipeline
 - **WSL Cross-Platform**: Windows build tools accessible from Linux environment
 
@@ -223,3 +232,49 @@ player.onTimer(current_time);  // Updates buffers and time
 - **Memory Efficiency**: Streaming buffer management, no large audio caches
 - **CPU Usage**: Efficient buffer checking, minimal CPU overhead
 - **Integration**: Seamless Windows message loop integration for GUI apps
+
+## Video Player Implementation
+
+### Architecture Overview
+The `VideoPlayer` provides a clean, dependency-injection based video playback solution with timer-driven frame updates and external D3D11 resource management.
+
+### Key Features
+- **Dependency Injection**: External D3D11 resources (device, context, render target) passed in
+- **Timer-Driven Updates**: `onTimer()` callback driven by external timer (Windows `WM_TIMER`)
+- **Frame Rate Conversion**: 24fps fake video signal converted to 60Hz display timing
+- **Test-Friendly Design**: Supports both windowed and offscreen rendering modes
+- **Clean Separation**: Video logic separated from GUI and resource management
+
+### Usage Pattern
+```cpp
+// GUI application creates D3D11 resources
+ID3D11Device* device = ...;
+ID3D11DeviceContext* context = ...;
+ID3D11RenderTargetView* rtv = ...;
+IDXGISwapChain* swap_chain = ...;  // optional for offscreen
+
+// Initialize VideoPlayer with external resources
+VideoPlayer player;
+bool success = player.initialize(device, context, rtv, swap_chain);
+
+// Timer-driven updates (called every 16ms from WM_TIMER)
+player.onTimer();  // Handles frame generation, rendering, and timing
+```
+
+### Design Philosophy
+- **External Resource Management**: VideoPlayer does not create or destroy D3D11 resources
+- **Single Responsibility**: Focuses only on video playback timing and rendering
+- **Testable Architecture**: Supports offscreen rendering for automated testing
+- **No Window Dependency**: Works with any D3D11 render target (window, texture, etc.)
+
+### Fake Video Signal
+- **Purpose**: Demonstrates frame rate conversion and timing without complex video decoding
+- **Pattern**: Red → Green → Blue color rotation at 24fps
+- **Conversion**: 24fps source converted to 60Hz display using frame repetition
+- **Future**: Ready to be replaced with real video decoder integration
+
+### Technical Implementation
+- **Frame Rate Converter**: Handles 24fps → 60Hz timing with accumulated time calculations
+- **Resource Safety**: Null pointer checks prevent crashes when uninitialized
+- **Performance**: Minimal overhead when properly initialized
+- **Testing**: Comprehensive offscreen rendering validation
