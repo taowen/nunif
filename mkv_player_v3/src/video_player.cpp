@@ -1,81 +1,6 @@
 #include "video_player.h"
+#include "async_rgb_video_decoder.h"
 #include <iostream>
-
-// 假的视频信号源 - 三色轮替24fps
-class FakeVideoSignal {
-public:
-    struct Frame {
-        float color[3];  // RGB
-        double timestamp;
-    };
-    
-    FakeVideoSignal() : frame_count_(0), start_time_(std::chrono::high_resolution_clock::now()) {}
-    
-    bool getNextFrame(Frame& frame) {
-        auto now = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration<double>(now - start_time_).count();
-        
-        // 24fps = 1/24 = 0.041667秒每帧
-        double frame_duration = 1.0 / 24.0;
-        int target_frame = static_cast<int>(elapsed / frame_duration);
-        
-        if (target_frame <= frame_count_) {
-            return false;  // 还没到下一帧时间
-        }
-        
-        frame_count_ = target_frame;
-        frame.timestamp = frame_count_ * frame_duration;
-        
-        // 三色轮替：红->绿->蓝->红...
-        int color_index = frame_count_ % 3;
-        frame.color[0] = (color_index == 0) ? 1.0f : 0.0f;  // R
-        frame.color[1] = (color_index == 1) ? 1.0f : 0.0f;  // G
-        frame.color[2] = (color_index == 2) ? 1.0f : 0.0f;  // B
-        
-        return true;
-    }
-    
-    int getFrameCount() const { return frame_count_; }
-    
-private:
-    int frame_count_;
-    std::chrono::high_resolution_clock::time_point start_time_;
-};
-
-// 帧率转换器 - 24fps到60Hz
-class FrameRateConverter {
-public:
-    FrameRateConverter() : frame_time_accumulator_(0.0), current_display_count_(0) {}
-    
-    bool shouldDisplayFrame(const FakeVideoSignal::Frame&) {
-        // 24fps → 60Hz: 每个视频帧需要显示 60/24 = 2.5 次
-        double source_fps = 24.0;
-        double target_fps = 60.0;
-        double frame_duration = 1.0 / source_fps;
-        double display_interval = 1.0 / target_fps;
-        
-        if (current_display_count_ == 0) {
-            // 新的视频帧，计算需要显示多少次
-            frame_time_accumulator_ += frame_duration;
-            required_display_count_ = static_cast<int>(frame_time_accumulator_ / display_interval + 0.5);
-            frame_time_accumulator_ -= required_display_count_ * display_interval;
-        }
-        
-        current_display_count_++;
-        
-        if (current_display_count_ >= required_display_count_) {
-            current_display_count_ = 0;
-            return false;  // 这个视频帧显示完了，需要新帧
-        }
-        
-        return true;  // 继续显示当前帧
-    }
-    
-private:
-    double frame_time_accumulator_;
-    int current_display_count_;
-    int required_display_count_;
-};
 
 // VideoPlayer实现
 VideoPlayer::VideoPlayer() 
@@ -83,9 +8,7 @@ VideoPlayer::VideoPlayer()
     , context_(nullptr)
     , swap_chain_(nullptr)
     , render_target_view_(nullptr)
-    , video_signal_(std::make_unique<FakeVideoSignal>())
-    , frame_converter_(std::make_unique<FrameRateConverter>())
-    , has_frame_(false)
+    , video_decoder_(std::make_unique<AsyncRgbVideoDecoder>())
     , render_count_(0)
     , last_stats_time_(std::chrono::high_resolution_clock::now())
 {
@@ -111,31 +34,33 @@ bool VideoPlayer::initialize(ID3D11Device* device,
     return true;
 }
 
+bool VideoPlayer::open(const std::string& filepath) {
+    if (!video_decoder_) {
+        return false;
+    }
+    
+    return video_decoder_->open(filepath);
+}
+
+void VideoPlayer::close() {
+    if (video_decoder_) {
+        video_decoder_->close();
+    }
+}
+
 void VideoPlayer::onTimer() {
     // 如果未初始化，直接返回
-    if (!video_signal_ || !frame_converter_ || !render_target_view_) {
+    if (!render_target_view_ || !video_decoder_) {
         return;
     }
     
-    // 检查是否需要新的视频帧
-    FakeVideoSignal::Frame temp_frame;
-    if (!has_frame_ || !frame_converter_->shouldDisplayFrame(temp_frame)) {
-        if (video_signal_->getNextFrame(temp_frame)) {
-            // 转换为VideoPlayer::Frame格式
-            current_frame_.color[0] = temp_frame.color[0];
-            current_frame_.color[1] = temp_frame.color[1];
-            current_frame_.color[2] = temp_frame.color[2];
-            current_frame_.timestamp = temp_frame.timestamp;
-            has_frame_ = true;
-            std::cout << "新视频帧 #" << video_signal_->getFrameCount() 
-                      << " - 颜色: RGB(" << current_frame_.color[0] << "," 
-                      << current_frame_.color[1] << "," << current_frame_.color[2] << ")" << std::endl;
-        }
-    }
-    
-    // 渲染当前帧
-    if (has_frame_) {
-        renderFrame(current_frame_);
+    // 获取视频帧（阻塞调用）
+    AsyncRgbVideoDecoder::DecodedFrame frame;
+    if (video_decoder_->readNextFrame(frame) && frame.is_valid) {
+        // 渲染真实视频纹理
+        renderVideoTexture(frame.rgb_frame.rgb_texture.Get(), frame.rgb_frame.rgb_srv.Get());
+        
+        std::cout << "渲染视频帧 #" << render_count_ << std::endl;
     }
     
     // 如果有swap_chain则Present到屏幕
@@ -153,16 +78,16 @@ void VideoPlayer::onTimer() {
     auto now = std::chrono::high_resolution_clock::now();
     auto stats_elapsed = std::chrono::duration<double>(now - last_stats_time_).count();
     if (stats_elapsed >= 1.0) {
-        std::cout << "渲染统计: " << render_count_ << " 帧/秒, 视频帧: " 
-                  << video_signal_->getFrameCount() << std::endl;
+        std::cout << "渲染统计: " << render_count_ << " 帧/秒" << std::endl;
         render_count_ = 0;
         last_stats_time_ = now;
     }
 }
 
-void VideoPlayer::renderFrame(const Frame& frame) {
-    // 清屏为指定颜色
-    float clear_color[4] = { frame.color[0], frame.color[1], frame.color[2], 1.0f };
+void VideoPlayer::renderVideoTexture(ID3D11Texture2D* texture, ID3D11ShaderResourceView* srv) {
+    // TODO: 实现真正的纹理渲染
+    // 目前先用简单的清屏替代
+    float clear_color[4] = { 0.0f, 1.0f, 0.0f, 1.0f };  // 绿色表示有视频帧
     context_->ClearRenderTargetView(render_target_view_, clear_color);
     context_->OMSetRenderTargets(1, &render_target_view_, nullptr);
 }

@@ -26,6 +26,7 @@ add_executable(spike
     src/async_audio_decoder.cpp
     src/hw_video_decoder.cpp
     src/rgb_video_decoder.cpp
+    src/async_rgb_video_decoder.cpp
     src/video_player.cpp
     tests/test_mkv_stream_reader.cpp
     tests/test_audio_decoder.cpp
@@ -73,6 +74,10 @@ copy_tensorrt_dlls(spike)
 # GUI Player executable
 add_executable(gui_player
     src/gui_player.cpp
+    src/mkv_stream_reader.cpp
+    src/hw_video_decoder.cpp
+    src/rgb_video_decoder.cpp
+    src/async_rgb_video_decoder.cpp
     src/video_player.cpp
 )
 

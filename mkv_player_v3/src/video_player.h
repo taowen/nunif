@@ -5,10 +5,10 @@
 #include <dxgi.h>
 #include <memory>
 #include <chrono>
+#include <string>
 
 // 前向声明
-class FakeVideoSignal;
-class FrameRateConverter;
+class AsyncRgbVideoDecoder;
 
 class VideoPlayer {
 public:
@@ -21,8 +21,14 @@ public:
                    ID3D11RenderTargetView* render_target_view,
                    IDXGISwapChain* swap_chain = nullptr);
     
+    // 打开MKV文件
+    bool open(const std::string& filepath);
+    
     // 定时器回调 - 由外部定时器调用
     void onTimer();
+    
+    // 关闭
+    void close();
     
 private:
     // DirectX11资源 - 外部传入，不负责释放
@@ -31,21 +37,12 @@ private:
     IDXGISwapChain* swap_chain_;  // 可选，测试时为nullptr
     ID3D11RenderTargetView* render_target_view_;
     
-    // 视频信号和帧率转换
-    std::unique_ptr<FakeVideoSignal> video_signal_;
-    std::unique_ptr<FrameRateConverter> frame_converter_;
-    
-    // 当前帧状态
-    struct Frame {
-        float color[3];
-        double timestamp;
-    };
-    Frame current_frame_;
-    bool has_frame_;
+    // 视频解码器 - 内部持有
+    std::unique_ptr<AsyncRgbVideoDecoder> video_decoder_;
     
     // 统计信息
     int render_count_;
     std::chrono::high_resolution_clock::time_point last_stats_time_;
     
-    void renderFrame(const Frame& frame);
+    void renderVideoTexture(ID3D11Texture2D* texture, ID3D11ShaderResourceView* srv);
 };
