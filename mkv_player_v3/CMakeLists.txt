@@ -67,3 +67,41 @@ copy_cuda_dlls(spike)
 include(cmake/FindTensorRT.cmake)
 target_link_tensorrt(spike)
 copy_tensorrt_dlls(spike)
+
+# GUI Player executable
+add_executable(gui_player
+    src/gui_player.cpp
+)
+
+# Apply Windows/MSVC compile options to gui_player
+target_compile_options(gui_player PRIVATE
+    /W4 /WX- /permissive- /std:c++latest
+)
+
+# Set Windows subsystem
+set_target_properties(gui_player PROPERTIES
+    WIN32_EXECUTABLE TRUE
+)
+
+# Link DirectX libraries to gui_player
+target_link_libraries(gui_player PRIVATE
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
+    ole32.lib
+    oleaut32.lib
+    user32.lib
+    gdi32.lib
+)
+
+# Link FFmpeg to gui_player
+target_link_ffmpeg(gui_player)
+copy_ffmpeg_dlls(gui_player)
+
+# Link CUDA to gui_player
+target_link_cuda(gui_player)
+copy_cuda_dlls(gui_player)
+
+# Link TensorRT to gui_player
+target_link_tensorrt(gui_player)
+copy_tensorrt_dlls(gui_player)

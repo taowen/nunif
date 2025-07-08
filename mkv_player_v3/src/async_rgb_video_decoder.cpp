@@ -13,9 +13,8 @@ AsyncRgbVideoDecoder::~AsyncRgbVideoDecoder() {
 }
 
 bool AsyncRgbVideoDecoder::open(const std::string& filepath) {
-    if (isOpen()) {
-        close();
-    }
+    // 如果已经打开，先关闭
+    close();
     
     if (!rgb_decoder_->open(filepath)) {
         return false;
@@ -26,7 +25,7 @@ bool AsyncRgbVideoDecoder::open(const std::string& filepath) {
 }
 
 bool AsyncRgbVideoDecoder::readNextFrame(DecodedFrame& frame) {
-    if (!isOpen()) {
+    if (!rgb_decoder_) {
         frame.is_valid = false;
         return false;
     }
@@ -34,7 +33,7 @@ bool AsyncRgbVideoDecoder::readNextFrame(DecodedFrame& frame) {
     // 等待下一帧准备好
     std::unique_lock<std::mutex> lock(frame_mutex_);
     frame_cv_.wait(lock, [this] { 
-        return next_frame_ready_.load() || isEOF() || should_stop_.load(); 
+        return next_frame_ready_.load() || should_stop_.load(); 
     });
     
     if (should_stop_.load()) {
@@ -42,7 +41,7 @@ bool AsyncRgbVideoDecoder::readNextFrame(DecodedFrame& frame) {
         return false;
     }
     
-    if (isEOF() && !next_frame_ready_.load()) {
+    if (!next_frame_ready_.load() && should_stop_.load()) {
         frame.is_valid = false;
         return false;
     }
@@ -66,16 +65,9 @@ void AsyncRgbVideoDecoder::close() {
     }
 }
 
-bool AsyncRgbVideoDecoder::isOpen() const {
-    return rgb_decoder_ && rgb_decoder_->isOpen();
-}
-
-bool AsyncRgbVideoDecoder::isEOF() const {
-    return rgb_decoder_ && rgb_decoder_->isEOF();
-}
 
 bool AsyncRgbVideoDecoder::seekToTime(double seconds) {
-    if (!isOpen()) {
+    if (!rgb_decoder_) {
         return false;
     }
     
@@ -101,7 +93,7 @@ bool AsyncRgbVideoDecoder::seekToTime(double seconds) {
 }
 
 bool AsyncRgbVideoDecoder::seekToFrame(int64_t frame_number) {
-    if (!isOpen()) {
+    if (!rgb_decoder_) {
         return false;
     }
     
@@ -188,10 +180,6 @@ void AsyncRgbVideoDecoder::stopWorkerThread() {
 
 bool AsyncRgbVideoDecoder::prepareNextFrame() {
     if (!rgb_decoder_) {
-        return false;
-    }
-    
-    if (!isOpen()) {
         return false;
     }
     

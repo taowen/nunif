@@ -28,8 +28,6 @@ public:
     
     void close();
     
-    bool isOpen() const;
-    bool isEOF() const;
     
     bool seekToTime(double seconds);
     bool seekToFrame(int64_t frame_number);

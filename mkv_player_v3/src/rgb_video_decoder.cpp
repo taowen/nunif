@@ -43,7 +43,7 @@ bool RgbVideoDecoder::open(const std::string& filepath) {
 }
 
 bool RgbVideoDecoder::readNextFrame(DecodedFrame& frame) {
-    if (!isOpen()) {
+    if (!hw_decoder_ || !hw_decoder_->isOpen()) {
         frame.is_valid = false;
         return false;
     }
@@ -300,13 +300,6 @@ bool RgbVideoDecoder::createRGBTexture(RgbFrame& rgb_frame, int width, int heigh
     return true;
 }
 
-bool RgbVideoDecoder::isOpen() const {
-    return hw_decoder_ && hw_decoder_->isOpen();
-}
-
-bool RgbVideoDecoder::isEOF() const {
-    return hw_decoder_ && hw_decoder_->isEOF();
-}
 
 bool RgbVideoDecoder::seekToTime(double seconds) {
     return hw_decoder_ && hw_decoder_->seekToTime(seconds);
