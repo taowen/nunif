@@ -71,6 +71,7 @@ copy_tensorrt_dlls(spike)
 # GUI Player executable
 add_executable(gui_player
     src/gui_player.cpp
+    src/video_player.cpp
 )
 
 # Apply Windows/MSVC compile options to gui_player
