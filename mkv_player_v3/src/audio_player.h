@@ -35,7 +35,7 @@ public:
     ~AudioPlayer();
 
     bool initialize();
-    bool loadFile(const std::string& filepath);
+    bool open(const std::string& filepath);
     
     bool play();
     bool pause();

@@ -207,7 +207,7 @@ The `AudioPlayer` provides a Windows-native audio output solution using WASAPI (
 ```cpp
 AudioPlayer player;
 player.initialize();
-player.loadFile("audio.mkv");
+player.open("audio.mkv");
 player.play();
 
 // In Windows message loop (WM_TIMER):

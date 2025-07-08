@@ -31,7 +31,7 @@ TEST_CASE("AudioPlayer Load File", "[AudioPlayer]") {
     AudioPlayer player;
     REQUIRE(player.initialize());
     
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     REQUIRE(player.getState() == AudioPlayer::State::Stopped);
     REQUIRE(player.getDuration() > 0.0);
 }
@@ -67,7 +67,7 @@ TEST_CASE("AudioPlayer State Management", "[AudioPlayer]") {
     
     AudioPlayer player;
     REQUIRE(player.initialize());
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     
     // 测试播放状态转换
     REQUIRE(player.getState() == AudioPlayer::State::Stopped);
@@ -101,7 +101,7 @@ TEST_CASE("AudioPlayer Timer Integration", "[AudioPlayer]") {
     
     AudioPlayer player;
     REQUIRE(player.initialize());
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     
     REQUIRE(player.play());
     
@@ -127,7 +127,7 @@ TEST_CASE("AudioPlayer Seek Test", "[AudioPlayer]") {
     
     AudioPlayer player;
     REQUIRE(player.initialize());
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     
     // 测试seek到不同位置
     REQUIRE(player.seekToTime(5.0));
@@ -161,7 +161,7 @@ TEST_CASE("AudioPlayer Multiple Play/Stop Cycles", "[AudioPlayer]") {
     
     AudioPlayer player;
     REQUIRE(player.initialize());
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     
     // 多次播放和停止
     for (int i = 0; i < 3; i++) {
@@ -179,7 +179,7 @@ TEST_CASE("AudioPlayer Error Handling", "[AudioPlayer]") {
     AudioPlayer player;
     
     // 测试未初始化时的操作
-    REQUIRE_FALSE(player.loadFile("nonexistent.mkv"));
+    REQUIRE_FALSE(player.open("nonexistent.mkv"));
     REQUIRE(player.getState() == AudioPlayer::State::Error);
     
     // 测试未加载文件时的操作
@@ -198,7 +198,7 @@ TEST_CASE("AudioPlayer Thread Safety", "[AudioPlayer]") {
     
     AudioPlayer player;
     REQUIRE(player.initialize());
-    REQUIRE(player.loadFile(test_file.string()));
+    REQUIRE(player.open(test_file.string()));
     
     // 快速连续的状态变化
     REQUIRE(player.play());

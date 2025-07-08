@@ -42,7 +42,7 @@ bool AudioPlayer::initialize() {
     return true;
 }
 
-bool AudioPlayer::loadFile(const std::string& filepath) {
+bool AudioPlayer::open(const std::string& filepath) {
     if (!decoder_->open(filepath)) {
         state_ = State::Error;
         return false;
