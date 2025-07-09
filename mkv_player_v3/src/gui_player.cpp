@@ -4,6 +4,7 @@
 #include <memory>
 #include <iostream>
 #include "video_player.h"
+#include "async_rgb_video_decoder.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -13,6 +14,7 @@
 
 // 全局变量
 std::unique_ptr<VideoPlayer> g_video_player;
+std::unique_ptr<AsyncRgbVideoDecoder> g_decoder;
 ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 IDXGISwapChain* g_swap_chain = nullptr;
