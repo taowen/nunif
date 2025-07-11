@@ -37,7 +37,7 @@ bool HwVideoDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 从显存池分配双缓冲frames
+    // From video memory pool allocate double-buffered frames
     hw_frames_[0] = av_frame_alloc();
     hw_frames_[1] = av_frame_alloc();
     if (!hw_frames_[0] || !hw_frames_[1]) {
@@ -46,7 +46,7 @@ bool HwVideoDecoder::open(const std::string& filepath) {
         return false;
     }
     
-    // 从硬件frames上下文获取显存
+    // Get memory from hardware frames context
     if (av_hwframe_get_buffer(hw_frames_ctx_, hw_frames_[0], 0) < 0 ||
         av_hwframe_get_buffer(hw_frames_ctx_, hw_frames_[1], 0) < 0) {
         std::cerr << "Failed to allocate hardware frame buffers" << std::endl;
@@ -158,7 +158,7 @@ bool HwVideoDecoder::initializeFFmpegHWDecoder() {
         return false;
     }
     
-    // 让FFmpeg自动创建和管理D3D11VA设备
+    // Let FFmpeg create the D3D11VA device
     int ret = av_hwdevice_ctx_create(&hw_device_ctx_, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
     if (ret < 0) {
         std::cerr << "Failed to create D3D11VA device context: " << ret << std::endl;

@@ -4,7 +4,25 @@
 #include <array>
 
 VideoPlayer::VideoPlayer() 
-    : device_(nullptr), context_(nullptr), video_width_(0), video_height_(0), has_new_frame_(false) {}
+    : device_(nullptr), context_(nullptr), video_width_(0), video_height_(0), has_new_frame_(false) {
+    initialize();
+}
+
+VideoPlayer::VideoPlayer(ID3D11Device* existing_device, ID3D11DeviceContext* existing_context)
+    : device_(nullptr), context_(nullptr) {
+    // Note: We no longer use existing_device and existing_context
+    // because the decoder will create its own D3D11 device
+    // This constructor is kept for compatibility but the device_ and context_ 
+    // will be set when decoder_->open() is called
+    initialize();
+}
+
+void VideoPlayer::initialize() {
+    // Initialize member variables
+    video_width_ = 0;
+    video_height_ = 0;
+    has_new_frame_ = false;
+}
 
 VideoPlayer::~VideoPlayer() {
     close();
@@ -18,10 +36,13 @@ bool VideoPlayer::open(const std::string& filepath) {
         return false;
     }
     
-    device_ = decoder_->getD3D11Device();
-    context_ = decoder_->getD3D11Context();
-    if (!device_ || !context_) {
-        return false;
+    // If we don't have a device, get it from the decoder
+    if (!device_) {
+        device_ = decoder_->getD3D11Device();
+        context_ = decoder_->getD3D11Context();
+        if (!device_ || !context_) {
+            return false;
+        }
     }
     
     // Read first frame to get dimensions
@@ -190,35 +211,41 @@ bool VideoPlayer::createQuad() {
     return true;
 }
 
-void VideoPlayer::renderFrame(const RgbVideoDecoder::RgbFrame& rgb_frame) {
-    if (!context_) return;
+HRESULT RenderRgbFrame(ID3D11DeviceContext* context, ID3D11RenderTargetView* rtv, const RgbVideoDecoder::RgbFrame& rgb_frame, int video_width, int video_height, ID3D11VertexShader* vertex_shader, ID3D11PixelShader* pixel_shader, ID3D11InputLayout* input_layout, ID3D11Buffer* vertex_buffer, ID3D11SamplerState* sampler_state) {
+    if (!context) return E_POINTER;
     
     FLOAT clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    context_->ClearRenderTargetView(render_target_view_.Get(), clear_color);
+    context->ClearRenderTargetView(rtv, clear_color);
     
-    context_->OMSetRenderTargets(1, render_target_view_.GetAddressOf(), nullptr);
+    context->OMSetRenderTargets(1, &rtv, nullptr);
     
     D3D11_VIEWPORT vp = {};
-    vp.Width = static_cast<float>(video_width_);
-    vp.Height = static_cast<float>(video_height_);
+    vp.Width = static_cast<float>(video_width);
+    vp.Height = static_cast<float>(video_height);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
-    context_->RSSetViewports(1, &vp);
+    context->RSSetViewports(1, &vp);
     
-    context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
-    context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
-    context_->IASetInputLayout(input_layout_.Get());
-    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    context->VSSetShader(vertex_shader, nullptr, 0);
+    context->PSSetShader(pixel_shader, nullptr, 0);
+    context->IASetInputLayout(input_layout);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     
     UINT stride = sizeof(float) * 5;
     UINT offset = 0;
-    context_->IASetVertexBuffers(0, 1, vertex_buffer_.GetAddressOf(), &stride, &offset);
+    context->IASetVertexBuffers(0, 1, &vertex_buffer, &stride, &offset);
     
-    context_->PSSetShaderResources(0, 1, rgb_frame.rgb_srv.GetAddressOf());
-    context_->PSSetSamplers(0, 1, sampler_state_.GetAddressOf());
+    context->PSSetShaderResources(0, 1, rgb_frame.rgb_srv.GetAddressOf());
+    context->PSSetSamplers(0, 1, &sampler_state);
     
-    context_->Draw(4, 0);
+    context->Draw(4, 0);
     
     ID3D11ShaderResourceView* null_srv = nullptr;
-    context_->PSSetShaderResources(0, 1, &null_srv);
+    context->PSSetShaderResources(0, 1, &null_srv);
+    
+    return S_OK;
+}
+
+void VideoPlayer::renderFrame(const RgbVideoDecoder::RgbFrame& rgb_frame) {
+    RenderRgbFrame(context_.Get(), render_target_view_.Get(), rgb_frame, video_width_, video_height_, vertex_shader_.Get(), pixel_shader_.Get(), input_layout_.Get(), vertex_buffer_.Get(), sampler_state_.Get());
 }

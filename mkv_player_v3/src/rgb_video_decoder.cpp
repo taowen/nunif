@@ -2,7 +2,7 @@
 #include <iostream>
 
 RgbVideoDecoder::RgbVideoDecoder() 
-    : hw_decoder_(std::make_unique<HwVideoDecoder>())
+    : hw_decoder_(nullptr)
     , d3d11_device_(nullptr)
     , d3d11_context_(nullptr)
     , video_processor_initialized_(false)
@@ -14,28 +14,22 @@ RgbVideoDecoder::~RgbVideoDecoder() {
 }
 
 bool RgbVideoDecoder::open(const std::string& filepath) {
-    close();
+    if (isOpen()) {
+        close();
+    }
     
-    // 1. 打开硬件解码器
+    hw_decoder_ = std::make_unique<HwVideoDecoder>();
     if (!hw_decoder_->open(filepath)) {
-        std::cerr << "Failed to open file with HwVideoDecoder: " << filepath << std::endl;
+        std::cerr << "Failed to open hardware decoder" << std::endl;
         return false;
     }
     
-    // 2. 获取D3D11设备和上下文
     d3d11_device_ = hw_decoder_->getD3D11Device();
     d3d11_context_ = hw_decoder_->getD3D11Context();
     
-    if (!d3d11_device_ || !d3d11_context_) {
-        std::cerr << "Failed to get D3D11 device from HwVideoDecoder" << std::endl;
-        hw_decoder_->close();
-        return false;
-    }
-    
-    // 3. 初始化Video Processor
     if (!initializeVideoProcessor()) {
-        std::cerr << "Failed to initialize Video Processor" << std::endl;
-        hw_decoder_->close();
+        std::cerr << "Failed to initialize video processor" << std::endl;
+        close();
         return false;
     }
     
@@ -318,6 +312,10 @@ void RgbVideoDecoder::close() {
     
     d3d11_device_ = nullptr;
     d3d11_context_ = nullptr;
+}
+
+bool RgbVideoDecoder::isOpen() const {
+    return hw_decoder_ && hw_decoder_->isOpen();
 }
 
 void RgbVideoDecoder::cleanup() {

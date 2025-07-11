@@ -52,6 +52,7 @@ public:
     bool readNextFrame(DecodedFrame& frame);
     
     void close();
+    bool isOpen() const;
     
     bool seekToTime(double seconds);
     bool seekToFrame(int64_t frame_number);

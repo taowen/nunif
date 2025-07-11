@@ -11,6 +11,7 @@ using Microsoft::WRL::ComPtr;
 class VideoPlayer {
 public:
     VideoPlayer();
+    VideoPlayer(ID3D11Device* existing_device, ID3D11DeviceContext* existing_context);
     ~VideoPlayer();
 
     bool open(const std::string& filepath);
@@ -20,14 +21,14 @@ public:
     
     // Getters for testing
     ID3D11Texture2D* getRenderTexture() const { return render_texture_.Get(); }
-    ID3D11Device* getDevice() const { return device_; }
-    ID3D11DeviceContext* getContext() const { return context_; }
+    ID3D11Device* getDevice() const { return device_.Get(); }
+    ID3D11DeviceContext* getContext() const { return context_.Get(); }
 
 private:
     std::unique_ptr<RgbVideoDecoder> decoder_;
     
-    ID3D11Device* device_;
-    ID3D11DeviceContext* context_;
+    ComPtr<ID3D11Device> device_;
+    ComPtr<ID3D11DeviceContext> context_;
     
     ComPtr<ID3D11Texture2D> render_texture_;
     ComPtr<ID3D11RenderTargetView> render_target_view_;
@@ -42,8 +43,13 @@ private:
     int video_height_;
     bool has_new_frame_;
     
+    void initialize();
+    bool initializeDevice();
     bool initializeShaders();
-    bool createRenderTarget(int width, int height);
     bool createQuad();
+    bool createRenderTarget(int width, int height);
     void renderFrame(const RgbVideoDecoder::RgbFrame& rgb_frame);
 };
+
+// Helper function for rendering
+HRESULT RenderRgbFrame(ID3D11DeviceContext* context, ID3D11RenderTargetView* rtv, const RgbVideoDecoder::RgbFrame& rgb_frame, int video_width, int video_height, ID3D11VertexShader* vertex_shader, ID3D11PixelShader* pixel_shader, ID3D11InputLayout* input_layout, ID3D11Buffer* vertex_buffer, ID3D11SamplerState* sampler_state);
