@@ -79,10 +79,11 @@ def load_and_compile_model(onnx_path, device):
     print(f"输出形状: {output_layer.partial_shape}")
     print(f"输出类型: {output_layer.element_type}")
     
-    # 如果是动态形状，设置固定形状
+    # 如果是动态形状，设置支持动态批次大小的形状
     if input_layer.partial_shape.is_dynamic:
-        print("检测到动态形状，设置为固定形状 [1,3,392,392]")
-        model.reshape([1, 3, 392, 392])
+        print("检测到动态形状，设置为支持动态批次的形状 [-1,3,392,392]")
+        # 使用 -1 表示动态批次大小，其他维度固定
+        model.reshape([-1, 3, 392, 392])
     
     # 编译模型到目标设备
     print(f"正在编译模型到 {device}...")
@@ -94,13 +95,13 @@ def load_and_compile_model(onnx_path, device):
         config = {
             "INFERENCE_PRECISION_HINT": "f16",  # 使用 FP16 精度
             "GPU_ENABLE_LOOP_UNROLLING": "YES",
-            "CACHE_DIR": "./openvino_cache"
+            "CACHE_DIR": "./cache"
         }
     elif device == 'NPU':
         # NPU 特定配置
         config = {
             "NPU_USE_NPUW": "YES",
-            "CACHE_DIR": "./openvino_cache"
+            "CACHE_DIR": "./cache"
         }
     
     compiled_model = core.compile_model(model, device, config)

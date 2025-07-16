@@ -212,3 +212,4 @@ cython_debug/
 
 # github copilot
 /.github/instructions
+/cache
