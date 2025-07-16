@@ -2096,3 +2096,228 @@ def find_param(args, depth_model, side_model):
                     output = process_image(im, args, depth_model, side_model)
                     output = to_pil_image(output)
                     output.save(output_filename)
+
+
+def args_to_cli_command(args):
+    """Convert args object to CLI command string."""
+    cmd_parts = ["python", "-m", "iw3"]
+    
+    # Add input/output paths
+    cmd_parts.extend(["-i", f'"{args.input}"'])
+    cmd_parts.extend(["-o", f'"{args.output}"'])
+    
+    # Add GPU settings
+    if len(args.gpu) == 1:
+        cmd_parts.extend(["-g", str(args.gpu[0])])
+    else:
+        cmd_parts.extend(["-g"] + [str(g) for g in args.gpu])
+    
+    # Add method and model settings
+    if args.method != "row_flow":
+        cmd_parts.extend(["--method", args.method])
+    
+    if args.depth_model != "ZoeD_Any_N":
+        cmd_parts.extend(["--depth-model", args.depth_model])
+    
+    # Add 3D effect parameters
+    if args.divergence != 2.0:
+        cmd_parts.extend(["-d", str(args.divergence)])
+    
+    if args.convergence != 0.5:
+        cmd_parts.extend(["-c", str(args.convergence)])
+    
+    if args.ipd_offset != 0:
+        cmd_parts.extend(["--ipd-offset", str(args.ipd_offset)])
+    
+    if args.synthetic_view != "both":
+        cmd_parts.extend(["--synthetic-view", args.synthetic_view])
+    
+    if args.foreground_scale != 0:
+        cmd_parts.extend(["--foreground-scale", str(args.foreground_scale)])
+    
+    # Add output format flags (only one should be true at a time for stereo formats)
+    stereo_format_set = False
+    if getattr(args, 'vr180', False):
+        cmd_parts.append("--vr180")
+        stereo_format_set = True
+    
+    if getattr(args, 'half_sbs', False) and not stereo_format_set:
+        cmd_parts.append("--half-sbs")
+        stereo_format_set = True
+    
+    if getattr(args, 'tb', False) and not stereo_format_set:
+        cmd_parts.append("--tb")
+        stereo_format_set = True
+    
+    if getattr(args, 'half_tb', False) and not stereo_format_set:
+        cmd_parts.append("--half-tb")
+        stereo_format_set = True
+    
+    if getattr(args, 'cross_eyed', False) and not stereo_format_set:
+        cmd_parts.append("--cross-eyed")
+        stereo_format_set = True
+    
+    if getattr(args, 'rgbd', False) and not stereo_format_set:
+        cmd_parts.append("--rgbd")
+        stereo_format_set = True
+    
+    if getattr(args, 'half_rgbd', False) and not stereo_format_set:
+        cmd_parts.append("--half-rgbd")
+        stereo_format_set = True
+    
+    if hasattr(args, 'anaglyph') and args.anaglyph is not None and not stereo_format_set:
+        if args.anaglyph == "dubois":
+            cmd_parts.append("--anaglyph")
+        else:
+            cmd_parts.extend(["--anaglyph", args.anaglyph])
+        stereo_format_set = True
+    
+    # Export options
+    if getattr(args, 'export', False):
+        cmd_parts.append("--export")
+    
+    if getattr(args, 'export_disparity', False):
+        cmd_parts.append("--export-disparity")
+    
+    if getattr(args, 'export_depth_only', False):
+        cmd_parts.append("--export-depth-only")
+    
+    if getattr(args, 'export_depth_fit', False):
+        cmd_parts.append("--export-depth-fit")
+    
+    if getattr(args, 'debug_depth', False):
+        cmd_parts.append("--debug-depth")
+    
+    # Add processing options
+    if getattr(args, 'preserve_screen_border', False):
+        cmd_parts.append("--preserve-screen-border")
+    
+    if args.batch_size != 2:
+        cmd_parts.extend(["--batch-size", str(args.batch_size)])
+    
+    if args.resolution is not None:
+        cmd_parts.extend(["--resolution", str(args.resolution)])
+    
+    if getattr(args, 'stereo_width', None) is not None:
+        cmd_parts.extend(["--stereo-width", str(args.stereo_width)])
+    
+    if args.max_workers != 0:
+        cmd_parts.extend(["--max-workers", str(args.max_workers)])
+    
+    if getattr(args, 'tta', False):
+        cmd_parts.append("--tta")
+    
+    if getattr(args, 'disable_amp', False):
+        cmd_parts.append("--disable-amp")
+    
+    if getattr(args, 'low_vram', False):
+        cmd_parts.append("--low-vram")
+    
+    if getattr(args, 'cuda_stream', False):
+        cmd_parts.append("--cuda-stream")
+    
+    if hasattr(args, 'compile') and getattr(args, 'compile', False):
+        cmd_parts.append("--compile")
+    
+    if getattr(args, 'depth_aa', False):
+        cmd_parts.append("--depth-aa")
+    
+    # Add image/video quality settings
+    if args.format != "png":
+        cmd_parts.extend(["-f", args.format])
+    
+    if args.max_fps != 30:
+        cmd_parts.extend(["--max-fps", str(args.max_fps)])
+    
+    if args.crf != 20:
+        cmd_parts.extend(["--crf", str(args.crf)])
+    
+    if getattr(args, 'video_format', 'mp4') != "mp4":
+        cmd_parts.extend(["--video-format", args.video_format])
+    
+    if hasattr(args, 'video_codec') and args.video_codec is not None:
+        cmd_parts.extend(["--video-codec", args.video_codec])
+    
+    if getattr(args, 'pix_fmt', 'yuv420p') != "yuv420p":
+        cmd_parts.extend(["--pix-fmt", args.pix_fmt])
+    
+    if getattr(args, 'colorspace', 'unspecified') != "unspecified":
+        cmd_parts.extend(["--colorspace", args.colorspace])
+    
+    if getattr(args, 'video_bitrate', '8M') != "8M":
+        cmd_parts.extend(["--video-bitrate", args.video_bitrate])
+    
+    if getattr(args, 'preset', 'ultrafast') != "ultrafast":
+        cmd_parts.extend(["--preset", args.preset])
+    
+    if hasattr(args, 'tune') and args.tune:
+        cmd_parts.extend(["--tune"] + args.tune)
+    
+    if hasattr(args, 'profile_level') and args.profile_level is not None:
+        cmd_parts.extend(["--profile-level", args.profile_level])
+    
+    # Add edge and temporal processing
+    if hasattr(args, 'edge_dilation') and args.edge_dilation and args.edge_dilation > 0:
+        cmd_parts.extend(["--edge-dilation", str(args.edge_dilation)])
+    
+    if getattr(args, 'ema_normalize', False):
+        cmd_parts.append("--ema-normalize")
+        # Only add ema_decay and ema_buffer if ema_normalize is enabled
+        if getattr(args, 'ema_decay', 0.75) != 0.75:
+            cmd_parts.extend(["--ema-decay", str(args.ema_decay)])
+        
+        if getattr(args, 'ema_buffer', 30) != 30:
+            cmd_parts.extend(["--ema-buffer", str(args.ema_buffer)])
+    
+    if getattr(args, 'scene_detect', False):
+        cmd_parts.append("--scene-detect")
+    
+    # Add geometry options
+    if hasattr(args, 'pad') and args.pad is not None:
+        cmd_parts.extend(["--pad", str(args.pad)])
+    
+    if getattr(args, 'pad_mode', 'tblr') != "tblr":
+        cmd_parts.extend(["--pad-mode", args.pad_mode])
+    
+    if getattr(args, 'rotate_left', False):
+        cmd_parts.append("--rotate-left")
+    
+    if getattr(args, 'rotate_right', False):
+        cmd_parts.append("--rotate-right")
+    
+    if getattr(args, 'disable_exif_transpose', False):
+        cmd_parts.append("--disable-exif-transpose")
+    
+    if hasattr(args, 'max_output_width') and args.max_output_width is not None:
+        cmd_parts.extend(["--max-output-width", str(args.max_output_width)])
+    
+    if hasattr(args, 'max_output_height') and args.max_output_height is not None:
+        cmd_parts.extend(["--max-output-height", str(args.max_output_height)])
+    
+    if getattr(args, 'keep_aspect_ratio', False):
+        cmd_parts.append("--keep-aspect-ratio")
+    
+    # Add processing control
+    if getattr(args, 'recursive', False):
+        cmd_parts.append("--recursive")
+    
+    if getattr(args, 'resume', False):
+        cmd_parts.append("--resume")
+    
+    if hasattr(args, 'start_time') and args.start_time is not None:
+        cmd_parts.extend(["--start-time", args.start_time])
+    
+    if hasattr(args, 'end_time') and args.end_time is not None:
+        cmd_parts.extend(["--end-time", args.end_time])
+    
+    if hasattr(args, 'vf') and args.vf:
+        cmd_parts.extend(["--vf", f'"{args.vf}"'])
+    
+    if hasattr(args, 'metadata') and args.metadata is not None:
+        cmd_parts.extend(["--metadata", args.metadata])
+    
+    # Always add --yes to avoid interactive prompts
+    if not hasattr(args, 'yes') or not getattr(args, 'yes', False):
+        cmd_parts.append("--yes")
+    
+    return " ".join(cmd_parts)

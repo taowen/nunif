@@ -15,6 +15,7 @@ import wx.lib.stattext as stattext
 from .utils import (
     create_parser, set_state_args, iw3_main,
     is_text, is_video, is_output_dir, is_yaml, make_output_filename,
+    args_to_cli_command,
 )
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
@@ -1132,6 +1133,14 @@ class MainFrame(wx.Frame):
             return
         if not self.confirm_overwrite(args):
             return
+
+        # Generate and print CLI command to console
+        cli_command = args_to_cli_command(args)
+        print("\n" + "="*80)
+        print("Equivalent CLI command:")
+        print("-"*80)
+        print(cli_command)
+        print("="*80 + "\n")
 
         self.btn_start.Disable()
         self.btn_cancel.Enable()
