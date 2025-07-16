@@ -62,19 +62,20 @@ def export_model_to_onnx():
     
     print(f"正在导出模型到 {onnx_path}...")
     
-    # 导出模型到 ONNX
+    # 导出模型到 ONNX - 支持动态维度
     torch.onnx.export(
         model.model,
         dummy_input,
         onnx_path,
         export_params=True,
-        opset_version=14,  # 使用 opset 14 支持 scaled_dot_product_attention
+        opset_version=17,  # 使用更高版本的 opset 以获得更好的支持
         do_constant_folding=True,
         input_names=['input'],
         output_names=['output'],
+        # 支持动态批次大小和尺寸（GPU等设备支持，NPU会在运行时reshape为固定形状）
         dynamic_axes={
             'input': {0: 'batch_size', 2: 'height', 3: 'width'},
-            'output': {0: 'batch_size', 2: 'height', 3: 'width'}
+            'output': {0: 'batch_size', 1: 'height', 2: 'width'}
         }
     )
     
