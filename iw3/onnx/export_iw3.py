@@ -4,6 +4,25 @@
 # generate left right eye using the delta
 # output left right eye rgb image to disk
 
+# This script exports an ONNX model equivalent to the following command line:
+# python -m iw3 -i input.png -o output.png --method row_flow_v3_sym --depth-model Distill_Any_S --divergence 2.0 --convergence 0.5 --half-sbs --resolution 392
+#
+# Fixed parameter mapping:
+# --method row_flow_v3_sym (uses ROW_FLOW_V3_SYM_URL model)
+# --depth-model Distill_Any_S (depth estimation model)
+# --divergence 2.0 (3D effect strength)
+# --convergence 0.5 (convergence plane distance)
+# --half-sbs (output half-width side-by-side stereo format)
+# --synthetic-view both (generate both left and right views)
+# --mapper default mapper config (foreground_scale=0.9, metric_depth=False)
+# --resolution 392 (depth model resolution)
+#
+# Key differences from command line:
+# 1. Outputs ONNX model file instead of processing images/videos
+# 2. Designed for RGBA input (4 channels) to match convert_color_thread output format
+# 3. All parameters are hardcoded, no command line customization
+# 4. Packages entire stereo vision pipeline into single ONNX file for deployment optimization
+
 import torch
 from torchvision.transforms import functional as TF
 from PIL import Image
